@@ -1,0 +1,15 @@
+# 构建与打包产物
+out/
+*.o
+*.dSYM/
+
+# 应用二进制（apps/mem_service/ 下构建产出）
+linqu_mem_service
+linqu_mem_service_host
+linqu_mem_service_core
+linqu_mem_service_qwen3
+linqu_mem_service_provider_*
+
+# Python
+__pycache__/
+*.pyc
