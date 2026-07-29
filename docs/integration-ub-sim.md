@@ -17,6 +17,10 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 - ub_sim 的 make/shell 变量 `MEM_SERVICE_ROOT` 指向本仓库检出，默认值为
   相对 `ub_sim/guest-linux/aarch64` 的兄弟检出 `../../../mem_service`
   （即两个仓库并排放在同一目录下时开箱即用）。
+- `ub_sim/guest-linux/aarch64/mem_service.lock` 固定允许消费的
+  `VERSION` 与 Git revision；`scripts/verify_mem_service_source.py` 在构建
+  initramfs、W5 bootstrap 和 app build matrix 前验证 checkout 完整、revision
+  精确匹配且工作树干净。升级流程必须先提交 mem_service，再更新 lock。
 - ub_sim 直接编译 `$(MEM_SERVICE_ROOT)/components/mem_service/*.c`，并加
   `-I$(MEM_SERVICE_ROOT)` 以获得 `common/`、`libs/obmm_queue/`、
   `kernel_ub/include/` 等 vendored 头文件。

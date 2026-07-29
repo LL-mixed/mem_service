@@ -47,6 +47,8 @@ Linux 主机上 fail-closed 属预期。产物输出到 `out/mem_service/`。
 - 下游契约：ub_sim 经 `MEM_SERVICE_ROOT` 按源码消费本仓库；ds4 经
   `MEM_SERVICE_PREFIX` 只消费安装 SDK。改动公开头、wire 协议、安装布局或
   CLI 表面时，先核对 `docs/integration-ub-sim.md` 与
-  `docs/integration-ds4.md` 中的契约描述并同步更新。
+  `docs/integration-ds4.md` 中的契约描述并同步更新。mem_service 变更必须
+  先形成干净提交，再更新 ub_sim 的 `mem_service.lock` revision；禁止让
+  ub_sim 构建消费未提交或未锁定的源码。
 - 文档语言：用户面向文档用中文，技术术语/代码/命令/文件名保持原文。
 - 不要做 git 提交，除非用户明确要求。
