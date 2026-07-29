@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "mem_service.h"
+#include "mem_service_object_contract.h"
 
 #define MEM_SERVICE_CLUSTER_MAX_RECORDS 1024
 
@@ -22,6 +23,11 @@ struct mem_service_cluster_payload {
     uint8_t record_pad[48];
     struct mem_service_record records[MEM_SERVICE_CLUSTER_MAX_RECORDS];
 };
+
+_Static_assert(
+    sizeof(struct mem_service_cluster_payload) <=
+        MEM_SERVICE_OBMM_DYNAMIC_ARENA_OFFSET,
+    "cluster metadata must not overlap the dynamic payload arena");
 
 struct mem_service_cluster_payload_header {
     uint32_t magic;

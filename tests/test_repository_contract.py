@@ -1,5 +1,7 @@
 import hashlib
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -53,6 +55,56 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertIsNotNone(recorded)
         self.assertEqual(aggregate, recorded.group(1))
+
+    def test_cluster_metadata_fits_before_dynamic_payload_arena(self):
+        source = """
+#include "components/mem_service/mem_service_cluster_payload_contract.h"
+
+int main(void)
+{
+    return sizeof(struct mem_service_cluster_payload) <=
+                   MEM_SERVICE_OBMM_DYNAMIC_ARENA_OFFSET
+               ? 0
+               : 1;
+}
+"""
+        with tempfile.TemporaryDirectory(
+            prefix="mem-service-layout-contract-"
+        ) as tmp:
+            source_path = Path(tmp) / "layout_contract.c"
+            binary_path = Path(tmp) / "layout_contract"
+            source_path.write_text(source)
+            compile_result = subprocess.run(
+                [
+                    "cc",
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(ROOT),
+                    str(source_path),
+                    "-o",
+                    str(binary_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                compile_result.returncode,
+                0,
+                compile_result.stdout + compile_result.stderr,
+            )
+            run_result = subprocess.run(
+                [str(binary_path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                run_result.returncode,
+                0,
+                run_result.stdout + run_result.stderr,
+            )
 
 
 if __name__ == "__main__":
