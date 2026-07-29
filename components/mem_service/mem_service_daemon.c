@@ -463,6 +463,14 @@ int mem_service_run_wire_fixture_check(void)
          14,
          0xfe23a8a2U},
         {"audit_log_request", MEM_SERVICE_WIRE_OP_AUDIT_LOG, "", 0, 0x00000000U},
+        {"materialize_object_request",
+         MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT,
+         "key=fixture-object\n"
+         "destination_path=/tmp/fixture-object.materialized\n"
+         "expected_version=3\n"
+         "expected_checksum=12345\n",
+         112,
+         0x20918255U},
     };
     const struct mem_service_wire_response_fixture response_fixtures[] = {
         {"health_response",
@@ -595,14 +603,20 @@ int mem_service_run_wire_fixture_check(void)
          MEM_SERVICE_WIRE_OP_METRICS,
          fixtures[16].payload,
          MEM_SERVICE_WIRE_STATUS_OK,
-         1338,
-         0x802c9350U},
+         1365,
+         0x5b56f6b0U},
         {"audit_log_response",
          MEM_SERVICE_WIRE_OP_AUDIT_LOG,
          fixtures[22].payload,
          MEM_SERVICE_WIRE_STATUS_OK,
          108,
          0xaac8ac2bU},
+        {"materialize_object_response",
+         MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT,
+         fixtures[23].payload,
+         MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+         0,
+         0x00000000U},
     };
     const struct mem_service_wire_payload_fixture *runtime_fixture = NULL;
     const struct mem_service_wire_payload_fixture *training_query_fixture = NULL;
@@ -684,6 +698,9 @@ int mem_service_run_wire_fixture_check(void)
     failures += mem_service_expect_u32("op_inspect_object",
                                        MEM_SERVICE_WIRE_OP_INSPECT_OBJECT,
                                        18);
+    failures += mem_service_expect_u32("op_materialize_object",
+                                       MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT,
+                                       19);
     failures += mem_service_expect_u32("op_register_prefix",
                                        MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY,
                                        32);
@@ -3537,6 +3554,219 @@ static enum mem_service_wire_status mem_service_validate_payload_block(
                                              record->object_payload_checksum);
         return MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH;
     }
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static int mem_service_copy_materialized_stream(FILE *source,
+                                                FILE *destination,
+                                                uint64_t *bytes,
+                                                uint64_t *checksum)
+{
+    uint8_t buffer[64U * 1024U];
+
+    for (;;) {
+        size_t got = fread(buffer, 1U, sizeof(buffer), source);
+        size_t i;
+
+        if (got > 0U && fwrite(buffer, 1U, got, destination) != got) {
+            return -1;
+        }
+        for (i = 0U; i < got; ++i) {
+            *checksum ^= buffer[i];
+            *checksum *= 1099511628211ULL;
+        }
+        *bytes += (uint64_t)got;
+        if (got < sizeof(buffer)) {
+            return ferror(source) ? -1 : 0;
+        }
+    }
+}
+
+static int mem_service_materialize_source_path(
+    const char *storage_root,
+    const struct mem_service_record *record,
+    char *path,
+    size_t path_len)
+{
+    char dir_path[512];
+
+    switch (record->object_payload_kind) {
+    case MEM_SERVICE_PAYLOAD_KIND_SEALED_LOCAL_BLOCK:
+        return mem_service_make_payload_block_path(storage_root,
+                                                   record->object_payload_checksum,
+                                                   path,
+                                                   path_len);
+    case MEM_SERVICE_PAYLOAD_KIND_TRANSPORT_LOOPBACK_BLOCK:
+        if (mem_service_make_transport_block_dir_path(
+                storage_root,
+                record->object_payload_checksum,
+                dir_path,
+                sizeof(dir_path)) != 0) {
+            return -1;
+        }
+        return mem_service_join_path(path,
+                                     path_len,
+                                     dir_path,
+                                     MEM_SERVICE_TRANSPORT_BLOCK_PAYLOAD);
+    case MEM_SERVICE_PAYLOAD_KIND_TRANSPORT_TCP_BLOCK:
+        if (mem_service_make_transport_tcp_block_dir_path(
+                storage_root,
+                record->object_payload_checksum,
+                dir_path,
+                sizeof(dir_path)) != 0) {
+            return -1;
+        }
+        return mem_service_join_path(path,
+                                     path_len,
+                                     dir_path,
+                                     MEM_SERVICE_TRANSPORT_BLOCK_PAYLOAD);
+    default:
+        return -1;
+    }
+}
+
+static enum mem_service_wire_status mem_service_materialize_payload_block(
+    const char *storage_root,
+    const struct mem_service_record *record,
+    const char *destination_path)
+{
+    char source_path[512];
+    char chunk_dir[512];
+    char chunk_path[512];
+    char tmp_path[768];
+    uint64_t actual_bytes = 0U;
+    uint64_t actual_checksum = 1469598103934665603ULL;
+    uint32_t chunk_count = 0U;
+    uint32_t chunk_index;
+    int fd;
+    FILE *destination;
+    enum mem_service_wire_status validation_status;
+
+    if (record == NULL || destination_path == NULL ||
+        destination_path[0] == '\0') {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    validation_status = mem_service_validate_payload_block(storage_root, record);
+    if (validation_status != MEM_SERVICE_WIRE_STATUS_OK) {
+        return validation_status;
+    }
+    if (!mem_service_record_has_payload_block(record)) {
+        return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
+    }
+    if (snprintf(tmp_path,
+                 sizeof(tmp_path),
+                 "%s.tmp.%ld.%" PRIu64,
+                 destination_path,
+                 (long)getpid(),
+                 ++mem_service_payload_tmp_seq) >= (int)sizeof(tmp_path)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return errno == EEXIST ? MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT
+                              : MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    destination = fdopen(fd, "wb");
+    if (destination == NULL) {
+        close(fd);
+        unlink(tmp_path);
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+
+    if (record->object_payload_kind ==
+        MEM_SERVICE_PAYLOAD_KIND_SEALED_CHUNKED_BLOCK) {
+        if (mem_service_make_chunked_block_dir_path(
+                storage_root,
+                record->object_payload_checksum,
+                chunk_dir,
+                sizeof(chunk_dir)) != 0) {
+            fclose(destination);
+            unlink(tmp_path);
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        }
+        chunk_count = (uint32_t)(
+            (record->object_backing_len + MEM_SERVICE_CHUNKED_BLOCK_SIZE - 1U) /
+            MEM_SERVICE_CHUNKED_BLOCK_SIZE);
+        for (chunk_index = 0U; chunk_index < chunk_count; ++chunk_index) {
+            FILE *source;
+
+            if (mem_service_make_chunked_block_chunk_path(
+                    chunk_dir,
+                    chunk_index,
+                    chunk_path,
+                    sizeof(chunk_path)) != 0) {
+                fclose(destination);
+                unlink(tmp_path);
+                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+            }
+            source = fopen(chunk_path, "rb");
+            if (source == NULL ||
+                mem_service_copy_materialized_stream(source,
+                                                     destination,
+                                                     &actual_bytes,
+                                                     &actual_checksum) != 0) {
+                if (source != NULL) {
+                    fclose(source);
+                }
+                fclose(destination);
+                unlink(tmp_path);
+                return MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH;
+            }
+            fclose(source);
+        }
+    } else {
+        FILE *source;
+
+        if (mem_service_materialize_source_path(storage_root,
+                                                record,
+                                                source_path,
+                                                sizeof(source_path)) != 0) {
+            fclose(destination);
+            unlink(tmp_path);
+            return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
+        }
+        source = fopen(source_path, "rb");
+        if (source == NULL ||
+            mem_service_copy_materialized_stream(source,
+                                                 destination,
+                                                 &actual_bytes,
+                                                 &actual_checksum) != 0) {
+            if (source != NULL) {
+                fclose(source);
+            }
+            fclose(destination);
+            unlink(tmp_path);
+            return MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH;
+        }
+        fclose(source);
+    }
+    {
+        bool write_ok = fflush(destination) == 0 &&
+                        fsync(fileno(destination)) == 0;
+
+        if (fclose(destination) != 0) {
+            write_ok = false;
+        }
+        if (!write_ok) {
+            unlink(tmp_path);
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        }
+    }
+    if (actual_bytes != record->object_backing_len ||
+        actual_checksum != record->object_payload_checksum) {
+        unlink(tmp_path);
+        (void)mem_service_validate_payload_block(storage_root, record);
+        return MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH;
+    }
+    if (link(tmp_path, destination_path) != 0) {
+        enum mem_service_wire_status status =
+            errno == EEXIST ? MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT
+                            : MEM_SERVICE_WIRE_STATUS_INTERNAL;
+
+        unlink(tmp_path);
+        return status;
+    }
+    unlink(tmp_path);
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
@@ -8408,6 +8638,53 @@ static enum mem_service_wire_status mem_service_inspect_object(struct mem_servic
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+static enum mem_service_wire_status mem_service_materialize_object(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len,
+    const char *storage_root)
+{
+    struct mem_service_record record;
+    char key[sizeof(record.key)];
+    char destination_path[512];
+    uint64_t expected_version;
+    uint64_t expected_checksum;
+    enum mem_service_wire_status status;
+
+    if (!mem_service_payload_get_string(payload, "key", key, sizeof(key)) ||
+        !mem_service_payload_get_string(payload,
+                                        "destination_path",
+                                        destination_path,
+                                        sizeof(destination_path))) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    if (mem_service_get_record(svc, key, &record) != 0 ||
+        record.kind != MEM_SERVICE_RECORD_KVCACHE_OBJECT) {
+        return MEM_SERVICE_WIRE_STATUS_NOT_FOUND;
+    }
+    if (mem_service_payload_get_u64_checked(payload,
+                                            "expected_version",
+                                            &expected_version) &&
+        record.version != expected_version) {
+        return MEM_SERVICE_WIRE_STATUS_STALE_REF;
+    }
+    if (mem_service_payload_get_u64_checked(payload,
+                                            "expected_checksum",
+                                            &expected_checksum) &&
+        record.object_payload_checksum != expected_checksum) {
+        return MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH;
+    }
+    status = mem_service_materialize_payload_block(storage_root,
+                                                   &record,
+                                                   destination_path);
+    if (status != MEM_SERVICE_WIRE_STATUS_OK) {
+        return status;
+    }
+    mem_service_format_record_payload(&record, response, response_len);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
 static void mem_service_set_optional_record_string(const char *payload,
                                                    const char *field_name,
                                                    char *out,
@@ -9557,6 +9834,7 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              "put_object_count=%" PRIu64 "\n"
              "get_object_count=%" PRIu64 "\n"
              "inspect_object_count=%" PRIu64 "\n"
+             "materialize_object_count=%" PRIu64 "\n"
              "get_object_hit_count=%" PRIu64 "\n"
              "get_object_miss_count=%" PRIu64 "\n"
              "register_prefix_count=%" PRIu64 "\n"
@@ -9612,6 +9890,7 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              m->put_object_count,
              m->get_object_count,
              m->inspect_object_count,
+             m->materialize_object_count,
              m->get_object_hit_count,
              m->get_object_miss_count,
              m->register_prefix_count,
@@ -10118,6 +10397,12 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
                                           response,
                                           response_len,
                                           storage_root);
+    case MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT:
+        return mem_service_materialize_object(svc,
+                                              payload,
+                                              response,
+                                              response_len,
+                                              storage_root);
     case MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY:
         return mem_service_register_prefix(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_LOOKUP_PREFIX_ENTRY:
@@ -10309,6 +10594,9 @@ static void mem_service_record_operation_metrics(
         break;
     case MEM_SERVICE_WIRE_OP_INSPECT_OBJECT:
         metrics->inspect_object_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT:
+        metrics->materialize_object_count += 1U;
         break;
     case MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY:
         metrics->register_prefix_count += 1U;

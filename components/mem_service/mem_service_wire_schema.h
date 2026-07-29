@@ -103,6 +103,14 @@ static const struct mem_service_wire_payload_field
 };
 
 static const struct mem_service_wire_payload_field
+    mem_service_wire_object_materialize_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"destination_path", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"expected_version", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+        {"expected_checksum", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+};
+
+static const struct mem_service_wire_payload_field
     mem_service_wire_snapshot_page_fields[] = {
         {"start_index", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
         {"max_records", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
@@ -301,6 +309,15 @@ static const struct mem_service_wire_operation_schema
          mem_service_wire_object_inspect_fields,
          sizeof(mem_service_wire_object_inspect_fields) /
              sizeof(mem_service_wire_object_inspect_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT,
+         "materialize_object",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_object_materialize_fields,
+         sizeof(mem_service_wire_object_materialize_fields) /
+             sizeof(mem_service_wire_object_materialize_fields[0]),
          NULL,
          0},
         {MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY,

@@ -118,6 +118,7 @@ struct mem_service_metrics {
     uint64_t put_object_count;
     uint64_t get_object_count;
     uint64_t inspect_object_count;
+    uint64_t materialize_object_count;
     uint64_t get_object_hit_count;
     uint64_t get_object_miss_count;
     uint64_t register_prefix_count;

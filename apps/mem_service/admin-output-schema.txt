@@ -12,6 +12,7 @@ admin_command=metrics operation=metrics response=text-kv
 admin_command=metrics-export operation=metrics response=prometheus-text
 admin_command=audit-log operation=audit_log response=text-kv-records
 admin_command=inspect-object operation=inspect_object response=text-kv
+admin_command=materialize-object operation=materialize_object response=text-kv
 admin_command=export-snapshot operation=export_snapshot response=snapshot-text
 admin_command=export-snapshot-page operation=export_snapshot_page response=snapshot-page-text
 admin_command=export-snapshot-to operation=export_snapshot_page response=local-file-summary
@@ -65,6 +66,7 @@ metric_field=restore_snapshot_page_count type=counter
 metric_field=put_object_count type=counter
 metric_field=get_object_count type=counter
 metric_field=inspect_object_count type=counter
+metric_field=materialize_object_count type=counter
 metric_field=get_object_hit_count type=counter
 metric_field=get_object_miss_count type=counter
 metric_field=register_prefix_count type=counter

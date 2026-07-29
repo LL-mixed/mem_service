@@ -1,8 +1,9 @@
 # ds4 使用侧适配手册
 
 本文面向 `ds4`（3 节点 PP 推理，C/CUDA）的维护者：说明 ds4 如何消费
-`mem_service` **安装后的 SDK** 作为 activation payload 传输层。ub_sim 的源码
-消费方式见 [integration-ub-sim.md](integration-ub-sim.md)。
+`mem_service` **安装后的 SDK**，既作为 activation payload 传输层，也作为
+分布式 prefix/KV checkpoint 的对象所有者。ub_sim 的源码消费方式见
+[integration-ub-sim.md](integration-ub-sim.md)。
 
 > 路径约定：`<mem_service>` 指本仓库检出根目录，`<ds4>` 指 ds4 检出根目录，
 > `<prefix>` 指 mem_service 的安装前缀。
@@ -15,10 +16,10 @@ ds4 不编译本仓库源码树，只消费 `make install` 产出的安装布局
 - 头文件：`<prefix>/include/lingqu/mem_service/`（`mem_service_provider.h`、
   `mem_service_provider_roce.h`、`mem_service_provider_tcp.h` 等）；
 - 源码 SDK：`<prefix>/src/lingqu/mem_service/` 下的
+  `mem_service_client.c`、`mem_service_wire_client.c`、
   `mem_service_provider.c`、`mem_service_provider_roce.c`、
-  `mem_service_provider_tcp.c` —— ds4 把这三个源文件直接编译进自己的
-  二进制（`mem_service_provider_sdk.o`、`mem_service_provider_roce_sdk.o`、
-  `mem_service_provider_tcp_sdk.o`）；
+  `mem_service_provider_tcp.c` —— ds4 把 client/wire client 与三个 provider
+  源文件直接编译进自己的二进制；
 - 链接：`-lrdmacm -libverbs`（RoCE provider 依赖，Linux）。
 
 等价的机器可读入口是安装布局中的 `lib/pkgconfig/lingqu-mem-service.pc`：
@@ -146,7 +147,30 @@ checksum 的对端传输验证（`data_plane_ready`）之前不会标记就绪�
 provider 是显式选择，TCP 永不是 RoCE 失败时的自动回退——RoCE 建链失败
 会直接报错，便于暴露环境问题而不是静默降级。
 
-## 7. 排错
+## 7. 分布式 prefix/KV checkpoint
+
+DS4 的 coordinator 负责 checkpoint transaction：
+
+1. 为一次 checkpoint 分配不可复用的 `generation`；
+2. 从三个 PP stage 收集 layer shard，并验证 layer range 连续、无重叠、
+   完整覆盖模型全部 layer；
+3. 以 generation-scoped object key 把三个 shard 写入 mem_service；每个对象
+   都绑定同一 model、token hash、token count、generation、layer range、
+   payload bytes 与 checksum；
+4. 只有三个对象都可按 version/checksum 读回时，才发布 manifest object；
+5. prefix lookup 只指向最后发布的 manifest，未完成 generation 永远不可见。
+
+恢复时必须先解析 manifest，再逐一按 version/checksum 查询并 materialize
+三个对象。任何缺失、跨 generation、layer coverage 不完整或 checksum
+不一致都使整次恢复 fail-closed；DS4 必须丢弃已经装入的部分 shard，不得继续
+使用混合 generation 的 KV。
+
+大 payload 不通过 4 KiB text-kv wire 内联返回。SDK 的
+`mem_service_client_materialize_object()` 让 daemon 将已校验对象原子写入一个
+不存在的 caller 路径；目标已存在时拒绝覆盖。该接口只改变对象内容的交付
+方式，不把模型、PP 拓扑或 RoCE 语义带入 mem_service。
+
+## 8. 排错
 
 | 症状 | 排查 |
 | --- | --- |

@@ -126,8 +126,10 @@ linqu_mem_service_host status --connect unix:/tmp/ms.sock
 ### 3.2 数据面 CLI（节选）
 
 ```bash
-linqu_mem_service put-object   --connect unix:/tmp/ms.sock --key <k> [--payload-inline ...|--payload-path ...]
+linqu_mem_service put-object   --connect unix:/tmp/ms.sock --key <k> [--payload-inline ...|--payload-file ...]
 linqu_mem_service get-object   --connect unix:/tmp/ms.sock --key <k>
+linqu_mem_service materialize-object --connect unix:/tmp/ms.sock --key <k> --to <new-path> \
+    [--expected-version <n>] [--expected-checksum <n>]
 linqu_mem_service register-prefix / lookup-prefix
 linqu_mem_service publish-kv / resolve-kv            # resolve 可用 --key 或 --block-hash
 linqu_mem_service publish-runtime-handoff / resolve-runtime-handoff
@@ -150,6 +152,7 @@ admin 命令（guest/host 二进制相同表面）：
 | `metrics` / `metrics-export` | text-kv 指标 / Prometheus 文本格式 |
 | `audit-log` | 审计环（`audit_begin`/`audit_end` 分隔，含 sequence、operation、status、idempotency 等字段） |
 | `inspect-object` | 单对象检查 |
+| `materialize-object` | 按 version/checksum 校验后原子恢复对象 payload，拒绝覆盖已有目标 |
 | `export-snapshot` / `export-snapshot-page` / `export-snapshot-to` | 快照导出（整份/分页/落盘） |
 | `restore-snapshot` / `restore-snapshot-page` | 快照恢复（事务化 staged commit） |
 

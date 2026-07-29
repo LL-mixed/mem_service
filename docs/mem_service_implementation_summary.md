@@ -79,7 +79,7 @@ linqu_mem_service audit-log --connect unix:<path>
 业务对象 CLI：
 
 ```text
-put-object / get-object / inspect-object
+put-object / get-object / inspect-object / materialize-object
 register-prefix / lookup-prefix
 publish-kv / resolve-kv
 publish-runtime-handoff / resolve-runtime-handoff

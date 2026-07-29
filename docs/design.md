@@ -75,10 +75,11 @@ linqu_mem_service_host serve（宿主机，libexec 安装）
   operation ID、status ID、payload 长度与 checksum；`wire_version=1`，
   `wire_schema_version=1`，payload 当前为 `text-kv`（typed binary 预留为
   `typed-binary-v1` 方向）。
-- 23 个 operation（`wire-schema.txt` 中的 `operation=<name>:<id>`）：admin 面
+- 24 个 operation（`wire-schema.txt` 中的 `operation=<name>:<id>`）：admin 面
   `health:1`、`ready:2`、`status:3`、`list_records:4`、`metrics:5`、
   `export_snapshot:6/7(page)`、`restore_snapshot:8/9(page)`、`audit_log:10`；
   数据面 `put_object:16`、`get_object:17`、`inspect_object:18`、
+  `materialize_object:19`、
   `register_prefix_entry:32`、`lookup_prefix_entry:33`、
   `publish_kv_segment:48`、`resolve_kv_segment:49`、
   `publish_runtime_handoff:64`、`resolve_runtime_handoff:65`、
@@ -98,7 +99,7 @@ linqu_mem_service_host serve（宿主机，libexec 安装）
 
 | manifest | 生成命令 | 冻结内容 |
 | --- | --- | --- |
-| `wire-schema.txt` | `linqu_mem_service wire-schema` | 23 个 operation、164 个字段、selector（如 `resolve_kv_segment` 的 `key`/`block_hash` 二选一） |
+| `wire-schema.txt` | `linqu_mem_service wire-schema` | 24 个 operation、168 个字段、selector（如 `resolve_kv_segment` 的 `key`/`block_hash` 二选一） |
 | `admin-output-schema.txt` | `admin-output-schema` | status/list-records/metrics/audit/snapshot/restore 输出契约、Prometheus 前缀 `lingqu_mem_service_` 与类型、fail-closed 状态字段 |
 | `api-abi-policy.txt` | `api-abi-policy` | client API/ABI v1、record ABI size=808、wire/header/schema 版本、old/new 与升级回滚策略 |
 | `upgrade-rollback-policy.txt` | `upgrade-rollback-policy` | current-version-only 准入、同版本重启/恢复门禁、old-server runtime binary 认证状态 |

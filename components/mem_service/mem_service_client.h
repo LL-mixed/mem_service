@@ -258,6 +258,16 @@ int mem_service_client_inspect_object(const struct mem_service_client *client,
                                       const char *key,
                                       struct mem_service_client_record *record_out,
                                       enum mem_service_wire_status *status_out);
+int mem_service_client_materialize_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *destination_path,
+    bool has_expected_version,
+    uint64_t expected_version,
+    bool has_expected_checksum,
+    uint64_t expected_checksum,
+    struct mem_service_client_record *record_out,
+    enum mem_service_wire_status *status_out);
 
 int mem_service_client_register_prefix_entry(
     const struct mem_service_client *client,

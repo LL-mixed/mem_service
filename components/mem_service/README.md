@@ -28,6 +28,12 @@ a Qwen3 adapter inspect build:
   serving/pretraining clients can link this unit plus
   `mem_service_wire_client.c` without linking the daemon, record core, or Qwen3
   adapter.
+- The typed client also exposes `mem_service_client_materialize_object()` for
+  large sealed payloads. The daemon validates the recorded version, checksum,
+  and backing block, writes to a new caller-selected path, and never overwrites
+  an existing destination. This keeps large object bytes out of the 4 KiB
+  text-kv response envelope while allowing serving runtimes to restore objects
+  owned by mem_service.
 - `apps/mem_service/examples/mem_service_serving_example.c` is the installable
   serving SDK smoke client. It uses only the typed client API to publish/query
   prefix, KV, runtime handoff, and execution artifacts through a standalone
@@ -462,8 +468,8 @@ Keep the implementation layers separated:
   explicitly and use idempotency keys for all mutating calls. The
   `wire-fixtures`
   CLI freezes the current envelope layout, operation/status IDs, checksum
-  values, header initialization behavior, 23 canonical request payload
-  fixtures, 23 real handler response fixtures for the current RPC surface, and
+  values, header initialization behavior, 24 canonical request payload
+  fixtures, 24 real handler response fixtures for the current RPC surface, and
   the current request schema checks, including minimal in-process idempotency
   replay/conflict behavior.
   The `wire-schema` CLI emits the checked-in release schema manifest, and
@@ -500,7 +506,7 @@ Keep the implementation layers separated:
   behavior,
   `compat-baseline-v1` freezes the current old-v1-client to current-server
   baseline, and `compat-old-new-matrix` freezes a v1 old/new schema-profile
-  matrix for all 23 operations. `api-abi-policy` freezes the current client
+  matrix for all 24 operations. `api-abi-policy` freezes the current client
   API/ABI version, public record ABI size, and old/new/upgrade/rollback policy.
   `admin-output-schema` freezes the current minimal admin output contract for
   deployed collectors and admin clients.

@@ -25,20 +25,20 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 12456U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x14a081c9U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 23U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 164U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 12788U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xb1f00fc6U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 24U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 168U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
 #define MEM_SERVICE_DEPLOYMENT_SMOKE_VERSION 1U
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_VERSION 1U
-#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 6925U
-#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0xef4c77f8U
+#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7055U
+#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2143U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x096e86d0U
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xcb1aae94U
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -51,7 +51,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xcd341bd9U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xf6446e36U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -62,12 +62,12 @@
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0xd0cc1392U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0xe6d3e50cU
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x71077a46U
 #define MEM_SERVICE_COMPAT_MATRIX_STATUS_COUNT 11U
 #define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_LEN 1252U
-#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0xb93a31bcU
+#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x30539fd6U
 #define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_LEN 1734U
-#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0xbc0e044dU
+#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x2bcca939U
 #define MEM_SERVICE_CLI_STORE_MAGIC "mem_service_store_v1"
 
 static void usage(const char *argv0)
@@ -120,7 +120,7 @@ static void usage(const char *argv0)
     printf(" [health|ready|status|list-records|metrics|metrics-export|audit-log|export-snapshot|export-snapshot-page|export-snapshot-to|restore-snapshot [--connect unix:%s] [--timeout-ms <ms>] [--max-attempts <n>] [--retry-backoff-ms <ms>] [--retry-timeouts]]",
            MEM_SERVICE_DEFAULT_UNIX_SOCKET);
     printf(" [metrics-export accepts --format prometheus-text]");
-    printf(" [put-object|get-object|inspect-object|register-prefix|lookup-prefix|publish-kv|resolve-kv]");
+    printf(" [put-object|get-object|inspect-object|materialize-object|register-prefix|lookup-prefix|publish-kv|resolve-kv]");
     printf(" [publish-runtime-handoff|resolve-runtime-handoff]");
     printf(" [register-execution-artifact|query-execution-artifact]");
     printf(" [register-training-artifact|query-training-artifact]");
@@ -129,6 +129,7 @@ static void usage(const char *argv0)
     printf(" [object/artifact mutating commands accept --payload-file <path>]");
     printf(" [put-object accepts --backend ub-ssd-gsva-v1 --backend-write 1 --backend-buffer-gsva-base <u64> --backend-buffer-key-segment-id <u64>]");
     printf(" [get-object accepts --backend-read 1 with the same --backend-buffer-* GSVA descriptor fields]");
+    printf(" [materialize-object --key <key> --to <new-path> [--expected-version <u64>] [--expected-checksum <u64>]]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -2357,7 +2358,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "service_version=" MEM_SERVICE_RELEASE_VERSION "\n") == NULL ||
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
-        strstr(manifest, "wire_schema_manifest_checksum=0x14a081c9\n") == NULL ||
+        strstr(manifest, "wire_schema_manifest_checksum=0xb1f00fc6\n") == NULL ||
         strstr(manifest, "api_abi_policy_checksum=0xd0cc1392\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
@@ -5421,6 +5422,8 @@ static int run_release_manifest(void)
     printf("operation=put_object:%u\n", MEM_SERVICE_WIRE_OP_PUT_OBJECT);
     printf("operation=get_object:%u\n", MEM_SERVICE_WIRE_OP_GET_OBJECT);
     printf("operation=inspect_object:%u\n", MEM_SERVICE_WIRE_OP_INSPECT_OBJECT);
+    printf("operation=materialize_object:%u\n",
+           MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT);
     printf("operation=register_prefix_entry:%u\n",
            MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY);
     printf("operation=lookup_prefix_entry:%u\n",
@@ -5600,7 +5603,7 @@ static int run_release_fixture_check(void)
            "metrics_scrape_paths=1 "
            "client_retry_policies=1 "
            "client_api_profiles=2 compat_artifacts=3 "
-           "operations=23 statuses=11 "
+           "operations=24 statuses=11 "
            "schema_manifest_len=%u schema_manifest_checksum=0x%08x "
            "api_abi_policy_len=%u api_abi_policy_checksum=0x%08x "
            "admin_output_schema_len=%u "
@@ -7372,6 +7375,10 @@ static int render_admin_output_schema(char *schema, size_t schema_len, size_t *u
         append_wire_schema_line(schema,
                                 schema_len,
                                 &used,
+                                "admin_command=materialize-object operation=materialize_object response=text-kv\n") != 0 ||
+        append_wire_schema_line(schema,
+                                schema_len,
+                                &used,
                                 "admin_command=export-snapshot operation=export_snapshot response=snapshot-text\n") != 0 ||
         append_wire_schema_line(schema,
                                 schema_len,
@@ -7509,6 +7516,7 @@ static int render_admin_output_schema(char *schema, size_t schema_len, size_t *u
     APPEND_COUNTER_METRIC("put_object_count");
     APPEND_COUNTER_METRIC("get_object_count");
     APPEND_COUNTER_METRIC("inspect_object_count");
+    APPEND_COUNTER_METRIC("materialize_object_count");
     APPEND_COUNTER_METRIC("get_object_hit_count");
     APPEND_COUNTER_METRIC("get_object_miss_count");
     APPEND_COUNTER_METRIC("register_prefix_count");
@@ -8759,6 +8767,43 @@ static int run_inspect_object(int argc, char **argv)
                                       payload);
 }
 
+static int run_materialize_object(int argc, char **argv)
+{
+    char payload[768] = "";
+
+    if (append_required_payload_field(payload,
+                                      sizeof(payload),
+                                      argc,
+                                      argv,
+                                      "--key",
+                                      "key") != 0 ||
+        append_required_payload_field(payload,
+                                      sizeof(payload),
+                                      argc,
+                                      argv,
+                                      "--to",
+                                      "destination_path") != 0 ||
+        append_optional_payload_field(payload,
+                                      sizeof(payload),
+                                      argc,
+                                      argv,
+                                      "--expected-version",
+                                      "expected_version") != 0 ||
+        append_optional_payload_field(payload,
+                                      sizeof(payload),
+                                      argc,
+                                      argv,
+                                      "--expected-checksum",
+                                      "expected_checksum") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_MATERIALIZE_OBJECT,
+                                      "materialize-object",
+                                      payload);
+}
+
 static int run_export_snapshot_page(int argc, char **argv)
 {
     char payload[160] = "";
@@ -9968,6 +10013,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "inspect-object") == 0) {
         return run_inspect_object(argc, argv);
+    }
+    if (strcmp(argv[1], "materialize-object") == 0) {
+        return run_materialize_object(argc, argv);
     }
     if (strcmp(argv[1], "register-prefix") == 0) {
         return run_register_prefix(argc, argv);
