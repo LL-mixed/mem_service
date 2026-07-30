@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -216,7 +216,7 @@ REMOTE_TRANSPORT_BUNDLE_MANIFEST="$REMOTE_TRANSPORT_BUNDLE_ROOT/remote-transport
 REMOTE_TRANSPORT_BUNDLE_VERIFY_ROOT="$OUT_DIR/remote-transport-bundle.verify"
 PRODUCER_LOG="$OUT_DIR/remote-transport-producer.log"
 
-if [[ "$PRODUCER_PAYLOAD_LEN" != <-> || "$PRODUCER_PAYLOAD_LEN" -lt 1 ]]; then
+if [[ ! "$PRODUCER_PAYLOAD_LEN" =~ ^[1-9][0-9]*$ ]]; then
   echo "[mem-service-remote-transport-ci] FAIL: --producer-payload-len must be a positive integer" >&2
   exit 2
 fi

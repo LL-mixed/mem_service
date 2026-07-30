@@ -4705,6 +4705,13 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
                 manifest.read_text(),
             )
             scripts_dir = destdir / "usr" / "share" / "lingqu" / "mem_service" / "scripts"
+            release_scripts = sorted(scripts_dir.glob("*.sh"))
+            self.assertEqual(len(release_scripts), 10)
+            for release_script in release_scripts:
+                self.assertIn(
+                    release_script.read_text().splitlines()[0],
+                    {"#!/bin/sh", "#!/usr/bin/env bash"},
+                )
             self.assertTrue((scripts_dir / "run_mem_service_linux_ops_ci.sh").exists())
             self.assertTrue((scripts_dir / "run_mem_service_linux_ops_ci.sh").stat().st_mode & 0o111)
             self.assertTrue(

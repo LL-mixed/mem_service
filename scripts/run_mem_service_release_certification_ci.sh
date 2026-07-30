@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -193,7 +193,8 @@ if [[ -z "$PARTITION_MARKER" ]]; then
   echo "[mem-service-release-certification-ci] FAIL: --network-partition-marker is required" >&2
   exit 2
 fi
-if [[ -n "$PRODUCER_PAYLOAD_LEN" && ("$PRODUCER_PAYLOAD_LEN" != <-> || "$PRODUCER_PAYLOAD_LEN" -lt 1) ]]; then
+if [[ -n "$PRODUCER_PAYLOAD_LEN" &&
+      ! "$PRODUCER_PAYLOAD_LEN" =~ ^[1-9][0-9]*$ ]]; then
   echo "[mem-service-release-certification-ci] FAIL: --producer-payload-len must be a positive integer" >&2
   exit 2
 fi
