@@ -1,8 +1,8 @@
 # ds4 使用侧适配手册
 
 本文面向 `ds4`（3 节点 PP 推理，C/CUDA）的维护者：说明 ds4 如何消费
-`mem_service` **安装后的 SDK**，既作为 activation payload 传输层，也作为
-分布式 prefix/KV checkpoint 的对象所有者。ub_sim 的源码消费方式见
+`mem_service` **安装后的 SDK**，并明确区分进程内 activation payload provider
+与独立 prefix/KV/object daemon。ub_sim 的源码消费方式见
 [integration-ub-sim.md](integration-ub-sim.md)。
 
 > 路径约定：`<mem_service>` 指本仓库检出根目录，`<ds4>` 指 ds4 检出根目录，
@@ -149,26 +149,93 @@ provider 是显式选择，TCP 永不是 RoCE 失败时的自动回退——RoCE
 
 ## 7. 分布式 prefix/KV checkpoint
 
-DS4 的 coordinator 负责 checkpoint transaction：
+完整部署包含两个互不替代的角色：
+
+- 三个 DS4 模型进程内各自编译 mem_service payload provider，只搬运逐 token
+  activation，不管理 prefix/KV/object；
+- coordinator 所在机器另行运行一个独立、受监督的 mem_service daemon，使用
+  Unix socket 服务 DS4 coordinator，并把 metadata state 与 payload blocks
+  放在持久化目录。它是唯一 prefix/KV/object 权威。
+
+daemon 的参考配置 `/etc/lingqu/mem_service/ds4-kv.conf`：
+
+```text
+listen=unix:/run/lingqu/ds4-kv.sock
+store=/var/lib/lingqu/ds4-kv/store.snapshot
+storage_root=/var/lib/lingqu/ds4-kv
+node_id=dgx1-ds4-kv
+cluster_id=dgx-spark-pp
+backend=snapshot+journal
+max_records=1024
+max_payload_bytes=4096
+retention=manual
+checkpoint_retention=manual
+record_retention=latest:900
+encryption=none
+auth_mode=none
+metrics_mode=text-kv
+metrics_listen=tcp:127.0.0.1:9902
+adapter_enablement=core
+```
+
+```bash
+linqu_mem_service serve \
+    --config /etc/lingqu/mem_service/ds4-kv.conf
+```
+
+实际参数以 `linqu_mem_service help` 输出为准；使用 runtime config 时应给出等价
+的 socket、state 与 storage root。先用 `ready --connect` 通过 readiness，再
+启动 DS4 coordinator：
+
+systemd 部署应把带重试的 `ready --connect` 放在 daemon unit 的
+`ExecStartPost`；这样 coordinator 的 `After=lingqu-ds4-kv.service` 等到 Unix
+socket 与持久 catalog 真正可用，而不是只等 daemon 进程被 fork 出来。
+
+```bash
+linqu_mem_service ready --connect unix:/run/lingqu/ds4-kv.sock
+./ds4-server ... \
+    --kv-disk-dir /var/lib/ds4/prefix-index \
+    --kv-disk-space-mb 8192 \
+    --kv-mem-service unix:/run/lingqu/ds4-kv.sock
+```
+
+只有 coordinator 连接 daemon。三个 worker 的 KV shard 仍通过 DS4 已有的
+checkpoint 协议汇聚到 coordinator。启动三个互不复制的 daemon 会制造三个
+权威，无法提供 manifest 原子可见性，因此不是受支持的 3 节点部署形态。
+
+DS4 coordinator 负责 checkpoint transaction：
 
 1. 为一次 checkpoint 分配不可复用的 `generation`；
 2. 从三个 PP stage 收集 layer shard，并验证 layer range 连续、无重叠、
    完整覆盖模型全部 layer；
-3. 以 generation-scoped object key 把三个 shard 写入 mem_service；每个对象
-   都绑定同一 model、token hash、token count、generation、layer range、
-   payload bytes 与 checksum；
-4. 只有三个对象都可按 version/checksum 读回时，才发布 manifest object；
-5. prefix lookup 只指向最后发布的 manifest，未完成 generation 永远不可见。
+3. 以 generation-scoped object key 把三个 shard 写入 mem_service object
+   API，并逐个验证 version/checksum/bytes；
+4. 对每个 shard 调用 `publish_kv_segment`，再用 `resolve_kv_segment` 回读，
+   验证 generation、stage placement、layer range、state 与 object key；
+5. 只有三个 KV record 都通过时，才写入并校验 manifest object；
+6. 最后调用 `register_prefix_entry`，将 prefix SHA 与模型/量化 namespace
+   原子指向 manifest，并立即 `lookup_prefix_entry` 回读验证；
+7. prefix publication 的 result segment 就是 generation。daemon 必须拒绝
+   旧 generation 覆盖新 generation，以及同 generation 改指另一 manifest；
+8. DS4 仅在上述步骤全部成功后写本地 KVC discovery entry。未完成
+   generation 永远不会通过公开 prefix namespace 可见。
 
-恢复时必须先解析 manifest，再逐一按 version/checksum 查询并 materialize
-三个对象。任何缺失、跨 generation、layer coverage 不完整或 checksum
-不一致都使整次恢复 fail-closed；DS4 必须丢弃已经装入的部分 shard，不得继续
-使用混合 generation 的 KV。
+恢复时，本地 KVC 只负责找到最长 byte-prefix 候选。DS4 必须先通过
+`lookup_prefix_entry` 确认 daemon 当前权威记录仍指向该 local ref 的 manifest；
+然后解析 manifest，对三个 shard 分别调用 `resolve_kv_segment` 并校验元数据，
+再按 version/checksum materialize 对象。任何 prefix 不可见、manifest 不匹配、
+KV metadata 缺失、跨 generation、layer coverage 不完整或 checksum 不一致都使
+整次恢复 fail-closed；DS4 必须丢弃已经装入的部分 shard，不得继续使用混合
+generation 的 KV。
 
 大 payload 不通过 4 KiB text-kv wire 内联返回。SDK 的
 `mem_service_client_materialize_object()` 让 daemon 将已校验对象原子写入一个
 不存在的 caller 路径；目标已存在时拒绝覆盖。该接口只改变对象内容的交付
 方式，不把模型、PP 拓扑或 RoCE 语义带入 mem_service。
+
+mem_service 的 record retention 与 orphan payload GC 负责回收不再被保留
+record 引用的对象块；DS4 本地 prefix index 的淘汰不直接删除 daemon 数据，
+避免本地 cache policy 越权破坏仍可见的 generation。
 
 ## 8. 排错
 

@@ -9036,13 +9036,26 @@ static enum mem_service_wire_status mem_service_register_prefix(struct mem_servi
     if (ctx.result_segment_id == 0) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
-    if (mem_service_bootstrap_kvcache(svc, &ctx, &block) != 0) {
-        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
-    }
     mem_service_build_prefix_key_from_parts(ctx.request_id,
                                             ctx.prefix_group,
                                             prefix_key,
                                             sizeof(prefix_key));
+    if (mem_service_get_record(svc, prefix_key, &prefix) == 0) {
+        if (prefix.kind != MEM_SERVICE_RECORD_REQUEST_PREFIX ||
+            prefix.last_result_segment > ctx.result_segment_id ||
+            (prefix.last_result_segment == ctx.result_segment_id &&
+             strcmp(prefix.block_hash, ctx.block_hash) != 0)) {
+            return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+        }
+        if (prefix.last_result_segment == ctx.result_segment_id &&
+            strcmp(prefix.block_hash, ctx.block_hash) == 0) {
+            mem_service_format_record_payload(&prefix, response, response_len);
+            return MEM_SERVICE_WIRE_STATUS_OK;
+        }
+    }
+    if (mem_service_bootstrap_kvcache(svc, &ctx, &block) != 0) {
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
     if (mem_service_get_record(svc, prefix_key, &prefix) != 0) {
         return MEM_SERVICE_WIRE_STATUS_INTERNAL;
     }
