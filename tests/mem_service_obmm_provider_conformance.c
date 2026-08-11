@@ -419,11 +419,9 @@ int main(int argc, char **argv)
             &visibility) == 0) {
         goto done;
     }
-    failure_stage = "neutral-unmap-deregister";
+    failure_stage = "neutral-remote-unmap";
     if (mem_service_provider_channel_unmap_remote_region(
-            &channel, &remote_mapping) != 0 ||
-        mem_service_provider_channel_deregister_region(
-            &channel, &local_binding) != 0) {
+            &channel, &remote_mapping) != 0) {
         goto done;
     }
     rc = 0;
