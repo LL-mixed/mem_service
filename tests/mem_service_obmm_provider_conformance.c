@@ -250,6 +250,18 @@ int main(int argc, char **argv)
            "stage=post-canary readiness=ready data_plane_ready=1\n",
            config.node_id);
 
+    failure_stage = "verified-peer-barrier";
+    if (mem_service_provider_obmm_endpoint_exchange_remote_regions(
+            &endpoint,
+            config.node_id,
+            config.node_count,
+            config.generation + 1U,
+            &canary_remote,
+            canary_regions,
+            CONFORMANCE_NODE_COUNT) != 0) {
+        goto done;
+    }
+
     failure_stage = "neutral-register-export-deregister";
     memset(&region_request, 0, sizeof(region_request));
     region_request.len = CONFORMANCE_REGION_BYTES;
