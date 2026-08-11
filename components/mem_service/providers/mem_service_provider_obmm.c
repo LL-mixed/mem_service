@@ -617,12 +617,12 @@ static int mem_service_obmm_provider_publish_range(
                 errno);
         return -1;
     }
-    if (msync(slot->region.addr, slot->region.len, MS_SYNC) != 0) {
-        fprintf(stderr,
-                "[mem_service_obmm] publish failed stage=msync errno=%d\n",
-                errno);
-        return -1;
-    }
+    /*
+     * OBMM shmdev mappings do not implement msync(2). Cacheable exporter
+     * mappings publish through UPDATE_RANGE above; O_SYNC SIM_DEC mappings
+     * are already uncached. Treating msync(EINVAL) as a visibility failure
+     * rejects a successfully published OBMM range.
+     */
     if (mem_service_obmm_complete_visibility(
             slot, request, completion_out) != 0) {
         fprintf(stderr,
