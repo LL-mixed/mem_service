@@ -12,6 +12,7 @@
 #define CONFORMANCE_NODE_COUNT 2U
 #define CONFORMANCE_REGION_BYTES (2U * 1024U * 1024U)
 #define CONFORMANCE_VISIBLE_BYTES 4096U
+#define CONFORMANCE_BARRIER_OFFSET CONFORMANCE_VISIBLE_BYTES
 #define CONFORMANCE_TIMEOUT_MS 30000U
 
 struct conformance_config {
@@ -127,8 +128,12 @@ int main(int argc, char **argv)
     uint8_t payload_seed;
     uint8_t peer_canary_seed;
     uint8_t peer_payload_seed;
+    uint8_t barrier_seed;
+    uint8_t peer_barrier_seed;
     uint64_t canary_checksum = 0;
+    uint64_t barrier_checksum;
     uint64_t payload_checksum;
+    uint64_t peer_barrier_checksum;
     uint64_t peer_canary_checksum;
     uint64_t peer_payload_checksum;
     uint32_t peer_node;
@@ -149,9 +154,13 @@ int main(int argc, char **argv)
     peer_canary_seed = (uint8_t)(17U + peer_node * 41U);
     payload_seed = (uint8_t)(101U + config.node_id * 37U);
     peer_payload_seed = (uint8_t)(101U + peer_node * 37U);
+    barrier_seed = (uint8_t)(201U + config.node_id * 19U);
+    peer_barrier_seed = (uint8_t)(201U + peer_node * 19U);
+    peer_barrier_checksum = pattern_checksum(peer_barrier_seed);
     peer_canary_checksum = pattern_checksum(peer_canary_seed);
     peer_payload_checksum = pattern_checksum(peer_payload_seed);
-    if (peer_canary_checksum == 0 || peer_payload_checksum == 0) {
+    if (peer_barrier_checksum == 0 || peer_canary_checksum == 0 ||
+        peer_payload_checksum == 0) {
         return fail(&config, "pattern-checksum");
     }
     memset(&provider_config, 0, sizeof(provider_config));
@@ -250,15 +259,54 @@ int main(int argc, char **argv)
            "stage=post-canary readiness=ready data_plane_ready=1\n",
            config.node_id);
 
-    failure_stage = "verified-peer-barrier";
-    if (mem_service_provider_obmm_endpoint_exchange_remote_regions(
-            &endpoint,
-            config.node_id,
-            config.node_count,
-            config.generation + 1U,
+    failure_stage = "neutral-barrier-local-publish";
+    if (mem_service_provider_channel_map_remote_region(
+            &channel,
             &canary_remote,
-            canary_regions,
-            CONFORMANCE_NODE_COUNT) != 0) {
+            CONFORMANCE_BARRIER_OFFSET,
+            CONFORMANCE_VISIBLE_BYTES,
+            NULL,
+            MEM_SERVICE_MAPPING_FLAG_READ |
+                MEM_SERVICE_MAPPING_FLAG_WRITE,
+            &local_mapping) != 0) {
+        goto done;
+    }
+    fill_pattern(local_mapping.mapping.base,
+                 CONFORMANCE_VISIBLE_BYTES,
+                 barrier_seed);
+    barrier_checksum = mem_service_provider_checksum64(
+        local_mapping.mapping.base, CONFORMANCE_VISIBLE_BYTES);
+    if (barrier_checksum == 0 ||
+        mem_service_provider_channel_publish_range(
+            &channel,
+            &local_mapping,
+            0,
+            CONFORMANCE_VISIBLE_BYTES,
+            barrier_checksum,
+            &visibility) != 0 ||
+        mem_service_provider_channel_unmap_remote_region(
+            &channel, &local_mapping) != 0) {
+        goto done;
+    }
+    failure_stage = "neutral-barrier-remote-visible";
+    if (mem_service_provider_channel_map_remote_region(
+            &channel,
+            &canary_regions[peer_node],
+            CONFORMANCE_BARRIER_OFFSET,
+            CONFORMANCE_VISIBLE_BYTES,
+            NULL,
+            MEM_SERVICE_MAPPING_FLAG_READ,
+            &remote_mapping) != 0 ||
+        mem_service_provider_channel_wait_range_visible(
+            &channel,
+            &remote_mapping,
+            0,
+            CONFORMANCE_VISIBLE_BYTES,
+            peer_barrier_checksum,
+            CONFORMANCE_TIMEOUT_MS,
+            &visibility) != 0 ||
+        mem_service_provider_channel_unmap_remote_region(
+            &channel, &remote_mapping) != 0) {
         goto done;
     }
 
