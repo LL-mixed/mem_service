@@ -251,7 +251,7 @@ int main(int argc, char **argv)
            "stage=post-canary readiness=ready data_plane_ready=1\n",
            config.node_id);
 
-    failure_stage = "neutral-register-export";
+    failure_stage = "neutral-register-export-deregister";
     memset(&region_request, 0, sizeof(region_request));
     region_request.len = CONFORMANCE_REGION_BYTES;
     region_request.memory_kind = MEM_SERVICE_MEMORY_HOST;
@@ -259,13 +259,15 @@ int main(int argc, char **argv)
     if (mem_service_provider_channel_register_region(
             &channel, &region_request, &local_binding) != 0 ||
         mem_service_provider_channel_export_region(
-            &channel, &local_binding, &local_remote) != 0) {
+            &channel, &local_binding, &local_remote) != 0 ||
+        mem_service_provider_channel_deregister_region(
+            &channel, &local_binding) != 0) {
         goto done;
     }
     failure_stage = "neutral-local-map-publish";
     if (mem_service_provider_channel_map_remote_region(
             &channel,
-            &local_remote,
+            &canary_remote,
             0,
             CONFORMANCE_VISIBLE_BYTES,
             NULL,
@@ -297,7 +299,7 @@ int main(int argc, char **argv)
             config.node_id,
             config.node_count,
             config.generation + 1U,
-            &local_remote,
+            &canary_remote,
             regions,
             CONFORMANCE_NODE_COUNT) != 0) {
         goto done;

@@ -65,7 +65,8 @@ struct mem_service_obmm_context {
     char instance[MEM_SERVICE_PROVIDER_INSTANCE_LEN];
     uint64_t import_pas[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
     bool import_osync[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
-    uint64_t verified_peer_mem_ids[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
+    struct mem_service_obmm_descriptor_v1
+        verified_peer_descriptors[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
     struct mem_service_obmm_region_slot
         regions[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
     struct mem_service_obmm_mapping_slot
@@ -377,8 +378,8 @@ static int mem_service_obmm_provider_deregister_region(void *opaque,
     }
     for (i = 0; i < MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS; ++i) {
         if (context->mappings[i].active &&
-            context->mappings[i].descriptor.export_mem_id ==
-                slot->descriptor.export_mem_id) {
+            mem_service_obmm_descriptor_equal(
+                &context->mappings[i].descriptor, &slot->descriptor)) {
             return -1;
         }
     }
@@ -1065,16 +1066,16 @@ int mem_service_provider_obmm_endpoint_verify_mapping(
     }
     if (rc == 0) {
         for (i = 0; i < context->verified_peer_count; ++i) {
-            if (context->verified_peer_mem_ids[i] ==
-                descriptor.export_mem_id) {
+            if (mem_service_obmm_descriptor_equal(
+                    &context->verified_peer_descriptors[i], &descriptor)) {
                 break;
             }
         }
         if (i == context->verified_peer_count &&
             context->verified_peer_count <
                 MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS) {
-            context->verified_peer_mem_ids[context->verified_peer_count] =
-                descriptor.export_mem_id;
+            context->verified_peer_descriptors[
+                context->verified_peer_count] = descriptor;
             context->verified_peer_count += 1U;
         }
         context->mapping_verified =
