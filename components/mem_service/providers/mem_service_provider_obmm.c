@@ -601,16 +601,35 @@ static int mem_service_obmm_provider_publish_range(
                                                               request->mapping_handle)
                                                         : NULL;
 
-    if (slot == NULL ||
-        (!slot->map_osync &&
-         mem_service_obmm_update_range(slot,
-                                       request->offset,
-                                       request->len,
-                                       OBMM_SHM_CACHE_WB_INVAL) != 0) ||
-        msync(slot->region.addr, slot->region.len, MS_SYNC) != 0) {
+    if (slot == NULL) {
+        fprintf(stderr,
+                "[mem_service_obmm] publish failed stage=mapping-lookup\n");
         return -1;
     }
-    return mem_service_obmm_complete_visibility(slot, request, completion_out);
+    if (!slot->map_osync &&
+        mem_service_obmm_update_range(slot,
+                                      request->offset,
+                                      request->len,
+                                      OBMM_SHM_CACHE_WB_INVAL) != 0) {
+        fprintf(stderr,
+                "[mem_service_obmm] publish failed stage=update-range "
+                "errno=%d\n",
+                errno);
+        return -1;
+    }
+    if (msync(slot->region.addr, slot->region.len, MS_SYNC) != 0) {
+        fprintf(stderr,
+                "[mem_service_obmm] publish failed stage=msync errno=%d\n",
+                errno);
+        return -1;
+    }
+    if (mem_service_obmm_complete_visibility(
+            slot, request, completion_out) != 0) {
+        fprintf(stderr,
+                "[mem_service_obmm] publish failed stage=checksum\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int mem_service_obmm_provider_invalidate_range(
@@ -828,6 +847,7 @@ int mem_service_provider_obmm_endpoint_prepare_canary_region(
     uint8_t *bytes;
     uint64_t checksum;
     uint64_t i;
+    const char *failure_stage = "register";
     int rc = -1;
 
     if (endpoint == NULL || endpoint->implementation == NULL ||
@@ -849,6 +869,7 @@ int mem_service_provider_obmm_endpoint_prepare_canary_region(
     mapping_request.memory_kind = region.memory_kind;
     mapping_request.flags = MEM_SERVICE_MAPPING_FLAG_READ |
                             MEM_SERVICE_MAPPING_FLAG_WRITE;
+    failure_stage = "map-local";
     if (mem_service_obmm_provider_map_remote_region(
             context, &mapping_request, &mapping) != 0) {
         goto done;
@@ -858,6 +879,7 @@ int mem_service_provider_obmm_endpoint_prepare_canary_region(
         bytes[i] = (uint8_t)(seed + i * 29U);
     }
     checksum = mem_service_provider_checksum64(bytes, visible_len);
+    failure_stage = "checksum";
     if (checksum == 0) {
         goto done;
     }
@@ -865,11 +887,15 @@ int mem_service_provider_obmm_endpoint_prepare_canary_region(
     range_request.mapping_handle = mapping.handle;
     range_request.len = visible_len;
     range_request.expected_checksum = checksum;
+    failure_stage = "publish";
     if (mem_service_obmm_provider_publish_range(
             context, &range_request, &completion) != 0 ||
         completion.visible_bytes != visible_len ||
-        completion.checksum != checksum ||
-        mem_service_obmm_remote_region_from_region(
+        completion.checksum != checksum) {
+        goto done;
+    }
+    failure_stage = "export-descriptor";
+    if (mem_service_obmm_remote_region_from_region(
             &region, remote_out) != 0) {
         goto done;
     }
@@ -878,12 +904,18 @@ int mem_service_provider_obmm_endpoint_prepare_canary_region(
     rc = 0;
 
 done:
+    failure_stage = rc == 0 ? "unmap-local" : failure_stage;
     if (mapping.handle != 0 &&
         mem_service_obmm_provider_unmap_remote_region(
             context, mapping.handle) != 0) {
         rc = -1;
     }
     if (rc != 0) {
+        fprintf(stderr,
+                "[mem_service_obmm] canary prepare failed stage=%s "
+                "errno=%d\n",
+                failure_stage,
+                errno);
         if (region.handle != 0) {
             (void)mem_service_obmm_provider_deregister_region(
                 context, region.handle);
