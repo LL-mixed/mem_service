@@ -58,6 +58,7 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("obmm remote mappings use the sim_dec/gva/gsva", provider_readme)
         self.assertIn("of urma", provider_readme)
         self.assertIn("mapping_path=sim-dec", source)
+        self.assertIn("map_osync = context->force_osync ||", source)
 
     def test_makefile_exposes_obmm_provider_smoke(self):
         makefile = (APP_DIR / "Makefile").read_text()

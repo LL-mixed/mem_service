@@ -449,8 +449,8 @@ static int mem_service_obmm_provider_map_remote_region(
         return -1;
     }
     local = mem_service_obmm_descriptor_is_local(context, &descriptor);
-    map_osync = !local &&
-                (context->force_osync || context->import_osync[slot_index]);
+    map_osync = context->force_osync ||
+                (!local && context->import_osync[slot_index]);
     if (local) {
         import_mem_id = descriptor.export_mem_id;
     } else {
