@@ -687,6 +687,10 @@ static int mem_service_obmm_provider_wait_range_visible(
     const struct mem_service_mapping_range_request *request,
     struct mem_service_visibility_completion *completion_out)
 {
+    struct mem_service_obmm_context *context = opaque;
+    struct mem_service_obmm_mapping_slot *slot;
+    const uint8_t *bytes;
+    uint64_t observed_checksum = 0;
     uint64_t deadline;
 
     if (request == NULL || request->timeout_ms == 0) {
@@ -700,6 +704,27 @@ static int mem_service_obmm_provider_wait_range_visible(
         }
         usleep(1000);
     } while (mem_service_obmm_now_ms() < deadline);
+    slot = mem_service_obmm_find_mapping(context, request->mapping_handle);
+    if (slot != NULL && request->offset <= slot->view_len &&
+        request->len <= slot->view_len - request->offset) {
+        bytes = (const uint8_t *)slot->region.addr + slot->view_offset +
+                request->offset;
+        observed_checksum = mem_service_provider_checksum64(
+            bytes, request->len);
+        fprintf(stderr,
+                "[mem_service_obmm] visibility timeout "
+                "expected=%" PRIu64 " observed=%" PRIu64 " "
+                "mem_id=%" PRIu64 " token=%u cna=%u uba=%" PRIu64 " "
+                "imported=%u osync=%u\n",
+                request->expected_checksum,
+                observed_checksum,
+                slot->descriptor.export_mem_id,
+                slot->descriptor.token_id,
+                slot->descriptor.export_cna,
+                slot->descriptor.remote_uba,
+                slot->imported ? 1U : 0U,
+                slot->map_osync ? 1U : 0U);
+    }
     return -1;
 }
 
