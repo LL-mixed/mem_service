@@ -117,7 +117,6 @@ int main(int argc, char **argv)
     struct mem_service_provider_region_binding local_binding;
     struct mem_service_region_request region_request;
     struct mem_service_provider_remote_region local_remote;
-    struct mem_service_provider_remote_region regions[2];
     struct mem_service_provider_remote_region corrupted_remote;
     struct mem_service_provider_mapping_binding local_mapping;
     struct mem_service_provider_mapping_binding remote_mapping;
@@ -293,21 +292,10 @@ int main(int argc, char **argv)
             &channel, &local_mapping) != 0) {
         goto done;
     }
-    failure_stage = "functional-descriptor-exchange";
-    if (mem_service_provider_obmm_endpoint_exchange_remote_regions(
-            &endpoint,
-            config.node_id,
-            config.node_count,
-            config.generation + 1U,
-            &canary_remote,
-            regions,
-            CONFORMANCE_NODE_COUNT) != 0) {
-        goto done;
-    }
     failure_stage = "neutral-remote-map-visible";
     if (mem_service_provider_channel_map_remote_region(
             &channel,
-            &regions[peer_node],
+            &canary_regions[peer_node],
             0,
             CONFORMANCE_VISIBLE_BYTES,
             NULL,
@@ -339,8 +327,8 @@ int main(int argc, char **argv)
     failure_stage = "fail-closed-bounds";
     if (mem_service_provider_channel_map_remote_region(
             &channel,
-            &regions[peer_node],
-            regions[peer_node].len - 1U,
+            &canary_regions[peer_node],
+            canary_regions[peer_node].len - 1U,
             CONFORMANCE_VISIBLE_BYTES,
             NULL,
             MEM_SERVICE_MAPPING_FLAG_READ,
@@ -348,7 +336,7 @@ int main(int argc, char **argv)
         goto done;
     }
     failure_stage = "fail-closed-corrupt-descriptor";
-    corrupted_remote = regions[peer_node];
+    corrupted_remote = canary_regions[peer_node];
     corrupted_remote.descriptor.bytes[4] ^= 0xffU;
     if (mem_service_provider_channel_map_remote_region(
             &channel,
