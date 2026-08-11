@@ -162,6 +162,17 @@ static int mem_service_obmm_descriptor_decode(
     return 0;
 }
 
+static bool mem_service_obmm_descriptor_equal(
+    const struct mem_service_obmm_descriptor_v1 *left,
+    const struct mem_service_obmm_descriptor_v1 *right)
+{
+    return left != NULL && right != NULL &&
+           left->export_mem_id == right->export_mem_id &&
+           left->remote_uba == right->remote_uba &&
+           left->size == right->size && left->token_id == right->token_id &&
+           left->export_cna == right->export_cna;
+}
+
 #ifdef __linux__
 static bool mem_service_obmm_parse_u32_file(const char *path,
                                             uint32_t *value_out)
@@ -387,9 +398,8 @@ static bool mem_service_obmm_descriptor_is_local(
 
     for (i = 0; i < MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS; ++i) {
         if (context->regions[i].active &&
-            context->regions[i].descriptor.export_mem_id ==
-                descriptor->export_mem_id &&
-            context->regions[i].descriptor.token_id == descriptor->token_id) {
+            mem_service_obmm_descriptor_equal(
+                &context->regions[i].descriptor, descriptor)) {
             return true;
         }
     }
@@ -1205,12 +1215,17 @@ int mem_service_provider_obmm_run_protocol_fixture(void)
         .token_id = 0x1234U,
         .export_cna = 0x45U,
     };
+    struct mem_service_obmm_descriptor_v1 colliding_peer = source;
     struct mem_service_obmm_descriptor_v1 decoded;
     struct mem_service_provider_descriptor opaque;
 
     if (mem_service_obmm_descriptor_encode(&source, &opaque) != 0 ||
         mem_service_obmm_descriptor_decode(&opaque, &decoded) != 0 ||
-        memcmp(&source, &decoded, sizeof(source)) != 0) {
+        !mem_service_obmm_descriptor_equal(&source, &decoded)) {
+        return 1;
+    }
+    colliding_peer.export_cna++;
+    if (mem_service_obmm_descriptor_equal(&source, &colliding_peer)) {
         return 1;
     }
     opaque.bytes[4] = 0xffU;
@@ -1224,6 +1239,7 @@ int mem_service_provider_obmm_run_protocol_fixture(void)
     }
     printf("mem_service obmm-provider-fixtures: status=ok "
            "descriptor_version=1 corruption=fail-closed "
+           "node_local_id_collision=fail-closed "
            "mapping_path=sim-dec urma_dependency=none\n");
     return 0;
 }

@@ -95,6 +95,7 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn("status=ok", fixture.stdout)
+            self.assertIn("node_local_id_collision=fail-closed", fixture.stdout)
             self.assertIn("mapping_path=sim-dec", fixture.stdout)
             self.assertIn("urma_dependency=none", fixture.stdout)
 
