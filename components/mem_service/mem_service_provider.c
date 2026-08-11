@@ -11,7 +11,8 @@
      MEM_SERVICE_PROVIDER_CAP_PEER_TRANSFER | \
      MEM_SERVICE_PROVIDER_CAP_DURABLE_STORAGE | \
      MEM_SERVICE_PROVIDER_CAP_ACCELERATOR_MEMORY | \
-     MEM_SERVICE_PROVIDER_CAP_RECEIVE_FENCE)
+     MEM_SERVICE_PROVIDER_CAP_RECEIVE_FENCE | \
+     MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING)
 
 struct mem_service_provider_fixture_context {
     enum mem_service_provider_state state;
@@ -77,6 +78,14 @@ static bool mem_service_provider_ops_valid(
         ((capabilities &
           MEM_SERVICE_PROVIDER_CAP_REGION_REGISTRATION) == 0 ||
          registration->ops->wait_receive == NULL)) {
+        return false;
+    }
+    if ((capabilities & MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING) != 0 &&
+        (registration->ops->map_remote_region == NULL ||
+         registration->ops->unmap_remote_region == NULL ||
+         registration->ops->publish_range == NULL ||
+         registration->ops->invalidate_range == NULL ||
+         registration->ops->wait_range_visible == NULL)) {
         return false;
     }
     return true;
@@ -215,7 +224,7 @@ size_t mem_service_provider_registry_ready_count(
 bool mem_service_provider_registry_data_plane_ready(
     const struct mem_service_provider_registry *registry)
 {
-    bool transfer_provider_found = false;
+    bool data_provider_found = false;
     size_t i;
 
     if (registry == NULL || !registry->initialized) {
@@ -225,15 +234,15 @@ bool mem_service_provider_registry_data_plane_ready(
         const struct mem_service_provider *provider = &registry->providers[i];
 
         if ((provider->capabilities &
-             MEM_SERVICE_PROVIDER_CAP_TRANSFER_MASK) == 0) {
+             MEM_SERVICE_PROVIDER_CAP_DATA_PLANE_MASK) == 0) {
             continue;
         }
-        transfer_provider_found = true;
+        data_provider_found = true;
         if (provider->state != MEM_SERVICE_PROVIDER_STATE_READY) {
             return false;
         }
     }
-    return transfer_provider_found;
+    return data_provider_found;
 }
 
 static bool mem_service_memory_kind_valid(enum mem_service_memory_kind kind)
@@ -338,11 +347,18 @@ int mem_service_provider_channel_register_region(
     struct mem_service_provider_region_binding binding;
 
     if (!mem_service_provider_channel_ready(channel) || request == NULL ||
-        binding_out == NULL || request->base == NULL || request->len == 0 ||
+        binding_out == NULL || request->len == 0 ||
         !mem_service_memory_kind_valid(request->memory_kind) ||
         (channel->provider->capabilities &
          MEM_SERVICE_PROVIDER_CAP_REGION_REGISTRATION) == 0 ||
-        channel->provider->ops->register_region == NULL) {
+        channel->provider->ops->register_region == NULL ||
+        (request->base == NULL &&
+         ((request->flags & MEM_SERVICE_REGION_FLAG_PROVIDER_ALLOCATED) == 0 ||
+          (channel->provider->capabilities &
+           MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING) == 0)) ||
+        (request->base != NULL &&
+         (request->flags & MEM_SERVICE_REGION_FLAG_PROVIDER_ALLOCATED) != 0) ||
+        (request->flags & ~MEM_SERVICE_REGION_FLAG_PROVIDER_ALLOCATED) != 0) {
         return -1;
     }
     memset(&binding, 0, sizeof(binding));
@@ -639,6 +655,186 @@ int mem_service_provider_channel_wait_receive(
     return 0;
 }
 
+int mem_service_provider_channel_map_remote_region(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_provider_remote_region *remote,
+    uint64_t offset,
+    uint64_t len,
+    void *requested_address,
+    uint64_t flags,
+    struct mem_service_provider_mapping_binding *binding_out)
+{
+    struct mem_service_mapping_request request;
+    struct mem_service_provider_mapping_binding binding;
+
+    if (!mem_service_provider_channel_ready(channel) || remote == NULL ||
+        binding_out == NULL || len == 0 ||
+        strcmp(remote->provider_name, channel->provider->name) != 0 ||
+        remote->descriptor.len == 0 ||
+        remote->descriptor.len > MEM_SERVICE_PROVIDER_DESCRIPTOR_LEN ||
+        !mem_service_memory_kind_valid(remote->memory_kind) ||
+        offset > remote->len || len > remote->len - offset ||
+        (flags & ~MEM_SERVICE_MAPPING_FLAG_VALID_MASK) != 0 ||
+        (flags & (MEM_SERVICE_MAPPING_FLAG_READ |
+                  MEM_SERVICE_MAPPING_FLAG_WRITE)) == 0 ||
+        ((flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS) != 0 &&
+         requested_address == NULL) ||
+        (channel->provider->capabilities &
+         MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING) == 0 ||
+        channel->provider->ops->map_remote_region == NULL) {
+        return -1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.remote_descriptor = remote->descriptor;
+    request.remote_region_len = remote->len;
+    request.offset = offset;
+    request.len = len;
+    request.requested_address = requested_address;
+    request.memory_kind = remote->memory_kind;
+    request.flags = flags;
+    memset(&binding, 0, sizeof(binding));
+    if (channel->provider->ops->map_remote_region(
+            channel->provider->context, &request, &binding.mapping) != 0 ||
+        binding.mapping.handle == 0 || binding.mapping.base == NULL ||
+        binding.mapping.len != len ||
+        binding.mapping.memory_kind != remote->memory_kind) {
+        if (binding.mapping.handle != 0 &&
+            channel->provider->ops->unmap_remote_region != NULL) {
+            (void)channel->provider->ops->unmap_remote_region(
+                channel->provider->context, binding.mapping.handle);
+        }
+        return -1;
+    }
+    binding.owner = channel->provider;
+    binding.mapped = true;
+    *binding_out = binding;
+    return 0;
+}
+
+enum mem_service_mapping_range_operation {
+    MEM_SERVICE_MAPPING_RANGE_PUBLISH = 1,
+    MEM_SERVICE_MAPPING_RANGE_INVALIDATE = 2,
+    MEM_SERVICE_MAPPING_RANGE_WAIT_VISIBLE = 3,
+};
+
+static int mem_service_provider_channel_mapping_range(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_provider_mapping_binding *binding,
+    uint64_t offset,
+    uint64_t len,
+    uint64_t expected_checksum,
+    uint64_t timeout_ms,
+    enum mem_service_mapping_range_operation operation,
+    struct mem_service_visibility_completion *completion_out)
+{
+    struct mem_service_mapping_range_request request;
+    struct mem_service_visibility_completion completion;
+    const uint8_t *bytes;
+    int rc;
+
+    if (!mem_service_provider_channel_ready(channel) || binding == NULL ||
+        !binding->mapped || binding->owner != channel->provider ||
+        binding->mapping.base == NULL || len == 0 || expected_checksum == 0 ||
+        completion_out == NULL || offset > binding->mapping.len ||
+        len > binding->mapping.len - offset ||
+        (channel->provider->capabilities &
+         MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING) == 0) {
+        return -1;
+    }
+    bytes = (const uint8_t *)binding->mapping.base + offset;
+    if (operation == MEM_SERVICE_MAPPING_RANGE_PUBLISH &&
+        mem_service_provider_checksum64(bytes, len) != expected_checksum) {
+        return -1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.mapping_handle = binding->mapping.handle;
+    request.offset = offset;
+    request.len = len;
+    request.expected_checksum = expected_checksum;
+    request.timeout_ms = timeout_ms;
+    memset(&completion, 0, sizeof(completion));
+    if (operation == MEM_SERVICE_MAPPING_RANGE_PUBLISH &&
+        channel->provider->ops->publish_range != NULL) {
+        rc = channel->provider->ops->publish_range(
+            channel->provider->context, &request, &completion);
+    } else if (operation == MEM_SERVICE_MAPPING_RANGE_INVALIDATE &&
+               channel->provider->ops->invalidate_range != NULL) {
+        rc = channel->provider->ops->invalidate_range(
+            channel->provider->context, &request, &completion);
+    } else if (operation == MEM_SERVICE_MAPPING_RANGE_WAIT_VISIBLE &&
+               timeout_ms > 0 &&
+               channel->provider->ops->wait_range_visible != NULL) {
+        rc = channel->provider->ops->wait_range_visible(
+            channel->provider->context, &request, &completion);
+    } else {
+        return -1;
+    }
+    if (rc != 0 || completion.status != 0 ||
+        completion.visible_bytes != len ||
+        completion.checksum != expected_checksum ||
+        mem_service_provider_checksum64(bytes, len) != expected_checksum) {
+        return -1;
+    }
+    *completion_out = completion;
+    return 0;
+}
+
+int mem_service_provider_channel_publish_range(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_provider_mapping_binding *binding,
+    uint64_t offset,
+    uint64_t len,
+    uint64_t expected_checksum,
+    struct mem_service_visibility_completion *completion_out)
+{
+    return mem_service_provider_channel_mapping_range(
+        channel, binding, offset, len, expected_checksum, 0,
+        MEM_SERVICE_MAPPING_RANGE_PUBLISH, completion_out);
+}
+
+int mem_service_provider_channel_invalidate_range(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_provider_mapping_binding *binding,
+    uint64_t offset,
+    uint64_t len,
+    uint64_t expected_checksum,
+    struct mem_service_visibility_completion *completion_out)
+{
+    return mem_service_provider_channel_mapping_range(
+        channel, binding, offset, len, expected_checksum, 0,
+        MEM_SERVICE_MAPPING_RANGE_INVALIDATE, completion_out);
+}
+
+int mem_service_provider_channel_wait_range_visible(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_provider_mapping_binding *binding,
+    uint64_t offset,
+    uint64_t len,
+    uint64_t expected_checksum,
+    uint64_t timeout_ms,
+    struct mem_service_visibility_completion *completion_out)
+{
+    return mem_service_provider_channel_mapping_range(
+        channel, binding, offset, len, expected_checksum, timeout_ms,
+        MEM_SERVICE_MAPPING_RANGE_WAIT_VISIBLE, completion_out);
+}
+
+int mem_service_provider_channel_unmap_remote_region(
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_provider_mapping_binding *binding)
+{
+    if (channel == NULL || channel->provider == NULL || binding == NULL ||
+        !binding->mapped || binding->owner != channel->provider ||
+        channel->provider->ops == NULL ||
+        channel->provider->ops->unmap_remote_region == NULL ||
+        channel->provider->ops->unmap_remote_region(
+            channel->provider->context, binding->mapping.handle) != 0) {
+        return -1;
+    }
+    memset(binding, 0, sizeof(*binding));
+    return 0;
+}
+
 int mem_service_provider_channel_deregister_region(
     const struct mem_service_provider_channel *channel,
     struct mem_service_provider_region_binding *binding)
@@ -759,6 +955,67 @@ static int mem_service_provider_fixture_poll_completion(
     return 0;
 }
 
+static int mem_service_provider_fixture_map_remote_region(
+    void *context,
+    const struct mem_service_mapping_request *request,
+    struct mem_service_mapping *mapping_out)
+{
+    struct mem_service_provider_fixture_context *fixture = context;
+    uint64_t region_handle = 0;
+
+    if (fixture == NULL || request == NULL || mapping_out == NULL ||
+        request->remote_descriptor.len != sizeof(region_handle) ||
+        request->remote_region_len != fixture->region_len ||
+        request->len == 0 || request->offset > fixture->region_len ||
+        request->len > fixture->region_len - request->offset) {
+        return -1;
+    }
+    memcpy(&region_handle,
+           request->remote_descriptor.bytes,
+           sizeof(region_handle));
+    if (region_handle != 2U) {
+        return -1;
+    }
+    memset(mapping_out, 0, sizeof(*mapping_out));
+    mapping_out->handle = 3U;
+    mapping_out->base = fixture->destination + request->offset;
+    mapping_out->len = request->len;
+    mapping_out->memory_kind = request->memory_kind;
+    return 0;
+}
+
+static int mem_service_provider_fixture_unmap_remote_region(
+    void *context,
+    uint64_t mapping_handle)
+{
+    return context != NULL && mapping_handle == 3U ? 0 : -1;
+}
+
+static int mem_service_provider_fixture_mapping_range(
+    void *context,
+    const struct mem_service_mapping_range_request *request,
+    struct mem_service_visibility_completion *completion_out)
+{
+    struct mem_service_provider_fixture_context *fixture = context;
+    uint64_t checksum;
+
+    if (fixture == NULL || request == NULL || completion_out == NULL ||
+        request->mapping_handle != 3U || request->len == 0 ||
+        request->offset > fixture->region_len ||
+        request->len > fixture->region_len - request->offset) {
+        return -1;
+    }
+    checksum = mem_service_provider_checksum64(
+        fixture->destination + request->offset, request->len);
+    if (checksum != request->expected_checksum) {
+        return -1;
+    }
+    memset(completion_out, 0, sizeof(*completion_out));
+    completion_out->visible_bytes = request->len;
+    completion_out->checksum = checksum;
+    return 0;
+}
+
 int mem_service_run_provider_fixture_check(void)
 {
     static const struct mem_service_provider_ops valid_ops = {
@@ -767,11 +1024,18 @@ int mem_service_run_provider_fixture_check(void)
         .deregister_region = mem_service_provider_fixture_deregister_region,
         .submit_transfer = mem_service_provider_fixture_submit_transfer,
         .poll_completion = mem_service_provider_fixture_poll_completion,
+        .map_remote_region = mem_service_provider_fixture_map_remote_region,
+        .unmap_remote_region =
+            mem_service_provider_fixture_unmap_remote_region,
+        .publish_range = mem_service_provider_fixture_mapping_range,
+        .invalidate_range = mem_service_provider_fixture_mapping_range,
+        .wait_range_visible = mem_service_provider_fixture_mapping_range,
     };
     static const struct mem_service_provider_ops invalid_ops = {
         .probe = mem_service_provider_fixture_probe,
     };
     struct mem_service_provider_registry registry;
+    struct mem_service_provider_registry mapping_registry;
     struct mem_service_provider_fixture_context fixture;
     struct mem_service_provider_fixture_context degraded_fixture;
     struct mem_service_provider_registration registration;
@@ -781,10 +1045,13 @@ int mem_service_run_provider_fixture_check(void)
     struct mem_service_transfer_request transfer;
     struct mem_service_transfer_completion completion;
     struct mem_service_provider_channel channel;
+    struct mem_service_provider_channel mapping_channel;
     struct mem_service_provider_region_binding source_binding;
     struct mem_service_provider_region_binding destination_binding;
+    struct mem_service_provider_mapping_binding mapping_binding;
     struct mem_service_provider_remote_region remote_region;
     struct mem_service_provider_remote_region decoded_region;
+    struct mem_service_visibility_completion visibility;
     uint8_t source[16] = "provider-check";
     uint8_t destination[16] = {0};
     uint8_t descriptor_wire[MEM_SERVICE_PROVIDER_REGION_WIRE_MAX_LEN];
@@ -805,10 +1072,31 @@ int mem_service_run_provider_fixture_check(void)
         return 1;
     }
     registration = (struct mem_service_provider_registration){
+        .name = "mapping-fixture",
+        .instance = "local-0",
+        .capabilities = MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING,
+        .ops = &valid_ops,
+        .context = &fixture,
+    };
+    if (mem_service_provider_registry_init(&mapping_registry) != 0 ||
+        mem_service_provider_registry_register(
+            &mapping_registry, &registration) != 0 ||
+        !mem_service_provider_registry_data_plane_ready(&mapping_registry) ||
+        mem_service_provider_registry_ready_count(&mapping_registry) != 1 ||
+        mem_service_provider_channel_bind(
+            &mapping_registry,
+            "mapping-fixture",
+            "local-0",
+            MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING,
+            &mapping_channel) != 0) {
+        return 1;
+    }
+    registration = (struct mem_service_provider_registration){
         .name = "fixture",
         .instance = "local-0",
         .capabilities = MEM_SERVICE_PROVIDER_CAP_REGION_REGISTRATION |
-                        MEM_SERVICE_PROVIDER_CAP_LOCAL_TRANSFER,
+                        MEM_SERVICE_PROVIDER_CAP_LOCAL_TRANSFER |
+                        MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING,
         .ops = &valid_ops,
         .context = &fixture,
     };
@@ -872,7 +1160,8 @@ int mem_service_run_provider_fixture_check(void)
             "fixture",
             "local-0",
             MEM_SERVICE_PROVIDER_CAP_REGION_REGISTRATION |
-                MEM_SERVICE_PROVIDER_CAP_LOCAL_TRANSFER,
+                MEM_SERVICE_PROVIDER_CAP_LOCAL_TRANSFER |
+                MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING,
             &channel) != 0) {
         return 1;
     }
@@ -914,6 +1203,49 @@ int mem_service_run_provider_fixture_check(void)
         memcmp(source, destination, sizeof(source)) != 0) {
         return 1;
     }
+    if (mem_service_provider_channel_map_remote_region(
+            &channel,
+            &decoded_region,
+            0,
+            sizeof(destination),
+            NULL,
+            MEM_SERVICE_MAPPING_FLAG_READ |
+                MEM_SERVICE_MAPPING_FLAG_WRITE,
+            &mapping_binding) != 0 ||
+        mapping_binding.mapping.base != destination ||
+        mem_service_provider_channel_publish_range(
+            &channel,
+            &mapping_binding,
+            0,
+            sizeof(destination),
+            expected_checksum,
+            &visibility) != 0 ||
+        mem_service_provider_channel_invalidate_range(
+            &channel,
+            &mapping_binding,
+            0,
+            sizeof(destination),
+            expected_checksum,
+            &visibility) != 0 ||
+        mem_service_provider_channel_wait_range_visible(
+            &channel,
+            &mapping_binding,
+            0,
+            sizeof(destination),
+            expected_checksum,
+            1000,
+            &visibility) != 0 ||
+        mem_service_provider_channel_publish_range(
+            &channel,
+            &mapping_binding,
+            sizeof(destination),
+            1,
+            expected_checksum,
+            &visibility) == 0 ||
+        mem_service_provider_channel_unmap_remote_region(
+            &channel, &mapping_binding) != 0) {
+        return 1;
+    }
     descriptor_wire[20] = 1U;
     if (mem_service_provider_remote_region_decode(
             descriptor_wire,
@@ -953,7 +1285,8 @@ int mem_service_run_provider_fixture_check(void)
     registration.context = &degraded_fixture;
     registration.capabilities =
         MEM_SERVICE_PROVIDER_CAP_REGION_REGISTRATION |
-        MEM_SERVICE_PROVIDER_CAP_LOCAL_TRANSFER;
+        MEM_SERVICE_PROVIDER_CAP_LOCAL_TRANSFER |
+        MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING;
     registration.ops = &valid_ops;
     if (mem_service_provider_registry_register(&registry, &registration) != 0 ||
         mem_service_provider_registry_ready_count(&registry) != 1 ||
@@ -982,7 +1315,8 @@ int mem_service_run_provider_fixture_check(void)
     }
     printf("mem_service provider-fixtures: status=ok providers=%zu "
            "ready=%zu data_plane_ready=%u all_required=fail-closed "
-           "bounds=fail-closed sdk=ok descriptor_wire=fail-closed\n",
+           "bounds=fail-closed sdk=ok descriptor_wire=fail-closed "
+           "peer_mapping=ok visibility=checksum-verified\n",
            registry.count,
            mem_service_provider_registry_ready_count(&registry),
            mem_service_provider_registry_data_plane_ready(&registry) ? 1U : 0U);

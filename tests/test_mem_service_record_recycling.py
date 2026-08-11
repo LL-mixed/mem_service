@@ -622,9 +622,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U",
             cli_source,
         )
-        self.assertIn("MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2143U", cli_source)
+        self.assertIn("MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U", cli_source)
         self.assertIn(
-            "MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xcb1aae94U",
+            "MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x74c57a78U",
             cli_source,
         )
         self.assertIn("MEM_SERVICE_OPS_CERTIFICATION_POLICY_EXPECTED_LEN 1118U", cli_source)
@@ -640,7 +640,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("MEM_SERVICE_RELEASE_VERSION \"0.1.0\"", cli_source)
         self.assertIn("MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U", cli_source)
         self.assertIn(
-            "MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xf6446e36U",
+            "MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xc8513ae1U",
             cli_source,
         )
         self.assertIn('strcmp(argv[1], "release-readiness")', cli_source)
@@ -660,9 +660,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             'MEM_SERVICE_NATIVE_RPM_NAME "linqu-mem-service-0.1.0-1.aarch64.rpm"',
             cli_source,
         )
-        self.assertIn("MEM_SERVICE_API_ABI_POLICY_EXPECTED_LEN 856U", cli_source)
+        self.assertIn("MEM_SERVICE_API_ABI_POLICY_EXPECTED_LEN 1025U", cli_source)
         self.assertIn(
-            "MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0xd0cc1392U",
+            "MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U",
             cli_source,
         )
         self.assertIn("run_release_manifest", cli_source)
@@ -923,7 +923,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "^upgrade_rollback_policy=share/lingqu/mem_service/upgrade-rollback-policy.txt$$",
             cli_makefile,
         )
-        self.assertIn("^package_manifest_checksum=0xf6446e36$$", cli_makefile)
+        self.assertIn("^package_manifest_checksum=0xc8513ae1$$", cli_makefile)
         self.assertIn("./linqu_mem_service_host checkpoint-retention-fixtures", cli_makefile)
         self.assertIn("./linqu_mem_service_host payload-gc-fixtures", cli_makefile)
         self.assertIn("./linqu_mem_service_host record-retention-fixtures", cli_makefile)
@@ -1005,7 +1005,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             cli_makefile.count("| grep -q 'release-readiness --ops-evidence-file'"),
             8,
         )
-        self.assertIn("^upgrade_rollback_policy_checksum=0xcb1aae94$$", cli_makefile)
+        self.assertIn("^upgrade_rollback_policy_checksum=0x74c57a78$$", cli_makefile)
         self.assertIn(
             "^upgrade_rollback_runtime_gate=upgrade-rollback-runtime-fixtures$$",
             cli_makefile,
@@ -1025,7 +1025,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("^old_server_runtime_binary=certified$$", cli_makefile)
         self.assertIn("^client_retry_policy=explicit-max-attempts-backoff$$", cli_makefile)
         self.assertIn("^api_abi_policy=share/lingqu/mem_service/api-abi-policy.txt$$", cli_makefile)
-        self.assertIn("^api_abi_policy_checksum=0xd0cc1392$$", cli_makefile)
+        self.assertIn("^api_abi_policy_checksum=0x5e460a87$$", cli_makefile)
         self.assertIn("^client_api_version=1$$", cli_makefile)
         self.assertIn("^client_abi_version=1$$", cli_makefile)
         self.assertIn("^client_record_abi_size=808$$", cli_makefile)
@@ -1212,7 +1212,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("package_format=installed-layout-v1", release_manifest)
         self.assertIn("package_manifest=share/lingqu/mem_service/package-manifest.txt", release_manifest)
         self.assertIn("service_version=0.1.0", release_manifest)
-        self.assertIn("package_manifest_checksum=0xf6446e36", release_manifest)
+        self.assertIn("package_manifest_checksum=0xc8513ae1", release_manifest)
         self.assertIn(
             "release_readiness_evidence_verify=release-readiness --ops-evidence-file --remote-transport-evidence-file",
             release_manifest,
@@ -1324,7 +1324,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "linux_ops_upgrade_rollback_smoke=linux-ops-upgrade-rollback-smoke",
             release_manifest,
         )
-        self.assertIn("upgrade_rollback_policy_checksum=0xcb1aae94", release_manifest)
+        self.assertIn("upgrade_rollback_policy_checksum=0x74c57a78", release_manifest)
         self.assertIn(
             "upgrade_rollback_runtime_gate=upgrade-rollback-runtime-fixtures",
             release_manifest,
@@ -1362,7 +1362,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("rollback_policy=current-version-only", release_manifest)
         self.assertIn("old_server_runtime_binary=certified", release_manifest)
         self.assertIn("api_abi_policy=share/lingqu/mem_service/api-abi-policy.txt", release_manifest)
-        self.assertIn("api_abi_policy_checksum=0xd0cc1392", release_manifest)
+        self.assertIn("api_abi_policy_checksum=0x5e460a87", release_manifest)
         self.assertIn("client_api_version=1", release_manifest)
         self.assertIn("client_abi_version=1", release_manifest)
         self.assertIn("client_record_abi_size=808", release_manifest)

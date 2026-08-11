@@ -42,16 +42,28 @@ or service readiness.
   `payload_provider_<name>_sources` and `payload_provider_<name>_libs` from
   `lingqu-mem-service.pc` and opt in explicitly.
 - A provider probe may report device availability, but service data-plane
-  readiness requires a completed peer transfer and checksum validation.
+  readiness requires a completed provider-specific peer canary and checksum
+  validation: transfer completion for transfer providers, or mapped-range
+  visibility for mapping providers.
 - Provider control traffic may exchange opaque descriptors and completions.
   Application payload bytes must use the provider data plane.
+- Peer mapping and peer transfer are independent data-plane capabilities.
+  A mapping provider exposes a bounded process mapping plus explicit publish,
+  invalidate, and visibility operations; it must not emulate mapping by routing
+  bytes through a transfer provider. A transfer provider exposes submitted
+  copies and completions; it must not claim that a completed transfer created a
+  process mapping.
+- OBMM remote mappings use the SIM_DEC/GVA/GSVA mapping path and are independent
+  of URMA. The OBMM provider owns OBMM export/import, mmap lifecycle, cache
+  maintenance, and range visibility. The cluster queue and object protocols
+  remain above the provider contract.
 - A process may register only memory that it owns or has explicitly mapped.
   Consequently, a model runtime uses the neutral provider SDK in the model
   process for hot-path buffers. A separate daemon remains the control plane
   and must not claim zero-copy ownership of another process's heap.
 - Applications exchange only the neutral serialized region descriptor. They
   do not parse provider bytes or include provider headers.
-- A data-plane channel binds only when the complete configured transfer
+- A data-plane channel binds only when the complete configured data-plane
   registry is ready. A healthy edge cannot hide a missing full-mesh peer.
 - Connection-oriented providers expose a two-phase server lifecycle:
   `listen` first makes the endpoint reachable, and `accept` completes the
@@ -61,6 +73,19 @@ or service readiness.
 - Provider verification and region registration happen only after both peers
   have entered the connection phase. Applications must not use timing delays
   to hide a listener/connect race.
+
+## OBMM Functional Conformance
+
+`tests/mem_service_obmm_provider_conformance.c` is the authoritative OBMM
+functional test. It runs inside at least two QEMU guests with `/dev/obmm`; a
+host protocol fixture or Linux cross-compile is not functional evidence. The
+test must observe degraded readiness before the peer canary, exchange only the
+opaque neutral region descriptor through the provider control plane, then
+reach ready state and exercise register, export, map, publish, invalidate,
+wait-visible, unmap, and deregister through the neutral channel API. Corrupt
+descriptors, out-of-bounds mappings, and checksum mismatches must fail closed.
+The runner must also retain QEMU SIM_DEC mapping evidence and verify that no
+guest reports a kernel fault.
 
 ## RoCE Mesh Configuration
 
@@ -110,6 +135,7 @@ trip can overlap receiver work.
 Initial providers are expected to be:
 
 - a deterministic loopback provider for contract tests;
-- UB/URMA and shared-memory providers for QEMU eight-node PP;
+- an OBMM peer-mapping provider for QEMU eight-node PP;
+- a separate UB/URMA peer-transfer provider where explicit transfer is used;
 - a RoCE full-mesh provider for DGX PP;
 - a TCP data-plane provider that is never an automatic fallback.

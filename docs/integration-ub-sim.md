@@ -28,6 +28,10 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
   `LLM_INFER_ROOT=<ub_sim>/guest-linux/aarch64`（llm_infer 仍属于 ub_sim）。
 - guest 二进制 `linqu_mem_service` / `linqu_mem_service_qwen3` 由
   `build_initramfs.sh` 拷入 initramfs 的 `/bin/`，由 guest init 脚本启动。
+- OBMM remote mapping 通过中立 `PEER_MAPPING` provider contract 暴露。
+  OBMM provider 独立拥有 export/import、mmap、cache maintenance 和 range
+  visibility；cluster queue/object 协议保留在其上层。URMA 是独立的显式传输
+  provider，不是 OBMM mapping 的实现层，也不得作为隐式回退。
 
 因此：修改本仓库 `components/mem_service/` 下的任何源文件会直接影响
 ub_sim 的下一次构建；两个仓库的接口面（公开头文件、wire 协议、CLI 表面）

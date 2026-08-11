@@ -37,8 +37,8 @@
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7055U
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2143U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xcb1aae94U
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x74c57a78U
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -51,15 +51,15 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xf6446e36U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xc8513ae1U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
 #define MEM_SERVICE_NATIVE_DEB_NAME "linqu-mem-service_0.1.0-1_arm64.deb"
 #define MEM_SERVICE_NATIVE_RPM_NAME "linqu-mem-service-0.1.0-1.aarch64.rpm"
 #define MEM_SERVICE_API_ABI_POLICY_VERSION 1U
-#define MEM_SERVICE_API_ABI_POLICY_EXPECTED_LEN 856U
-#define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0xd0cc1392U
+#define MEM_SERVICE_API_ABI_POLICY_EXPECTED_LEN 1025U
+#define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x71077a46U
@@ -494,6 +494,27 @@ static int render_api_abi_policy(char *policy, size_t policy_len, size_t *used_o
         append_wire_schema_line(policy,
                                 policy_len,
                                 &used,
+                                "provider_api_version=%u\n",
+                                MEM_SERVICE_PROVIDER_API_VERSION) != 0 ||
+        append_wire_schema_line(
+            policy,
+            policy_len,
+            &used,
+            "provider_api_compatibility=additive-source-compatible\n") != 0 ||
+        append_wire_schema_line(
+            policy,
+            policy_len,
+            &used,
+            "provider_mapping_contract_version=%u\n",
+            MEM_SERVICE_PROVIDER_MAPPING_CONTRACT_VERSION) != 0 ||
+        append_wire_schema_line(
+            policy,
+            policy_len,
+            &used,
+            "provider_mapping_contract=peer-mapping+range-visibility\n") != 0 ||
+        append_wire_schema_line(policy,
+                                policy_len,
+                                &used,
                                 "wire_version_min=%u\n",
                                 MEM_SERVICE_WIRE_VERSION) != 0 ||
         append_wire_schema_line(policy,
@@ -609,6 +630,8 @@ static int run_api_abi_fixture_check(void)
         MEM_SERVICE_CLIENT_ABI_VERSION != 1U ||
         MEM_SERVICE_CLIENT_RECORD_ABI_SIZE !=
             sizeof(struct mem_service_client_record) ||
+        MEM_SERVICE_PROVIDER_API_VERSION != 2U ||
+        MEM_SERVICE_PROVIDER_MAPPING_CONTRACT_VERSION != 1U ||
         MEM_SERVICE_WIRE_VERSION != 1U ||
         MEM_SERVICE_WIRE_HEADER_LEN != 48U ||
         MEM_SERVICE_WIRE_SCHEMA_VERSION != 1U) {
@@ -621,7 +644,10 @@ static int run_api_abi_fixture_check(void)
                "new_client_old_server_policy=certified\n") ==
             NULL ||
         strstr(policy, "upgrade_policy=current-version-only\n") == NULL ||
-        strstr(policy, "rollback_policy=current-version-only\n") == NULL) {
+        strstr(policy, "rollback_policy=current-version-only\n") == NULL ||
+        strstr(policy,
+               "provider_mapping_contract=peer-mapping+range-visibility\n") ==
+            NULL) {
         fprintf(stderr, "mem_service api-abi-fixtures: required policy missing\n");
         failures -= 1;
     }
@@ -2359,7 +2385,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
         strstr(manifest, "wire_schema_manifest_checksum=0xb1f00fc6\n") == NULL ||
-        strstr(manifest, "api_abi_policy_checksum=0xd0cc1392\n") == NULL ||
+        strstr(manifest, "api_abi_policy_checksum=0x5e460a87\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
         strstr(manifest, "package_manifest_command=package-manifest\n") == NULL ||

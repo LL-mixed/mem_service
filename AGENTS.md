@@ -5,8 +5,8 @@
 ## 布局
 
 - `components/mem_service/` — 组件源码（core、daemon、client、wire、
-  cluster/OBMM/GSVA、Qwen3/DeepSeek-V4-Flash 适配器）+ `providers/`（TCP/RoCE
-  provider）+ 组件 README（含分层契约，改动前先读）。
+  cluster/OBMM/GSVA、Qwen3/DeepSeek-V4-Flash 适配器）+ `providers/`
+  （OBMM/TCP/RoCE provider）+ 组件 README（含分层契约，改动前先读）。
 - `apps/mem_service/` — CLI 入口、`Makefile`（所有构建/安装/打包/认证入口）、
   checked-in 契约 manifest（`*.txt`）、`configs/`、`deploy/`、`packaging/`、
   `examples/`。

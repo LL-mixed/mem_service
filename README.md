@@ -2,7 +2,7 @@
 
 `mem_service` 是灵瞿（Lingqu）内存/对象服务的独立仓库。它提供一个模型中立的
 C 语言内存/对象元数据服务：带版本化 wire 协议的 Unix-socket daemon、类型化
-C client SDK、可插拔 transport provider（TCP、RoCE/RDMA）、cluster/OBMM/GSVA
+C client SDK、可插拔 provider（OBMM peer mapping、TCP、RoCE/RDMA）、cluster/OBMM/GSVA
 数据平面，以及面向 LLM serving 与 pretraining 的模型适配器（Qwen3、
 DeepSeek-V4-Flash）。
 
@@ -23,9 +23,10 @@ DeepSeek-V4-Flash）。
   提供 serving/pretraining 类型化 API（含 pretraining 的 dataset/sample/
   checkpoint/gradient/optimizer-state 与 training-step-commit）；SDK 以
   "源码头文件 + 源文件" 形式随安装布局发布，外部客户端无需链接 daemon 私有实现。
-- **Transport provider**：`mem_service_provider_*` 中立契约 + TCP 数据平面
-  provider（跨平台）与 RoCE full-mesh provider（需要 Linux + libibverbs/
-  librdmacm）；provider 永不作为其它 provider 失败时的自动回退。
+- **Data-plane provider**：`mem_service_provider_*` 中立契约 + OBMM
+  peer-mapping provider、TCP 数据平面 provider（跨平台）与 RoCE full-mesh
+  provider（需要 Linux + libibverbs/librdmacm）；mapping 与 transfer 是独立
+  capability，provider 永不作为其它 provider 失败时的自动回退。
 - **payload 后端**：`sealed-local-block-v1`、`sealed-chunked-block-v1`、
   `transport-loopback-block-v1`、`transport-tcp-block-v1`、`ub-ssd-gsva-v1`，
   校验失败一律 fail-closed 并隔离（quarantine）。
@@ -37,7 +38,7 @@ DeepSeek-V4-Flash）。
 
 | 路径 | 内容 |
 | --- | --- |
-| `components/mem_service/` | 组件源码（core、daemon、client、wire、cluster/OBMM/GSVA、模型适配器）+ `providers/`（TCP/RoCE provider）+ 组件 README |
+| `components/mem_service/` | 组件源码（core、daemon、client、wire、cluster/OBMM/GSVA、模型适配器）+ `providers/`（OBMM/TCP/RoCE provider）+ 组件 README |
 | `apps/mem_service/` | CLI 入口 `mem_service.c`、`Makefile`（构建/安装/打包/发布认证）、契约 manifest（`wire-schema.txt`、`release-manifest.txt` 等）、`configs/`（配置 schema 与示例）、`deploy/`（systemd unit 与 Prometheus 告警）、`packaging/`（rpm spec）、`examples/`（可安装的 SDK smoke 客户端） |
 | `common/obmm_common.h`、`libs/obmm_queue/`、`kernel_ub/include/uapi/ub/` | vendored 依赖（OBMM 队列与 UB uapi 头文件），与组件一起被 `-I` 引用；来源 revision 与校验和见 `VENDORED.md` |
 | `scripts/` | 发布认证/安装校验脚本（`verify_mem_service_*.sh`、`run_mem_service_*_ci.sh`） |

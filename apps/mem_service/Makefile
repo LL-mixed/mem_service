@@ -26,6 +26,8 @@ MEM_SERVICE_UB_SSD_GSVA_BACKEND := $(ROOT)/components/mem_service/mem_service_ub
 MEM_SERVICE_UB_SSD_GSVA_IO := $(ROOT)/components/mem_service/mem_service_ub_ssd_gsva_io.c
 MEM_SERVICE_RECORDS := $(ROOT)/components/mem_service/mem_service_records.c
 MEM_SERVICE_PROVIDER := $(ROOT)/components/mem_service/mem_service_provider.c
+MEM_SERVICE_PROVIDER_OBMM := $(ROOT)/components/mem_service/providers/mem_service_provider_obmm.c
+MEM_SERVICE_PROVIDER_OBMM_CLI := $(ROOT)/components/mem_service/providers/mem_service_provider_obmm_cli.c
 MEM_SERVICE_PROVIDER_ROCE := $(ROOT)/components/mem_service/providers/mem_service_provider_roce.c
 MEM_SERVICE_PROVIDER_ROCE_CLI := $(ROOT)/components/mem_service/providers/mem_service_provider_roce_cli.c
 MEM_SERVICE_PROVIDER_TCP := $(ROOT)/components/mem_service/providers/mem_service_provider_tcp.c
@@ -217,9 +219,10 @@ MEM_SERVICE_QWEN3_ADAPTER_SRCS := \
 	$(MEM_SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW) \
 	$(MEM_SERVICE_QWEN3_ENGRAM_WAIT_FLOW) \
 	$(MEM_SERVICE_QWEN3) \
+	$(MEM_SERVICE_PROVIDER_OBMM) \
 	$(LLM_INFER)
 
-.PHONY: all host-artifact-smoke roce-provider-smoke tcp-provider-smoke network-transport-block-smoke package-tarball package-tarball-smoke package-deb package-deb-smoke package-rpm package-rpm-smoke linux-ops-certification-smoke linux-ops-upgrade-rollback-smoke linux-ops-deployment-smoke remote-transport-evidence-verify remote-transport-certification-bundle remote-transport-certification-bundle-verify release-certification-verify install installed-sdk-example-smoke installed-sdk-pkgconfig-smoke installed-sdk-runtime-smoke install-smoke print-release-manifest print-package-manifest print-wire-schema print-admin-output-schema print-upgrade-rollback-policy print-ops-certification-policy print-alert-rules print-api-abi-policy print-compat-matrix print-compat-baseline-v1 print-compat-old-new-matrix clean
+.PHONY: all host-artifact-smoke obmm-provider-smoke roce-provider-smoke tcp-provider-smoke network-transport-block-smoke package-tarball package-tarball-smoke package-deb package-deb-smoke package-rpm package-rpm-smoke linux-ops-certification-smoke linux-ops-upgrade-rollback-smoke linux-ops-deployment-smoke remote-transport-evidence-verify remote-transport-certification-bundle remote-transport-certification-bundle-verify release-certification-verify install installed-sdk-example-smoke installed-sdk-pkgconfig-smoke installed-sdk-runtime-smoke install-smoke print-release-manifest print-package-manifest print-wire-schema print-admin-output-schema print-upgrade-rollback-policy print-ops-certification-policy print-alert-rules print-api-abi-policy print-compat-matrix print-compat-baseline-v1 print-compat-old-new-matrix clean
 
 ifneq ($(wildcard $(LLM_INFER)),)
 all: linqu_mem_service linqu_mem_service_core linqu_mem_service_qwen3
@@ -243,6 +246,15 @@ linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_S
 
 linqu_mem_service_host: $(MEM_SERVICE_CORE_SRCS)
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) $^ -lm -o $@
+
+linqu_mem_service_provider_obmm: $(MEM_SERVICE_PROVIDER_OBMM_CLI) $(MEM_SERVICE_PROVIDER_OBMM) $(MEM_SERVICE_PROVIDER)
+	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) \
+		-I$(ROOT)/components/mem_service \
+		-I$(ROOT)/components/mem_service/providers \
+		$^ -o $@
+
+obmm-provider-smoke: linqu_mem_service_provider_obmm
+	./linqu_mem_service_provider_obmm protocol-fixtures
 
 linqu_mem_service_provider_roce: $(MEM_SERVICE_PROVIDER_ROCE_CLI) $(MEM_SERVICE_PROVIDER_ROCE) $(filter-out mem_service.c,$(MEM_SERVICE_CORE_SRCS))
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) $^ -lrdmacm -libverbs -o $@
@@ -874,7 +886,7 @@ install-smoke: install
 	grep -q '^package_format=installed-layout-v1$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^package_manifest=share/lingqu/mem_service/package-manifest.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^package_manifest_len=9703$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^package_manifest_checksum=0xf6446e36$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^package_manifest_checksum=0xc8513ae1$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^package_gate=package-fixtures$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^installed_sdk_preflight=scripts/verify_mem_service_installed_sdk.sh --preflight$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^installed_sdk_preflight_scope=pkg-config-cflags+sdk-sources+examples+host-binary-no-compile$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -918,8 +930,8 @@ install-smoke: install
 	grep -q '^admin_output_format=text-kv$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_metric_prefix=lingqu_mem_service_$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^upgrade_rollback_policy=share/lingqu/mem_service/upgrade-rollback-policy.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^upgrade_rollback_policy_len=2143$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^upgrade_rollback_policy_checksum=0xcb1aae94$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^upgrade_rollback_policy_len=2144$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^upgrade_rollback_policy_checksum=0x74c57a78$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^upgrade_policy=current-version-only$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^rollback_policy=current-version-only$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^old_server_runtime_binary=certified$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -957,8 +969,8 @@ install-smoke: install
 	grep -q '^wire_payload_typed_binary_format=typed-binary-v1$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^wire_payload_typed_binary_gate=typed-payload-fixtures$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^api_abi_policy=share/lingqu/mem_service/api-abi-policy.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^api_abi_policy_len=856$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^api_abi_policy_checksum=0xd0cc1392$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^api_abi_policy_len=1025$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^api_abi_policy_checksum=0x5e460a87$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^client_api_version=1$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^client_abi_version=1$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^client_record_abi_size=808$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -1176,7 +1188,7 @@ install-smoke: install
 	grep -q '^encryption_policy_command=encryption-policy$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^encryption_policy_gate=encryption-fixtures$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^required_gate_count=34$$' $(INSTALL_DATADIR)/package-manifest.txt
-	grep -q '^contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0xcb1aae94$$' $(INSTALL_DATADIR)/package-manifest.txt
+	grep -q '^contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0x74c57a78$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^contract=ops-certification-policy path=share/lingqu/mem_service/ops-certification-policy.txt' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^required_gate=package-fixtures$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^required_gate=version-fixtures$$' $(INSTALL_DATADIR)/package-manifest.txt
@@ -1298,4 +1310,4 @@ install-smoke: install
 	$(INSTALL_HOSTDIR)/linqu_mem_service_host release-readiness-fixtures
 
 clean:
-	rm -f linqu_mem_service linqu_mem_service_core linqu_mem_service_qwen3 linqu_mem_service_host linqu_mem_service_provider_roce linqu_mem_service_provider_tcp
+	rm -f linqu_mem_service linqu_mem_service_core linqu_mem_service_qwen3 linqu_mem_service_host linqu_mem_service_provider_obmm linqu_mem_service_provider_roce linqu_mem_service_provider_tcp

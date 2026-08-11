@@ -44,7 +44,12 @@ class MemServiceRoceProviderTests(unittest.TestCase):
         self.assertIn("linqu_mem_service_provider_<name>", layout)
         self.assertIn("never an automatic fallback", layout)
         self.assertIn(
-            "service data-plane\n  readiness requires a completed peer transfer",
+            "readiness requires a completed provider-specific peer canary",
+            layout,
+        )
+        self.assertIn(
+            "transfer completion for transfer providers, or mapped-range\n"
+            "  visibility for mapping providers",
             layout,
         )
         self.assertIn("linqu_mem_service_provider_roce:", makefile)

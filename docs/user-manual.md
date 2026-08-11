@@ -42,10 +42,14 @@ typed-payload/transport-block 等全部 fixture 门禁。
 ### 1.3 provider 构建与 smoke
 
 ```bash
+make -C apps/mem_service obmm-provider-smoke   # 构建 OBMM provider CLI + protocol-fixtures
 make -C apps/mem_service tcp-provider-smoke    # 构建 linqu_mem_service_provider_tcp + protocol-fixtures
 make -C apps/mem_service roce-provider-smoke   # 构建 linqu_mem_service_provider_roce + protocol-fixtures
 ```
 
+- OBMM provider：宿主机可运行 descriptor protocol fixture；真实设备 mapping
+  只在 Linux/QEMU guest 可用，未完成 peer mapping + checksum 验证前保持
+  `data_plane_ready=0`。
 - TCP provider：宿主机编译器 + `-pthread`，跨平台可用。
 - RoCE provider：需要 Linux + libibverbs/librdmacm（链接
   `-lrdmacm -libverbs`），在无 librdma 的主机上构建会失败。
@@ -57,7 +61,7 @@ make -C apps/mem_service roce-provider-smoke   # 构建 linqu_mem_service_provid
 python3 -m unittest discover tests    # 在仓库根目录执行
 ```
 
-覆盖 daemon runtime（含 pretraining worker 门禁）、record 回收、TCP/RoCE
+覆盖 daemon runtime（含 pretraining worker 门禁）、record 回收、OBMM/TCP/RoCE
 provider 行为。
 
 ## 2. 配置文件

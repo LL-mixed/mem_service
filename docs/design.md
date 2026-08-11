@@ -30,7 +30,8 @@ Split Contract）：
   周期、轻量 client transport、类型化 C client、payload schema。必须保持
   模型中立，可被外部 serving/pretraining 进程调用。
 - **Transport/runtime**：OBMM pool 映射、队列描述符、cluster bootstrap、
-  guest handoff 时序，以及 `providers/` 下的 TCP/RoCE 数据平面 provider。
+  guest handoff 时序，以及 `providers/` 下的 OBMM/TCP/RoCE 数据平面
+  provider。
 - **Model adapters**：Qwen3 与 DeepSeek-V4-Flash 的 range/KV/engram/放置
   语义。新模型族必须以 adapter 形式加入，不得特化服务核心。
 - **Deployment apps**：`apps/mem_service` 下的 CLI/guest/host 入口、配置、
@@ -110,7 +111,8 @@ linqu_mem_service_host serve（宿主机，libexec 安装）
 ## 4. Provider 契约与边界
 
 provider 实现 `mem_service_provider.h` 的中立契约（region 注册、本地/对端
-传输、durable 存储、accelerator memory、receive fence 等 capability）。完整
+传输、对端映射、durable 存储、accelerator memory、receive fence 等
+capability）。完整
 边界规则见 `components/mem_service/providers/README.md`，要点：
 
 - provider 不定义对象身份、KV 语义、放置策略、wire operation 或服务就绪；
@@ -130,11 +132,23 @@ provider 实现 `mem_service_provider.h` 的中立契约（region 注册、本�
 - 连接型 provider 使用两阶段 server 生命周期（`listen` 先于 `accept`），
   兼容的 `endpoint_open(..., server=true)` 供独立 canary 使用；验证与 region
   注册只在双方进入连接阶段后发生，禁止用延时掩盖 listen/connect 竞态。
-- 数据平面 channel 只有在全部配置的传输注册表就绪后才绑定；健康单边不能
+- 数据平面 channel 只有在全部配置的数据面注册表就绪后才绑定；健康单边不能
   掩盖缺失的 full-mesh 对端。
+- `PEER_MAPPING` 与 `PEER_TRANSFER` 是两个独立 capability。mapping provider
+  返回有边界的进程映射，并提供 `publish`、`invalidate`、`wait-visible`；
+  transfer provider 通过 `submit`/`completion` 搬运字节。任何 provider 都不得
+  用另一种机制伪装自身能力，也不得隐式回退。
+- OBMM remote mapping 走 SIM_DEC/GVA/GSVA 映射路径，不以 URMA 为底层。
+  OBMM provider 负责 export/import、mmap 生命周期、cache maintenance 与 range
+  visibility；OBMM SPSC queue 布局、对象协议和模型 handoff 保持在 provider
+  上层。URMA 若被使用，必须作为独立的显式传输 provider 注册。
 
 现有 provider：
 
+- **OBMM**（`mem_service_provider_obmm.c`）：QEMU guest 的 peer-mapping
+  provider；公开中立 mapping contract，并把设备相关操作限制在 provider
+  模块内。无 `/dev/obmm`、描述符版本不匹配、映射越界、cache/visibility
+  操作失败时全部 fail-closed。OBMM 与 URMA 是独立 provider。
 - **TCP**（`mem_service_provider_tcp.c`，CLI `linqu_mem_service_provider_tcp`）：
   持久连接 + `TCP_NODELAY`，发送方在接收方完成拷贝并校验 checksum 后才返回
   完成；支持 receive-fence。是显式选择的 provider，永不做 RoCE 失败时的自动

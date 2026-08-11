@@ -115,8 +115,8 @@ file_class=release_scripts count=10
 contract=release-manifest path=share/lingqu/mem_service/release-manifest.txt
 contract=wire-schema path=share/lingqu/mem_service/wire-schema.txt checksum=0xb1f00fc6
 contract=admin-output-schema path=share/lingqu/mem_service/admin-output-schema.txt checksum=0x4f63a749
-contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0xcb1aae94
-contract=api-abi-policy path=share/lingqu/mem_service/api-abi-policy.txt checksum=0xd0cc1392
+contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0x74c57a78
+contract=api-abi-policy path=share/lingqu/mem_service/api-abi-policy.txt checksum=0x5e460a87
 contract=compat-matrix path=share/lingqu/mem_service/compat-matrix.txt checksum=0x71077a46
 contract=compat-baseline-v1 path=share/lingqu/mem_service/compat-baseline-v1.txt checksum=0x30539fd6
 contract=compat-old-new-matrix path=share/lingqu/mem_service/compat-old-new-matrix.txt checksum=0x2bcca939
