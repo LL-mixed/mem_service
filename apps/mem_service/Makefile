@@ -5,7 +5,10 @@ HOST_CC ?= cc
 HOST_CFLAGS ?= -O2 -Wall -Wextra
 PYTHON ?= python3
 PKG_CONFIG ?= pkg-config
-INCLUDES := -I$(ROOT) -I$(ROOT)/libs/obmm_queue
+OBMM_SUBMODULE := $(ROOT)/vendor/obmm
+LIBOBMM_INCLUDES := -D__EXPORTED_HEADERS__ -I$(OBMM_SUBMODULE)/src/libobmm -I$(ROOT)/kernel_ub/include/uapi -I$(ROOT)/kernel_ub/include
+LIBOBMM_SRCS := $(OBMM_SUBMODULE)/src/libobmm/libobmm.c $(ROOT)/common/obmm_vendor_adaptor_sim.c
+INCLUDES := -I$(ROOT) -I$(ROOT)/libs/obmm_queue $(LIBOBMM_INCLUDES)
 
 MEM_SERVICE := $(ROOT)/components/mem_service/mem_service_module.c
 MEM_SERVICE_CLUSTER_UTILS := $(ROOT)/components/mem_service/mem_service_cluster_utils.c
@@ -236,7 +239,7 @@ linqu_mem_service: $(MEM_SERVICE_CORE_SRCS)
 linqu_mem_service_core: $(MEM_SERVICE_CORE_SRCS)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -lm -o $@
 
-linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_SRCS))
+linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_SRCS)) $(LIBOBMM_SRCS)
 	@test -f "$(LLM_INFER)" || { \
 		echo "error: llm_infer.c not found at $(LLM_INFER)"; \
 		echo "       set LLM_INFER_ROOT=<ub_sim checkout>/guest-linux/aarch64 to build the Qwen3 adapter"; \
@@ -247,7 +250,7 @@ linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_S
 linqu_mem_service_host: $(MEM_SERVICE_CORE_SRCS)
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) $^ -lm -o $@
 
-linqu_mem_service_provider_obmm: $(MEM_SERVICE_PROVIDER_OBMM_CLI) $(MEM_SERVICE_PROVIDER_OBMM) $(MEM_SERVICE_PROVIDER)
+linqu_mem_service_provider_obmm: $(MEM_SERVICE_PROVIDER_OBMM_CLI) $(MEM_SERVICE_PROVIDER_OBMM) $(MEM_SERVICE_PROVIDER) $(LIBOBMM_SRCS)
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) \
 		-I$(ROOT)/components/mem_service \
 		-I$(ROOT)/components/mem_service/providers \

@@ -1,0 +1,5 @@
+[submodule "vendor/obmm"]
+	path = vendor/obmm
+	url = https://atomgit.com/openeuler/obmm.git
+	branch = master
+	ignore = all

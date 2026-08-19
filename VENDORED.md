@@ -8,12 +8,16 @@ and run the full standalone and downstream contract tests.
 ## ub_sim sources
 
 - Source repository: `ub_sim`
-- Source revision: `734e24388eaa2c6d1cde07073f69abcf95947b9c`
+- Source revision: `ef391e7a9590cc7bb0ee71869932bee2d6e6ef3c`
 - `common/obmm_common.h`
   - SHA-256:
-    `95b9645e04e685039e68d49cefcf5c1d62ee17d029c1c58d1d3433d9c03e4635`
+    `1bcb8627b9712c274256e63b0abe20f51ebad8db2bbbeea089b602f7fd62dc2c`
   - Standalone adjustment: include paths point at repository-root vendored
-    headers instead of the former `guest-linux/aarch64` layout.
+    headers instead of the former `guest-linux/aarch64` layout, and the
+    `libobmm` dependency resolves via the `vendor/obmm` submodule and the
+    vendored `kernel_ub` headers.  libobmm is consumed via the
+    `vendor/obmm` submodule pinned to the same upstream revision
+    `53011eed10716b422d2ac29199f68b55f7c5bdc5` used by ub_sim.
 - `libs/obmm_queue/`
   - Aggregate SHA-256:
     `7cc88a0541d8061ac683be923c17fcb730f140bf58cd1cb76e80aa0fd057051a`

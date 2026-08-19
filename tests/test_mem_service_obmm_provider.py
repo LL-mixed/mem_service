@@ -10,6 +10,20 @@ COMPONENT = ROOT / "components" / "mem_service"
 PROVIDERS = COMPONENT / "providers"
 APP_DIR = ROOT / "apps" / "mem_service"
 CONFORMANCE_SOURCE = ROOT / "tests" / "mem_service_obmm_provider_conformance.c"
+OBMM_SUBMODULE = ROOT / "vendor" / "obmm"
+LIBOBMM_INCLUDE_FLAGS = [
+    "-D__EXPORTED_HEADERS__",
+    "-I",
+    str(OBMM_SUBMODULE / "src" / "libobmm"),
+    "-I",
+    str(ROOT / "kernel_ub" / "include" / "uapi"),
+    "-I",
+    str(ROOT / "kernel_ub" / "include"),
+]
+LIBOBMM_SRCS = [
+    str(OBMM_SUBMODULE / "src" / "libobmm" / "libobmm.c"),
+    str(ROOT / "common" / "obmm_vendor_adaptor_sim.c"),
+]
 
 
 class MemServiceObmmProviderTest(unittest.TestCase):
@@ -26,9 +40,11 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 str(COMPONENT),
                 "-I",
                 str(PROVIDERS),
+                *LIBOBMM_INCLUDE_FLAGS,
                 str(PROVIDERS / "mem_service_provider_obmm_cli.c"),
                 str(PROVIDERS / "mem_service_provider_obmm.c"),
                 str(COMPONENT / "mem_service_provider.c"),
+                *LIBOBMM_SRCS,
                 "-o",
                 str(output),
             ],
@@ -142,9 +158,11 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                     str(COMPONENT),
                     "-I",
                     str(PROVIDERS),
+                    *LIBOBMM_INCLUDE_FLAGS,
                     str(CONFORMANCE_SOURCE),
                     str(PROVIDERS / "mem_service_provider_obmm.c"),
                     str(COMPONENT / "mem_service_provider.c"),
+                    *LIBOBMM_SRCS,
                     "-o",
                     str(conformance),
                 ],

@@ -24,7 +24,7 @@ class RepositoryContractTests(unittest.TestCase):
         provenance = (ROOT / "VENDORED.md").read_text()
         expected_files = {
             "common/obmm_common.h":
-                "95b9645e04e685039e68d49cefcf5c1d62ee17d029c1c58d1d3433d9c03e4635",
+                "1bcb8627b9712c274256e63b0abe20f51ebad8db2bbbeea089b602f7fd62dc2c",
             "kernel_ub/include/uapi/ub/gsva.h":
                 "8986cec72ff5d252b729c44b746fcb6252cfe6d27e9d23e1e2a1a76190045236",
             "kernel_ub/include/uapi/ub/obmm.h":

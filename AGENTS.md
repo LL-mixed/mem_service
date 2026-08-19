@@ -12,6 +12,8 @@
   `examples/`。
 - `common/`、`libs/obmm_queue/`、`kernel_ub/include/` — vendored 依赖，不独立
   演进。
+- `vendor/obmm` — 上游 libobmm 子模块（pinned `53011ee`），OBMM provider 的
+  依赖。
 - `scripts/` — 发布认证/安装校验 shell；`tests/` — Python unittest 套件。
 - `docs/` — 设计与手册（中文）。
 
