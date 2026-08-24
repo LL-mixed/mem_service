@@ -2,6 +2,7 @@
 
 #include "mem_service_cluster_queue.h"
 #include "mem_service_cluster_runtime.h"
+#include "mem_service_cluster_utils.h"
 
 static bool mem_service_desc_matches_barrier(const struct obmm_desc *desc,
                                        uint16_t desc_type,
@@ -301,6 +302,65 @@ void mem_service_stash_pending_desc(struct mem_service_cluster_runtime *rt,
     rt->pending_desc_count[owner_idx] = (uint8_t)(count + 1);
 }
 
+int mem_service_pop_ingress_desc(struct mem_service_cluster_runtime *rt,
+                                 int owner_idx,
+                                 struct obmm_desc *desc_out)
+{
+    struct mem_service_cluster_slot full_local_slot;
+    struct obmm_spsc_queue *queue;
+    uint64_t queue_offset;
+    uint64_t descriptor_offset;
+    uint32_t head;
+    int rc;
+
+    if (!rt || !desc_out || owner_idx < 0 || owner_idx >= rt->node_count ||
+        owner_idx == rt->local_idx || !rt->ingress_queue_base ||
+        !rt->ingress_queues[owner_idx] || rt->local_idx < 0 ||
+        rt->local_idx >= rt->node_count) {
+        return -EINVAL;
+    }
+    queue = rt->ingress_queues[owner_idx];
+    queue_offset = (uint64_t)((uint8_t *)queue -
+                              (uint8_t *)rt->ingress_queue_base);
+    if (queue_offset > rt->region_size ||
+        obmm_queue_region_size(queue->size) >
+            rt->region_size - queue_offset) {
+        return -EINVAL;
+    }
+
+    full_local_slot = rt->slots[rt->local_idx];
+    full_local_slot.region.addr = rt->ingress_queue_base;
+    full_local_slot.region.len = rt->region_size;
+    head = atomic_load_explicit(&queue->head, memory_order_relaxed);
+    descriptor_offset = queue_offset +
+                        offsetof(struct obmm_spsc_queue, desc) +
+                        (uint64_t)(head & queue->mask) *
+                            sizeof(struct obmm_desc);
+    if (mem_service_update_region_range_at(&full_local_slot,
+                                           descriptor_offset,
+                                           sizeof(struct obmm_desc),
+                                           false) != 0) {
+        return -EIO;
+    }
+    if (mem_service_update_region_range_at(
+            &full_local_slot,
+            queue_offset + offsetof(struct obmm_spsc_queue, tail),
+            sizeof(queue->tail),
+            false) != 0) {
+        return -EIO;
+    }
+    rc = obmm_spsc_pop(queue, desc_out);
+    if (rc == 0 &&
+        mem_service_update_region_range_at(
+            &full_local_slot,
+            queue_offset + offsetof(struct obmm_spsc_queue, head),
+            sizeof(queue->head),
+            true) != 0) {
+        return -EIO;
+    }
+    return rc;
+}
+
 int mem_service_queue_barrier(struct mem_service_cluster_runtime *rt,
                               uint16_t desc_type,
                               uint16_t epoch,
@@ -342,7 +402,7 @@ int mem_service_queue_barrier(struct mem_service_cluster_runtime *rt,
                 got[i] = true;
                 continue;
             }
-            while (obmm_spsc_pop(rt->ingress_queues[i], &rx) == 0) {
+            while (mem_service_pop_ingress_desc(rt, i, &rx) == 0) {
                 if (mem_service_desc_matches_barrier(&rx, desc_type, epoch)) {
                     got[i] = true;
                 } else {
@@ -406,16 +466,18 @@ int mem_service_push_obmm_object_descs(struct mem_service_cluster_runtime *rt,
     return 0;
 }
 
-int mem_service_push_obmm_object_desc_to(struct mem_service_cluster_runtime *rt,
-                                         uint32_t target_node,
-                                         uint32_t payload_kind,
-                                         uint64_t payload_offset,
-                                         uint64_t payload_len,
-                                         uint64_t checksum,
-                                         uint16_t epoch)
+int mem_service_try_push_obmm_object_desc_to(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t target_node,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint64_t checksum,
+    uint16_t epoch)
 {
-    long deadline = obmm_now_ms() + MEM_SERVICE_CLUSTER_WAIT_MS;
     struct obmm_desc desc;
+    struct obmm_spsc_queue *queue;
+    int rc;
 
     if (!rt || target_node >= (uint32_t)rt->node_count ||
         target_node == (uint32_t)rt->local_idx ||
@@ -429,6 +491,7 @@ int mem_service_push_obmm_object_desc_to(struct mem_service_cluster_runtime *rt,
     if (!rt->egress_queues[target_node]) {
         return -1;
     }
+    queue = rt->egress_queues[target_node];
 
     memset(&desc, 0, sizeof(desc));
     desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
@@ -441,18 +504,19 @@ int mem_service_push_obmm_object_desc_to(struct mem_service_cluster_runtime *rt,
     desc.payload_offset = payload_offset;
     desc.cookie = (uint32_t)(checksum ^ (checksum >> 32));
 
-    while (obmm_spsc_push(rt->egress_queues[target_node], &desc) != 0) {
-        if (obmm_now_ms() > deadline) {
-            fprintf(stderr,
-                    "[mem_service] object desc unicast timeout kind=%u target=%u offset=%#" PRIx64 "\n",
-                    payload_kind,
-                    target_node + 1U,
-                    payload_offset);
-            return -1;
-        }
-        usleep(1000);
+    rc = obmm_spsc_push(queue, &desc);
+    if (rc == -EAGAIN) {
+        fprintf(stderr,
+                "[mem_service] object desc hint backpressured"
+                " kind=%u target=%u head=%u tail=%u size=%u\n",
+                payload_kind,
+                target_node + 1U,
+                atomic_load_explicit(&queue->head, memory_order_relaxed),
+                atomic_load_explicit(&queue->tail, memory_order_relaxed),
+                queue->size);
+        return 1;
     }
-    return 0;
+    return rc == 0 ? 0 : -1;
 }
 
 int mem_service_wait_remote_obmm_object_descs(struct mem_service_cluster_runtime *rt,
@@ -515,7 +579,7 @@ int mem_service_wait_remote_obmm_object_descs(struct mem_service_cluster_runtime
                                                         MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_OUTPUT)) {
             saw_hidden_output = true;
         }
-        while (obmm_spsc_pop(q, &desc) == 0) {
+        while (mem_service_pop_ingress_desc(rt, (int)owner_node, &desc) == 0) {
             bool matched = false;
             drained = true;
             if (desc.type != OBMM_DESC_MEM_SERVICE_OBJECT_PUT ||

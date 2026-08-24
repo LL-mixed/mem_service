@@ -69,6 +69,7 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     long producer_publish_monotonic_ms;
     long producer_clock_offset_ms;
     uint8_t *base;
+    uint32_t notifications_backpressured = 0;
 
     if (!svc || !request || !request->model_key ||
         cluster_node_count != request->range_nodes ||
@@ -196,15 +197,22 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
                                (local_token_result.object_payload_checksum >>
                                 32));
                 mem_service_stash_pending_desc(rt, rt->local_idx, &desc);
-            } else if (mem_service_push_obmm_object_desc_to(
-                           rt,
-                           node_idx,
-                           MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
-                           local_token_result.object_backing_offset,
-                           local_token_result.object_backing_len,
-                           local_token_result.object_payload_checksum,
-                           object_epoch) != 0) {
-                return -1;
+            } else {
+                int notify_status = mem_service_try_push_obmm_object_desc_to(
+                    rt,
+                    node_idx,
+                    MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                    local_token_result.object_backing_offset,
+                    local_token_result.object_backing_len,
+                    local_token_result.object_payload_checksum,
+                    object_epoch);
+
+                if (notify_status < 0) {
+                    return -1;
+                }
+                if (notify_status > 0) {
+                    notifications_backpressured += 1;
+                }
             }
         }
     } else if (target_node == (uint32_t)rt->local_idx) {
@@ -227,17 +235,24 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
             (uint32_t)(local_token_result.object_payload_checksum ^
                        (local_token_result.object_payload_checksum >> 32));
         mem_service_stash_pending_desc(rt, rt->local_idx, &desc);
-    } else if (mem_service_push_obmm_object_desc_to(
-                   rt,
-                   target_node,
-                   MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
-                   local_token_result.object_backing_offset,
-                   local_token_result.object_backing_len,
-                   local_token_result.object_payload_checksum,
-                   object_epoch) != 0) {
-        return -1;
+    } else {
+        int notify_status = mem_service_try_push_obmm_object_desc_to(
+            rt,
+            target_node,
+            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+            local_token_result.object_backing_offset,
+            local_token_result.object_backing_len,
+            local_token_result.object_payload_checksum,
+            object_epoch);
+
+        if (notify_status < 0) {
+            return -1;
+        }
+        if (notify_status > 0) {
+            notifications_backpressured = 1;
+        }
     }
-    printf("[mem_service] stage model_terminal_token_result_publish local=node%u target=node%u step=%" PRIu64 " token=%" PRIu64 " runner_up=%" PRIu64 " margin_milli=%" PRIu64 " logits_checksum=0x%016" PRIx64 " text_checksum=0x%016" PRIx64 " piece_word0=0x%016" PRIx64 " piece_word1=0x%016" PRIx64 " object_key=%s offset=0x%016" PRIx64 " bytes=%" PRIu64 " checksum=0x%016" PRIx64 " epoch=%u seq=%u backing=obmm_pool metadata=db queue=%s status=ok publisher=%s broadcast_targets=%u\n",
+    printf("[mem_service] stage model_terminal_token_result_publish local=node%u target=node%u step=%" PRIu64 " token=%" PRIu64 " runner_up=%" PRIu64 " margin_milli=%" PRIu64 " logits_checksum=0x%016" PRIx64 " text_checksum=0x%016" PRIx64 " piece_word0=0x%016" PRIx64 " piece_word1=0x%016" PRIx64 " object_key=%s offset=0x%016" PRIx64 " bytes=%" PRIu64 " checksum=0x%016" PRIx64 " epoch=%u seq=%u backing=obmm_pool metadata=db queue=%s status=ok notification=%s publisher=%s broadcast_targets=%u\n",
            local_node + 1U,
            target_node + 1U,
            decode_step,
@@ -255,6 +270,7 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
            object_epoch,
            local_publish_seq,
            target_node == (uint32_t)rt->local_idx ? "local_pending" : "obmm_spsc",
+           notifications_backpressured == 0 ? "delivered" : "backpressured",
            require_terminal_node ? "terminal_node" : "shortpath_boundary",
            require_terminal_node ? 1U : cluster_node_count);
     return 0;

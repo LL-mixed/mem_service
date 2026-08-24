@@ -54,6 +54,9 @@ bool mem_service_take_pending_object_kind_len_desc(
 void mem_service_stash_pending_desc(struct mem_service_cluster_runtime *rt,
                                     int owner_idx,
                                     const struct obmm_desc *desc);
+int mem_service_pop_ingress_desc(struct mem_service_cluster_runtime *rt,
+                                 int owner_idx,
+                                 struct obmm_desc *desc_out);
 int mem_service_queue_barrier(struct mem_service_cluster_runtime *rt,
                               uint16_t desc_type,
                               uint16_t epoch,
@@ -64,13 +67,14 @@ int mem_service_push_obmm_object_descs(struct mem_service_cluster_runtime *rt,
                                        uint64_t payload_len,
                                        uint64_t checksum,
                                        uint16_t epoch);
-int mem_service_push_obmm_object_desc_to(struct mem_service_cluster_runtime *rt,
-                                         uint32_t target_node,
-                                         uint32_t payload_kind,
-                                         uint64_t payload_offset,
-                                         uint64_t payload_len,
-                                         uint64_t checksum,
-                                         uint16_t epoch);
+int mem_service_try_push_obmm_object_desc_to(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t target_node,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint64_t checksum,
+    uint16_t epoch);
 int mem_service_wait_remote_obmm_object_descs(struct mem_service_cluster_runtime *rt,
                                              uint32_t owner_node,
                                              uint16_t epoch,

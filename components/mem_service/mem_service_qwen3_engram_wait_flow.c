@@ -76,7 +76,7 @@ int mem_service_obmm_service_v0_wait_engram_candidates(struct mem_service *svc,
                             MEM_SERVICE_OBMM_QWEN3_ENGRAM_CANDIDATES_BYTES,
                             &candidates_desc)) {
                     } else if (rt->ingress_queues[node_idx]) {
-                        while (obmm_spsc_pop(rt->ingress_queues[node_idx], &rx) == 0) {
+                        while (mem_service_pop_ingress_desc(rt, node_idx, &rx) == 0) {
                             if (mem_service_object_desc_kind_len_matches(
                                     &rx,
                                     MEM_SERVICE_OBMM_KIND_QWEN3_ENGRAM_CANDIDATES,
@@ -258,7 +258,7 @@ int mem_service_obmm_service_v0_wait_engram_selected_token(struct mem_service *s
                         MEM_SERVICE_OBMM_QWEN3_ENGRAM_SELECTED_BYTES,
                         &selected_desc)) {
                 } else if (rt->ingress_queues[owner_idx]) {
-                    while (obmm_spsc_pop(rt->ingress_queues[owner_idx], &rx) == 0) {
+                    while (mem_service_pop_ingress_desc(rt, owner_idx, &rx) == 0) {
                         if (mem_service_object_desc_matches(
                                 &rx,
                                 expected_epoch,
@@ -404,7 +404,7 @@ int mem_service_obmm_service_v0_wait_engram_history(struct mem_service *svc,
                         sizeof(payload_words),
                         &history_desc)) {
                 } else if (rt->ingress_queues[owner_idx]) {
-                    while (obmm_spsc_pop(rt->ingress_queues[owner_idx], &rx) == 0) {
+                    while (mem_service_pop_ingress_desc(rt, owner_idx, &rx) == 0) {
                         if (mem_service_object_desc_matches(
                                 &rx,
                                 expected_epoch,
@@ -560,7 +560,7 @@ int mem_service_obmm_service_v0_wait_engram_state(struct mem_service *svc,
                         MEM_SERVICE_OBMM_QWEN3_ENGRAM_STATE_BYTES,
                         &state_desc)) {
                 } else if (rt->ingress_queues[owner_idx]) {
-                    while (obmm_spsc_pop(rt->ingress_queues[owner_idx], &rx) == 0) {
+                    while (mem_service_pop_ingress_desc(rt, owner_idx, &rx) == 0) {
                         if (mem_service_object_desc_matches(
                                 &rx,
                                 expected_epoch,

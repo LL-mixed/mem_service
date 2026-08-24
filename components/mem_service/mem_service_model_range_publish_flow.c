@@ -253,6 +253,7 @@ int mem_service_range_flow_publish_runtime_output(
     uint64_t hidden_range_bytes;
     struct lingqu_object_ref_wire hidden_ref;
     struct lingqu_object_ref_wire kv_ref;
+    int notification_status = 0;
 
     if (!svc || !request || !request->model_key ||
         request->local_placement.owner_node != local_node ||
@@ -446,18 +447,21 @@ int mem_service_range_flow_publish_runtime_output(
                  decode_step,
                  local_node + 1U);
     }
-    if (!terminal_range &&
-        mem_service_push_obmm_object_desc_to(rt,
-                                       target_node,
-                                       MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT,
-                                       local_hidden_output.object_backing_offset,
-                                       local_hidden_output.object_backing_len,
-                                       local_hidden_output.object_payload_checksum,
-                                       object_epoch) != 0) {
-        return -1;
+    if (!terminal_range) {
+        notification_status = mem_service_try_push_obmm_object_desc_to(
+            rt,
+            target_node,
+            MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT,
+            local_hidden_output.object_backing_offset,
+            local_hidden_output.object_backing_len,
+            local_hidden_output.object_payload_checksum,
+            object_epoch);
+        if (notification_status < 0) {
+            return -1;
+        }
     }
     if (!terminal_range && boundary_observation_id[0] != '\0') {
-        printf("[mem_service] stage model_range_forward_runtime_ingress_publish local=node%u target=node%u observation_id=%s step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok\n",
+        printf("[mem_service] stage model_range_forward_runtime_ingress_publish local=node%u target=node%u observation_id=%s step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok notification=%s\n",
                local_node + 1U,
                target_node + 1U,
                boundary_observation_id,
@@ -474,9 +478,10 @@ int mem_service_range_flow_publish_runtime_output(
                producer_publish_monotonic_ms,
                producer_clock_offset_ms,
                object_epoch,
-               local_publish_seq);
+               local_publish_seq,
+               notification_status == 0 ? "delivered" : "backpressured");
     } else if (!terminal_range) {
-        printf("[mem_service] stage model_range_forward_runtime_ingress_publish local=node%u target=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok\n",
+        printf("[mem_service] stage model_range_forward_runtime_ingress_publish local=node%u target=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok notification=%s\n",
                local_node + 1U,
                target_node + 1U,
                decode_step,
@@ -492,9 +497,10 @@ int mem_service_range_flow_publish_runtime_output(
                producer_publish_monotonic_ms,
                producer_clock_offset_ms,
                object_epoch,
-               local_publish_seq);
+               local_publish_seq,
+               notification_status == 0 ? "delivered" : "backpressured");
     }
-    printf("[mem_service] stage model_range_forward_runtime_output_publish local=node%u step=%" PRIu64 " key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u output_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok\n",
+    printf("[mem_service] stage model_range_forward_runtime_output_publish local=node%u step=%" PRIu64 " key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u output_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok notification=%s\n",
            local_node + 1U,
            decode_step,
            hidden_ref.key_hash,
@@ -508,7 +514,10 @@ int mem_service_range_flow_publish_runtime_output(
            producer_publish_monotonic_ms,
            producer_clock_offset_ms,
            object_epoch,
-           local_publish_seq);
+           local_publish_seq,
+           terminal_range ?
+               "not_applicable" :
+               (notification_status == 0 ? "delivered" : "backpressured"));
     printf("[mem_service] stage model_range_kv_state_publish local=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " slot_bytes=%" PRIu64 " block_bytes=%" PRIu64 " blocks=%" PRIu64 " reserved_bytes=%" PRIu64 " producer_publish_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service status=ok\n",
            local_node + 1U,
            decode_step,

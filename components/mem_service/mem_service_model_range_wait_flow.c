@@ -41,6 +41,72 @@ static void mem_service_model_format_runtime_wait_token_key(
              object_decode_step);
 }
 
+static void mem_service_model_format_runtime_wait_range_key(
+    char *key,
+    size_t key_len,
+    const char *model_key,
+    uint32_t target_node,
+    uint64_t decode_step)
+{
+    uint64_t run_scope_hash = mem_service_run_scope_hash_from_env();
+    uint64_t object_decode_step =
+        mem_service_serving_decode_step_from_env(decode_step);
+
+    if (!key || key_len == 0 || !model_key || model_key[0] == '\0') {
+        return;
+    }
+    if (run_scope_hash != 0) {
+        snprintf(key,
+                 key_len,
+                 "hidden/%s/scope/%016" PRIx64
+                 "/node%u/range-runtime-input/decode-step%" PRIu64,
+                 model_key,
+                 run_scope_hash,
+                 target_node + 1U,
+                 object_decode_step);
+        return;
+    }
+    snprintf(key,
+             key_len,
+             "hidden/%s/node%u/range-runtime-input/decode-step%" PRIu64,
+             model_key,
+             target_node + 1U,
+             object_decode_step);
+}
+
+static bool mem_service_model_refresh_remote_metadata(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot)
+{
+    if (!rt || !slot || !slot->region.addr) {
+        return false;
+    }
+    return slot->is_local ||
+           mem_service_sync_remote_range(
+               slot,
+               rt->payload_offset,
+               sizeof(struct mem_service_cluster_payload)) == 0;
+}
+
+static bool mem_service_model_refresh_remote_payload(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    uint64_t payload_offset,
+    uint64_t payload_len)
+{
+    if (!rt || !slot || !slot->region.addr ||
+        payload_offset > slot->region.len ||
+        payload_len > slot->region.len - payload_offset ||
+        rt->payload_offset > UINT64_MAX - payload_offset) {
+        return false;
+    }
+    return slot->is_local ||
+           mem_service_sync_remote_range(
+               slot,
+               rt->payload_offset + payload_offset,
+               payload_len) == 0;
+}
+
 static const char *mem_service_model_ub_ssd_read_status_name(
     enum mem_service_ub_ssd_gsva_io_status status)
 {
@@ -277,7 +343,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     uint64_t resolved_backing_offset = 0;
     const char *resolved_backing = "obmm_shmem";
     const char *resolved_target = "mapped_view";
+    const char *range_resolution = "descriptor";
     bool terminal_desc_found = false;
+    bool metadata_found = false;
 
     if (!request || !request->model_key || !view_out ||
         cluster_node_count != request->range_nodes ||
@@ -309,6 +377,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         uint64_t checksum;
         bool token_input_found = false;
         bool token_desc_found = false;
+        const char *token_resolution = "descriptor";
 
         if (mem_service_cluster_runtime_require(rt) != 0) {
             fprintf(stderr,
@@ -321,7 +390,11 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         memset(&token_desc, 0, sizeof(token_desc));
         wait_enter_ms = obmm_now_ms();
         found_ms = mem_service_wallclock_ms();
-        token_result_key[0] = '\0';
+        mem_service_model_format_runtime_wait_token_key(
+            token_result_key,
+            sizeof(token_result_key),
+            request->model_key,
+            decode_step - 1U);
         expected_epoch = (uint16_t)(decode_step & 0xffffU);
         if (expected_epoch == 0) {
             expected_epoch = 1;
@@ -347,22 +420,58 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     token_desc_found = true;
                     break;
                 }
-                if (owner_idx == rt->local_idx ||
-                    !rt->ingress_queues[owner_idx]) {
+                if (owner_idx != rt->local_idx &&
+                    !rt->slots[owner_idx].region.addr &&
+                    mem_service_activate_remote_slot(rt, owner_idx) != 0) {
                     continue;
                 }
-                while (obmm_spsc_pop(rt->ingress_queues[owner_idx], &rx) == 0) {
-                    if (mem_service_token_result_desc_matches(
-                            &rx,
-                            expected_epoch,
-                            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
-                            MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES)) {
-                        token_desc = rx;
-                        source_node = (uint32_t)owner_idx;
-                        token_desc_found = true;
-                        break;
+                if (owner_idx != rt->local_idx &&
+                    rt->ingress_queues[owner_idx]) {
+                    while (mem_service_pop_ingress_desc(rt, owner_idx, &rx) == 0) {
+                        if (mem_service_token_result_desc_matches(
+                                &rx,
+                                expected_epoch,
+                                MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                                MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES)) {
+                            token_desc = rx;
+                            source_node = (uint32_t)owner_idx;
+                            token_desc_found = true;
+                            break;
+                        }
+                        mem_service_stash_pending_desc(rt, owner_idx, &rx);
                     }
-                    mem_service_stash_pending_desc(rt, owner_idx, &rx);
+                }
+                if (!token_desc_found &&
+                    rt->slots[owner_idx].region.addr &&
+                    mem_service_model_refresh_remote_metadata(
+                        rt,
+                        &rt->slots[owner_idx]) &&
+                    mem_service_slot_find_record(&rt->slots[owner_idx],
+                                                 token_result_key,
+                                                 &token_record) &&
+                    token_record.kind == MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT &&
+                    token_record.object_owner_node == (uint32_t)owner_idx &&
+                    token_record.object_payload_kind ==
+                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT &&
+                    token_record.object_backing_len ==
+                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES) {
+                    memset(&token_desc, 0, sizeof(token_desc));
+                    token_desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
+                    token_desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
+                    token_desc.seq = ((uint64_t)expected_epoch << 48) |
+                                     ((uint64_t)(owner_idx + 1) << 32) |
+                                     (token_record.object_backing_offset &
+                                      0xffffffffULL);
+                    token_desc.region_id = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
+                    token_desc.payload_len =
+                        (uint32_t)token_record.object_backing_len;
+                    token_desc.payload_offset = token_record.object_backing_offset;
+                    token_desc.cookie =
+                        (uint32_t)(token_record.object_payload_checksum ^
+                                   (token_record.object_payload_checksum >> 32));
+                    source_node = (uint32_t)owner_idx;
+                    token_desc_found = true;
+                    token_resolution = "object_record";
                 }
             }
             if (!token_desc_found) {
@@ -388,6 +497,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 memset(&compact, 0, sizeof(compact));
                 memset(&seen, 0, sizeof(seen));
                 if (!owner_slot->region.addr ||
+                    !mem_service_model_refresh_remote_metadata(rt,
+                                                               owner_slot) ||
                     !mem_service_try_read_stable_compact_summary_region(owner_slot,
                                                                   &compact,
                                                                   &seen) ||
@@ -424,6 +535,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                        source_node + 1U,
                        token_result_key);
                 return -1;
+            }
+            if (!mem_service_model_refresh_remote_payload(
+                    rt,
+                    owner_slot,
+                    token_record.object_backing_offset,
+                    token_record.object_backing_len)) {
+                mem_service_cpu_relax_wait(&relax_attempt);
+                continue;
             }
             payload_view =
                 (const uint8_t *)owner_slot->region.addr +
@@ -506,7 +625,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         view_out->wait_attempts = attempts;
         view_out->activate_ms = activate_ms;
         view_out->metadata_ms = metadata_ms;
-        printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " token=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=0 validation=object_desc_backing queue=obmm_spsc receive=descriptor metadata=lingqu_object_service backing=obmm_shmem source=terminal_token_result target=mapped_view status=ok\n",
+        printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " token=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=0 validation=object_desc_backing queue=obmm_spsc receive=%s metadata=lingqu_object_service backing=obmm_shmem source=terminal_token_result target=mapped_view status=ok\n",
                local_node + 1U,
                source_node + 1U,
                token_result_key,
@@ -525,7 +644,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                producer_to_found_monotonic_ms,
                view_out->wait_attempts,
                activate_ms,
-               metadata_ms);
+               metadata_ms,
+               token_resolution);
         return 0;
     }
     if (!request->has_predecessor) {
@@ -554,19 +674,29 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 decode_step);
         return -1;
     }
-    if (source_node >= cluster_node_count || !rt->ingress_queues[source_node]) {
-        fprintf(stderr, "[mem_service] gap range_runtime_input=source_queue_missing"
-               " local=node%u source=node%u nodes=%u queue=%u\n",
+    if (source_node >= cluster_node_count) {
+        fprintf(stderr, "[mem_service] gap range_runtime_input=source_invalid"
+               " local=node%u source=node%u nodes=%u\n",
                local_node + 1U,
                source_node + 1U,
-               cluster_node_count,
-               source_node < MEM_SERVICE_CLUSTER_MAX_NODES &&
-                       rt->ingress_queues[source_node] ?
-                   1U :
-                   0U);
+               cluster_node_count);
         return -1;
     }
-    ingress_key[0] = '\0';
+    if (!rt->slots[source_node].region.addr) {
+        long activate_start_ms = obmm_now_ms();
+
+        if (mem_service_activate_remote_slot(rt, (int)source_node) != 0) {
+            return -1;
+        }
+        activate_ms += (uint64_t)(obmm_now_ms() - activate_start_ms);
+    }
+    source_slot = &rt->slots[source_node];
+    mem_service_model_format_runtime_wait_range_key(
+        ingress_key,
+        sizeof(ingress_key),
+        request->model_key,
+        local_node,
+        decode_step);
 
     memset(&remote_hidden_output, 0, sizeof(remote_hidden_output));
     memset(&handoff_desc, 0, sizeof(handoff_desc));
@@ -608,7 +738,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         !rt->ingress_queues[owner_idx]) {
                         continue;
                     }
-                    while (obmm_spsc_pop(rt->ingress_queues[owner_idx], &rx) == 0) {
+                    while (mem_service_pop_ingress_desc(rt, owner_idx, &rx) == 0) {
                         if (mem_service_token_result_desc_matches(
                                 &rx,
                                 expected_epoch,
@@ -653,6 +783,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     long metadata_start_ms = obmm_now_ms();
 
                     if (!token_slot->region.addr ||
+                        !mem_service_model_refresh_remote_metadata(
+                            rt,
+                            token_slot) ||
                         !mem_service_try_read_stable_compact_summary_region(
                             token_slot,
                             &compact,
@@ -686,6 +819,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     token_record.object_backing_len >
                         token_slot->region.len -
                             token_record.object_backing_offset) {
+                    mem_service_cpu_relax_wait(&relax_attempt);
+                    continue;
+                }
+                if (!mem_service_model_refresh_remote_payload(
+                        rt,
+                        token_slot,
+                        token_record.object_backing_offset,
+                        token_record.object_backing_len)) {
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
                 }
@@ -785,6 +926,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 memset(&compact, 0, sizeof(compact));
                 memset(&seen, 0, sizeof(seen));
                 if (!token_slot->region.addr ||
+                    !mem_service_model_refresh_remote_metadata(rt,
+                                                               token_slot) ||
                     !mem_service_try_read_stable_compact_summary_region(token_slot,
                                                                   &compact,
                                                                   &seen) ||
@@ -797,6 +940,13 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     token_record.object_backing_offset > token_slot->region.len ||
                     token_record.object_backing_len >
                         token_slot->region.len - token_record.object_backing_offset) {
+                    continue;
+                }
+                if (!mem_service_model_refresh_remote_payload(
+                        rt,
+                        token_slot,
+                        token_record.object_backing_offset,
+                        token_record.object_backing_len)) {
                     continue;
                 }
                 payload_view =
@@ -883,17 +1033,55 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                                                         &handoff_desc)) {
             break;
         }
-        while (obmm_spsc_pop(rt->ingress_queues[source_node], &rx) == 0) {
-            if (mem_service_runtime_range_input_desc_matches(&rx,
-                                                       hidden_range_bytes,
-                                                       expected_epoch)) {
-                handoff_desc = rx;
-                break;
+        if (rt->ingress_queues[source_node]) {
+            while (mem_service_pop_ingress_desc(rt, (int)source_node, &rx) == 0) {
+                if (mem_service_runtime_range_input_desc_matches(
+                        &rx,
+                        hidden_range_bytes,
+                        expected_epoch)) {
+                    handoff_desc = rx;
+                    break;
+                }
+                mem_service_stash_pending_desc(rt, (int)source_node, &rx);
             }
-            mem_service_stash_pending_desc(rt, (int)source_node, &rx);
         }
         if (handoff_desc.type == OBMM_DESC_MEM_SERVICE_OBJECT_PUT) {
             break;
+        }
+        {
+            long metadata_start_ms = obmm_now_ms();
+
+            if (mem_service_model_refresh_remote_metadata(rt, source_slot) &&
+                mem_service_slot_find_record(source_slot,
+                                             ingress_key,
+                                             &remote_hidden_output) &&
+                remote_hidden_output.kind == MEM_SERVICE_RECORD_HIDDEN_RANGE_INPUT &&
+                remote_hidden_output.object_owner_node == source_node &&
+                remote_hidden_output.object_payload_kind ==
+                    MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT &&
+                remote_hidden_output.object_backing_len == hidden_range_bytes) {
+                memset(&handoff_desc, 0, sizeof(handoff_desc));
+                handoff_desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
+                handoff_desc.flags =
+                    MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT;
+                handoff_desc.seq = ((uint64_t)expected_epoch << 48) |
+                                   ((uint64_t)(source_node + 1U) << 32) |
+                                   (remote_hidden_output.object_backing_offset &
+                                    0xffffffffULL);
+                handoff_desc.region_id =
+                    MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT;
+                handoff_desc.payload_len =
+                    (uint32_t)remote_hidden_output.object_backing_len;
+                handoff_desc.payload_offset =
+                    remote_hidden_output.object_backing_offset;
+                handoff_desc.cookie =
+                    (uint32_t)(remote_hidden_output.object_payload_checksum ^
+                               (remote_hidden_output.object_payload_checksum >> 32));
+                metadata_ms = (uint64_t)(obmm_now_ms() - metadata_start_ms);
+                metadata_found = true;
+                range_resolution = "object_record";
+                break;
+            }
         }
         mem_service_cpu_relax_wait(&relax_attempt);
     }
@@ -909,18 +1097,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     }
     found_local_ms = obmm_now_ms();
     found_ms = mem_service_wallclock_ms();
-    if (!rt->slots[source_node].region.addr) {
-        long activate_start_ms = obmm_now_ms();
-
-        if (mem_service_activate_remote_slot(rt, (int)source_node) != 0) {
-            return -1;
-        }
-        activate_ms += (uint64_t)(obmm_now_ms() - activate_start_ms);
-    }
-    {
-        bool metadata_found = false;
-
-        source_slot = &rt->slots[source_node];
+    if (!metadata_found) {
         while (obmm_now_ms() < deadline) {
             long metadata_start_ms = obmm_now_ms();
             struct mem_service_cluster_payload_compact_summary compact;
@@ -928,7 +1105,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
 
             memset(&compact, 0, sizeof(compact));
             memset(&seen, 0, sizeof(seen));
-            if (mem_service_try_read_stable_compact_summary_region(source_slot,
+            if (mem_service_model_refresh_remote_metadata(rt, source_slot) &&
+                mem_service_try_read_stable_compact_summary_region(source_slot,
                                                              &compact,
                                                              &seen) &&
                 mem_service_slot_find_record_by_obmm_object_backing(
@@ -996,6 +1174,13 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         resolved_backing = "ub_ssd_gsva";
         resolved_target = "local_backend_read_buffer";
     } else {
+        if (!mem_service_model_refresh_remote_payload(
+                rt,
+                source_slot,
+                remote_hidden_output.object_backing_offset,
+                remote_hidden_output.object_backing_len)) {
+            return -1;
+        }
         payload_view =
             (const uint8_t *)source_slot->region.addr +
             remote_hidden_output.object_backing_offset;
@@ -1044,7 +1229,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     view_out->wait_attempts = attempts;
     view_out->activate_ms = activate_ms;
     view_out->metadata_ms = metadata_ms;
-    printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=%ld validation=object_desc_backing queue=obmm_spsc receive=descriptor metadata=lingqu_object_service backing=%s target=%s status=ok\n",
+    printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=%ld validation=object_desc_backing queue=obmm_spsc receive=%s metadata=lingqu_object_service backing=%s target=%s status=ok\n",
            local_node + 1U,
            source_node + 1U,
            ingress_key,
@@ -1064,6 +1249,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
            activate_ms,
            metadata_ms,
            checksum_ms,
+           range_resolution,
            resolved_backing,
            resolved_target);
     return 0;

@@ -3016,10 +3016,15 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn('#include "mem_service_cluster_queue.h"', cluster_queue)
         self.assertIn("mem_service_queue_barrier", cluster_queue)
         self.assertIn("mem_service_push_obmm_object_descs", cluster_queue)
+        self.assertIn("mem_service_try_push_obmm_object_desc_to", cluster_queue)
         self.assertIn("mem_service_wait_remote_obmm_object_descs", cluster_queue)
         self.assertIn("mem_service_runtime_range_input_desc_matches", cluster_queue)
         self.assertIn("mem_service_queue_barrier", cluster_queue_contract)
         self.assertIn("mem_service_push_obmm_object_descs", cluster_queue_contract)
+        self.assertIn(
+            "mem_service_try_push_obmm_object_desc_to",
+            cluster_queue_contract,
+        )
         self.assertIn("mem_service_wait_remote_obmm_object_descs", cluster_queue_contract)
         self.assertIn("mem_service_runtime_range_input_desc_matches", cluster_queue_contract)
         self.assertIn("guest OBMM SPSC queue barriers", readme)
@@ -3030,6 +3035,36 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             r"static int mem_service_queue_barrier"
             r"\(struct mem_service_cluster_runtime \*rt,",
         )
+
+    def test_cluster_queue_pop_refreshes_remote_writes_and_publishes_head(self):
+        cluster_queue = SERVICE_CLUSTER_QUEUE_C.read_text()
+        cluster_queue_contract = SERVICE_CLUSTER_QUEUE_H.read_text()
+        range_wait = SERVICE_MODEL_RANGE_WAIT_FLOW_C.read_text()
+        engram_wait = SERVICE_QWEN3_ENGRAM_WAIT_FLOW_C.read_text()
+        pop_match = re.search(
+            r"int mem_service_pop_ingress_desc\(.*?\n\}",
+            cluster_queue,
+            re.DOTALL,
+        )
+
+        self.assertIsNotNone(pop_match)
+        pop_body = pop_match.group(0)
+        descriptor_invalidate_at = pop_body.index("descriptor_offset")
+        tail_invalidate_at = pop_body.index(
+            "offsetof(struct obmm_spsc_queue, tail)",
+            descriptor_invalidate_at,
+        )
+        pop_at = pop_body.index("obmm_spsc_pop(queue, desc_out)")
+        head_publish_at = pop_body.index(
+            "offsetof(struct obmm_spsc_queue, head)",
+            pop_at,
+        )
+        self.assertLess(descriptor_invalidate_at, tail_invalidate_at)
+        self.assertLess(tail_invalidate_at, pop_at)
+        self.assertLess(pop_at, head_publish_at)
+        self.assertIn("mem_service_pop_ingress_desc", cluster_queue_contract)
+        self.assertNotIn("obmm_spsc_pop(", range_wait)
+        self.assertNotIn("obmm_spsc_pop(", engram_wait)
 
     def test_cluster_observe_helpers_are_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
@@ -3180,6 +3215,17 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn(
+            "mem_service_slot_find_record(source_slot,",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "mem_service_model_refresh_remote_metadata(rt, source_slot)",
+            range_wait_flow,
+        )
+        self.assertIn("mem_service_sync_remote_range(", range_wait_flow)
+        self.assertIn('range_resolution = "object_record"', range_wait_flow)
+        self.assertIn("receive=%s metadata=lingqu_object_service", range_wait_flow)
+        self.assertIn(
             "return -1;\n    }\n    if (completion.committed_ref.bytes",
             range_wait_flow,
         )
@@ -3212,7 +3258,11 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_publish_flow,
         )
         self.assertIn("mem_service_model_kv_state_alloc", range_publish_flow)
-        self.assertIn("mem_service_push_obmm_object_desc_to", range_publish_flow)
+        self.assertIn(
+            "mem_service_try_push_obmm_object_desc_to",
+            range_publish_flow,
+        )
+        self.assertIn('"backpressured"', range_publish_flow)
         self.assertIn("mem_service_cluster_runtime_current", range_publish_flow)
         self.assertIn('#include "mem_service_ub_ssd_gsva_io.h"', range_publish_flow)
         self.assertIn(
