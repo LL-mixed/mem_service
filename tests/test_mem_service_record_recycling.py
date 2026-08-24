@@ -3243,6 +3243,22 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn('range_resolution = "object_record"', range_wait_flow)
+        self.assertIn(
+            "MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS 30000L",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS 5000L",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "mem_service_model_record_recovery_due",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "(uint32_t)owner_idx != terminal_record_recovery_owner",
+            range_wait_flow,
+        )
         self.assertIn("mem_service_ack_obmm_object_desc_to", range_wait_flow)
         self.assertIn("receive=%s metadata=lingqu_object_service", range_wait_flow)
         self.assertIn(

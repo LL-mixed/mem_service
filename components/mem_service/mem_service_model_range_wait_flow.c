@@ -12,6 +12,29 @@
 #include "mem_service_record_table.h"
 #include "mem_service_ub_ssd_gsva_io.h"
 
+#define MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS 30000L
+#define MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS 5000L
+
+static bool mem_service_model_record_recovery_due(long *next_probe_ms,
+                                                   long interval_ms)
+{
+    long now_ms;
+
+    if (!next_probe_ms || interval_ms <= 0) {
+        return false;
+    }
+    now_ms = obmm_now_ms();
+    if (*next_probe_ms == 0) {
+        *next_probe_ms = now_ms + interval_ms;
+        return false;
+    }
+    if (now_ms < *next_probe_ms) {
+        return false;
+    }
+    *next_probe_ms = now_ms + interval_ms;
+    return true;
+}
+
 static void mem_service_model_format_runtime_wait_token_key(
     char *key,
     size_t key_len,
@@ -362,6 +385,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     long producer_publish_ms;
     long producer_publish_monotonic_ms;
     long producer_clock_offset_ms;
+    long next_range_record_recovery_ms = 0;
+    long next_terminal_record_recovery_ms = 0;
+    long next_token_record_recovery_ms = 0;
     long producer_to_found_ms = 0;
     long producer_to_found_monotonic_ms = 0;
     uint64_t activate_ms = 0;
@@ -371,6 +397,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     unsigned int relax_attempt = 0;
     uint32_t source_node = UINT32_MAX;
     uint32_t terminal_source_node = UINT32_MAX;
+    uint32_t terminal_record_recovery_owner = 0;
+    uint32_t token_record_recovery_owner = 0;
     uint64_t hidden_range_bytes;
     const uint8_t *payload_view;
     uint64_t checksum;
@@ -435,6 +463,10 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         }
         deadline = wait_enter_ms + mem_service_qwen3_runtime_range_wait_ms();
         while (obmm_now_ms() < deadline) {
+            bool probe_token_record =
+                mem_service_model_record_recovery_due(
+                    &next_token_record_recovery_ms,
+                    MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS);
             int owner_idx;
 
             attempts++;
@@ -475,7 +507,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         mem_service_stash_pending_desc(rt, owner_idx, &rx);
                     }
                 }
-                if (!token_desc_found &&
+                if (!token_desc_found && probe_token_record &&
+                    (uint32_t)owner_idx == token_record_recovery_owner &&
                     rt->slots[owner_idx].region.addr &&
                     mem_service_model_refresh_remote_metadata(
                         rt,
@@ -507,6 +540,11 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     token_desc_found = true;
                     token_resolution = "object_record";
                 }
+            }
+            if (probe_token_record) {
+                token_record_recovery_owner =
+                    (token_record_recovery_owner + 1U) %
+                    (uint32_t)rt->node_count;
             }
             if (!token_desc_found) {
                 mem_service_cpu_relax_wait(&relax_attempt);
@@ -742,6 +780,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     wait_enter_ms = obmm_now_ms();
     deadline = wait_enter_ms + mem_service_qwen3_runtime_range_wait_ms();
     while (obmm_now_ms() < deadline) {
+        bool probe_range_record = mem_service_model_record_recovery_due(
+            &next_range_record_recovery_ms,
+            MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS);
+        bool probe_terminal_record =
+            allow_terminal_commit &&
+            mem_service_model_record_recovery_due(
+                &next_terminal_record_recovery_ms,
+                MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS);
         struct obmm_desc rx;
 
         attempts++;
@@ -943,13 +989,19 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                        token_checksum);
                 return 0;
             }
-            for (int owner_idx = 0; owner_idx < rt->node_count; ++owner_idx) {
+            for (int owner_idx = 0;
+                 probe_terminal_record && owner_idx < rt->node_count;
+                 ++owner_idx) {
                 struct mem_service_cluster_slot *token_slot;
                 struct mem_service_record token_record;
                 struct mem_service_cluster_payload_compact_summary compact;
                 struct mem_service_cluster_payload_header seen;
                 uint64_t payload_words[8];
                 uint64_t token_checksum;
+
+                if ((uint32_t)owner_idx != terminal_record_recovery_owner) {
+                    continue;
+                }
 
                 if (owner_idx != rt->local_idx &&
                     mem_service_activate_remote_slot(rt, owner_idx) != 0) {
@@ -1059,6 +1111,11 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                        token_checksum);
                 return 0;
             }
+            if (probe_terminal_record) {
+                terminal_record_recovery_owner =
+                    (terminal_record_recovery_owner + 1U) %
+                    (uint32_t)rt->node_count;
+            }
         }
         if (mem_service_take_pending_runtime_range_input_desc(rt,
                                                         (int)source_node,
@@ -1082,7 +1139,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         if (handoff_desc.type == OBMM_DESC_MEM_SERVICE_OBJECT_PUT) {
             break;
         }
-        {
+        if (probe_range_record) {
             long metadata_start_ms = obmm_now_ms();
 
             if (mem_service_model_refresh_remote_metadata(rt, source_slot) &&
