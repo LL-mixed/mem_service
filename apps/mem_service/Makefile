@@ -8,6 +8,7 @@ PKG_CONFIG ?= pkg-config
 OBMM_SUBMODULE := $(ROOT)/vendor/obmm
 LIBOBMM_INCLUDES := -D__EXPORTED_HEADERS__ -I$(OBMM_SUBMODULE)/src/libobmm -I$(ROOT)/kernel_ub/include/uapi -I$(ROOT)/kernel_ub/include
 LIBOBMM_SRCS := $(OBMM_SUBMODULE)/src/libobmm/libobmm.c $(ROOT)/common/obmm_vendor_adaptor_sim.c
+LIBOBMM_LDLIBS := -pthread
 INCLUDES := -I$(ROOT) -I$(ROOT)/libs/obmm_queue $(LIBOBMM_INCLUDES)
 
 MEM_SERVICE := $(ROOT)/components/mem_service/mem_service_module.c
@@ -41,11 +42,11 @@ MEM_SERVICE_EXPERT_ROUTE_FLOW := $(ROOT)/components/mem_service/mem_service_expe
 MEM_SERVICE_EXPERT_CACHE := $(ROOT)/components/mem_service/mem_service_expert_cache.c
 MEM_SERVICE_QWEN3_RECORDS := $(ROOT)/components/mem_service/mem_service_qwen3_records.c
 MEM_SERVICE_QWEN3_RUNTIME := $(ROOT)/components/mem_service/mem_service_qwen3_runtime.c
-MEM_SERVICE_QWEN3_DECODE_BARRIER := $(ROOT)/components/mem_service/mem_service_qwen3_decode_barrier.c
-MEM_SERVICE_QWEN3_KV_STATE_FLOW := $(ROOT)/components/mem_service/mem_service_qwen3_kv_state_flow.c
-MEM_SERVICE_QWEN3_TERMINAL_TOKEN_FLOW := $(ROOT)/components/mem_service/mem_service_qwen3_terminal_token_flow.c
-MEM_SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW := $(ROOT)/components/mem_service/mem_service_qwen3_runtime_range_wait_flow.c
-MEM_SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW := $(ROOT)/components/mem_service/mem_service_qwen3_runtime_range_publish_flow.c
+MEM_SERVICE_MODEL_DECODE_BARRIER := $(ROOT)/components/mem_service/mem_service_model_decode_barrier.c
+MEM_SERVICE_MODEL_RANGE_KV_STATE_FLOW := $(ROOT)/components/mem_service/mem_service_model_range_kv_state_flow.c
+MEM_SERVICE_MODEL_TERMINAL_TOKEN_FLOW := $(ROOT)/components/mem_service/mem_service_model_terminal_token_flow.c
+MEM_SERVICE_MODEL_RANGE_WAIT_FLOW := $(ROOT)/components/mem_service/mem_service_model_range_wait_flow.c
+MEM_SERVICE_MODEL_RANGE_PUBLISH_FLOW := $(ROOT)/components/mem_service/mem_service_model_range_publish_flow.c
 MEM_SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW := $(ROOT)/components/mem_service/mem_service_qwen3_engram_publish_flow.c
 MEM_SERVICE_QWEN3_ENGRAM_WAIT_FLOW := $(ROOT)/components/mem_service/mem_service_qwen3_engram_wait_flow.c
 MEM_SERVICE_QWEN3 := $(ROOT)/components/mem_service/mem_service_qwen3.c
@@ -214,11 +215,11 @@ MEM_SERVICE_QWEN3_ADAPTER_SRCS := \
 	$(MEM_SERVICE_EXPERT_CACHE) \
 	$(MEM_SERVICE_QWEN3_RECORDS) \
 	$(MEM_SERVICE_QWEN3_RUNTIME) \
-	$(MEM_SERVICE_QWEN3_DECODE_BARRIER) \
-	$(MEM_SERVICE_QWEN3_KV_STATE_FLOW) \
-	$(MEM_SERVICE_QWEN3_TERMINAL_TOKEN_FLOW) \
-	$(MEM_SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW) \
-	$(MEM_SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW) \
+	$(MEM_SERVICE_MODEL_DECODE_BARRIER) \
+	$(MEM_SERVICE_MODEL_RANGE_KV_STATE_FLOW) \
+	$(MEM_SERVICE_MODEL_TERMINAL_TOKEN_FLOW) \
+	$(MEM_SERVICE_MODEL_RANGE_WAIT_FLOW) \
+	$(MEM_SERVICE_MODEL_RANGE_PUBLISH_FLOW) \
 	$(MEM_SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW) \
 	$(MEM_SERVICE_QWEN3_ENGRAM_WAIT_FLOW) \
 	$(MEM_SERVICE_QWEN3) \
@@ -245,7 +246,7 @@ linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_S
 		echo "       set LLM_INFER_ROOT=<ub_sim checkout>/guest-linux/aarch64 to build the Qwen3 adapter"; \
 		exit 1; \
 	}
-	$(CC) $(CFLAGS) -DMEM_SERVICE_ENABLE_QWEN3_INSPECT $(INCLUDES) -I$(LLM_INFER_ROOT) $^ $(LLM_INFER) -lm -o $@
+	$(CC) $(CFLAGS) -DMEM_SERVICE_ENABLE_QWEN3_INSPECT $(INCLUDES) -I$(LLM_INFER_ROOT) $^ $(LLM_INFER) $(LIBOBMM_LDLIBS) -lm -o $@
 
 linqu_mem_service_host: $(MEM_SERVICE_CORE_SRCS)
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) $^ -lm -o $@
@@ -254,7 +255,7 @@ linqu_mem_service_provider_obmm: $(MEM_SERVICE_PROVIDER_OBMM_CLI) $(MEM_SERVICE_
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) \
 		-I$(ROOT)/components/mem_service \
 		-I$(ROOT)/components/mem_service/providers \
-		$^ -o $@
+		$^ $(LIBOBMM_LDLIBS) -o $@
 
 obmm-provider-smoke: linqu_mem_service_provider_obmm
 	./linqu_mem_service_provider_obmm protocol-fixtures

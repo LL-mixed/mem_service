@@ -4,6 +4,18 @@
 inference guest harnesses and is being promoted into a standalone Memory
 Service process.
 
+## Model/runtime naming boundary
+
+Layer-range dispatch, hidden-state handoff, per-range KV publication and
+resolution, decode-round barriers, object-backed operands, and their logs are
+model-neutral runtime infrastructure. Their source files, public and private
+types, functions, stage names, and test fixtures must use `model_range` or
+another model-neutral name. Qwen3 and DeepSeek names are reserved for model
+adapters, model geometry, tokenizer behavior, Engram behavior, and
+model-specific operator execution. The descriptor opcode and wire field layout
+are stable across this naming boundary; renaming the runtime API must not
+change their numeric values or serialized representation.
+
 It now has a core-only app build, a minimal Unix-socket daemon/client path, and
 a Qwen3 adapter inspect build:
 
@@ -213,34 +225,33 @@ a Qwen3 adapter inspect build:
   helper contract used by the model adapter and OBMM object publication path.
 - `mem_service_qwen3_record_policy.h` contains Qwen3 runtime record retention
   constants used by the model adapter record policy.
-- `mem_service_qwen3_runtime.h` contains the private Qwen3 runtime helper
-  contract shared by split Qwen3 data-flow units.
-- `mem_service_qwen3_runtime.c` contains Qwen3 runtime payload checksum, KV
-  span allocation, engram object keys, and layer-range placement helpers
-  compiled as a standalone model helper translation unit.
+- `mem_service_model_runtime.h` contains model-neutral payload checksum, KV
+  allocation, and OBMM pool reporting helpers used by every range-flow model
+  adapter.
+- `mem_service_qwen3_runtime.h` contains only the private Qwen3 placement and
+  Engram helper contract.
+- `mem_service_qwen3_runtime.c` implements the model-neutral runtime helpers
+  declared by `mem_service_model_runtime.h` plus Qwen3 placement and Engram
+  helpers. The remaining mixed implementation is an internal split boundary;
+  consumers must include the header that matches the helper they call.
 - `mem_service_qwen3_placement.h` contains the Qwen3 layer-range placement
   contract used by the runtime range, KV, and object handoff flows.
-- `mem_service_qwen3_runtime_range_wait_flow.c` contains Qwen3 runtime range
-  input wait, scheduler work-item resolution, and mapped payload view helpers
-  compiled as a standalone model data-flow translation unit.
-- `mem_service_qwen3_runtime_range_publish_flow.c` contains Qwen3 runtime
-  range output, KV-state object publication, and downstream descriptor publish
-  helpers compiled as a standalone model data-flow translation unit.
-- `mem_service_qwen3_kv_state_flow.c` contains Qwen3 runtime range KV-state
-  publish and previous-step resolve helpers compiled as a standalone model
-  data-flow translation unit.
-- `mem_service_qwen3_terminal_token_flow.c` contains Qwen3 terminal token
-  publish, shortpath publish, and wait helpers compiled as a standalone model
-  data-flow translation unit.
+- `mem_service_model_range_wait_flow.c` contains model-neutral runtime range
+  input wait, scheduler work-item resolution, and mapped payload view helpers.
+- `mem_service_model_range_publish_flow.c` contains model-neutral runtime range
+  output, KV-state object publication, and downstream descriptor publication.
+- `mem_service_model_range_kv_state_flow.c` contains model-neutral range KV
+  publication and previous-step resolution helpers.
+- `mem_service_model_terminal_token_flow.c` contains model-neutral terminal
+  token publication and wait helpers; model adapters provide the request.
 - `mem_service_qwen3_engram_publish_flow.c` contains Qwen3 engram candidate
   publish and decision-state publish helpers compiled as a standalone model
   data-flow translation unit.
 - `mem_service_qwen3_engram_wait_flow.c` contains Qwen3 engram candidate,
   selected-token, history, and state wait helpers compiled as a standalone
   model data-flow translation unit.
-- `mem_service_qwen3_decode_barrier.c` contains model-range decode-round
-  publish and active-topology all-node wait helpers. The filename remains for
-  build compatibility, but its public API and behavior are model-neutral.
+- `mem_service_model_decode_barrier.c` contains model-range decode-round
+  publish and active-topology all-node wait helpers.
 - `mem_service_keys.c` contains device-independent key construction helpers
   compiled as a standalone core translation unit for guest and host service
   deployments.

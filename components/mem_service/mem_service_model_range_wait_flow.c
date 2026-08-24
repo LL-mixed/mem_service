@@ -12,7 +12,7 @@
 #include "mem_service_record_table.h"
 #include "mem_service_ub_ssd_gsva_io.h"
 
-static void mem_service_qwen3_format_runtime_wait_token_key(
+static void mem_service_model_format_runtime_wait_token_key(
     char *key,
     size_t key_len,
     const char *model_key,
@@ -41,7 +41,7 @@ static void mem_service_qwen3_format_runtime_wait_token_key(
              object_decode_step);
 }
 
-static const char *mem_service_qwen3_ub_ssd_read_status_name(
+static const char *mem_service_model_ub_ssd_read_status_name(
     enum mem_service_ub_ssd_gsva_io_status status)
 {
     switch (status) {
@@ -65,7 +65,7 @@ static const char *mem_service_qwen3_ub_ssd_read_status_name(
     }
 }
 
-static int mem_service_qwen3_read_runtime_input_from_ub_ssd_gsva_backend(
+static int mem_service_model_read_runtime_input_from_ub_ssd_gsva_backend(
     struct mem_service_cluster_runtime *rt,
     const struct mem_service_record *remote_record,
     uint32_t local_node,
@@ -160,12 +160,12 @@ static int mem_service_qwen3_read_runtime_input_from_ub_ssd_gsva_backend(
     request.buffer = desc;
     status = mem_service_ub_ssd_gsva_submit(&request, &completion);
     if (status != MEM_SERVICE_UB_SSD_GSVA_IO_OK) {
-        fprintf(stderr, "[mem_service] gap qwen3_range_forward_runtime_input_ub_ssd_gsva_read=%s"
+        fprintf(stderr, "[mem_service] gap model_range_forward_runtime_input_ub_ssd_gsva_read=%s"
                " local=node%u source=node%u key=%s step=%" PRIu64
                " backend_device_cna=0x%08" PRIx32
                " block_hi=%" PRIu64 " block_lo=%" PRIu64
                " version=%" PRIu64 " bytes=%" PRIu64 "\n",
-               mem_service_qwen3_ub_ssd_read_status_name(status),
+               mem_service_model_ub_ssd_read_status_name(status),
                local_node + 1U,
                remote_record->object_owner_node + 1U,
                remote_record->key,
@@ -199,12 +199,12 @@ static int mem_service_qwen3_read_runtime_input_from_ub_ssd_gsva_backend(
         return -1;
     }
     checksum_start_ms = obmm_now_ms();
-    checksum = mem_service_qwen3_hidden_payload_checksum(
+    checksum = mem_service_model_payload_checksum(
         (const uint8_t *)local_slot->region.addr + local_offset,
         payload_len);
     *checksum_ms_out = obmm_now_ms() - checksum_start_ms;
     if (checksum != remote_record->object_payload_checksum) {
-        fprintf(stderr, "[mem_service] gap qwen3_range_forward_runtime_input_ub_ssd_gsva_read=checksum_mismatch"
+        fprintf(stderr, "[mem_service] gap model_range_forward_runtime_input_ub_ssd_gsva_read=checksum_mismatch"
                " local=node%u source=node%u key=%s step=%" PRIu64
                " checksum=0x%016" PRIx64 " expected=0x%016" PRIx64
                " backend_expected=0x%016" PRIx64 "\n",
@@ -219,7 +219,7 @@ static int mem_service_qwen3_read_runtime_input_from_ub_ssd_gsva_backend(
     }
     *payload_view_out = (const uint8_t *)local_slot->region.addr + local_offset;
     *local_backing_offset_out = local_offset;
-    printf("[mem_service] stage qwen3_range_forward_runtime_input_ub_ssd_gsva_read"
+    printf("[mem_service] stage model_range_forward_runtime_input_ub_ssd_gsva_read"
            " local=node%u source=node%u key=%s step=%" PRIu64
            " gsva_base=0x%016" PRIx64 " bytes=%" PRIu64
            " backend_device_cna=0x%08" PRIx32
@@ -340,8 +340,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         rt,
                         owner_idx,
                         expected_epoch,
-                        MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
-                        MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES,
+                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES,
                         &token_desc)) {
                     source_node = (uint32_t)owner_idx;
                     token_desc_found = true;
@@ -355,8 +355,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     if (mem_service_token_result_desc_matches(
                             &rx,
                             expected_epoch,
-                            MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
-                            MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES)) {
+                            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                            MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES)) {
                         token_desc = rx;
                         source_node = (uint32_t)owner_idx;
                         token_desc_found = true;
@@ -393,8 +393,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                                                                   &seen) ||
                     !mem_service_slot_find_record_by_obmm_object_backing(
                         owner_slot,
-                        MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT,
-                        MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
+                        MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
+                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
                         token_desc.payload_offset,
                         token_desc.payload_len,
                         token_desc.cookie,
@@ -408,9 +408,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                      sizeof(token_result_key),
                      "%s",
                      token_record.key);
-            if (token_record.kind != MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT ||
-                token_record.object_payload_kind != MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT ||
-                token_record.object_backing_len != MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES ||
+            if (token_record.kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
+                token_record.object_payload_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
+                token_record.object_backing_len != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
                 token_record.object_backing_offset != token_desc.payload_offset ||
                 token_record.object_backing_len != token_desc.payload_len ||
                 token_desc.cookie !=
@@ -419,7 +419,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 token_record.object_backing_offset > owner_slot->region.len ||
                 token_record.object_backing_len >
                     owner_slot->region.len - token_record.object_backing_offset) {
-                printf("[mem_service] gap qwen3_range_forward=runtime_token_input_invalid local=node%u source=node%u key=%s\n",
+                printf("[mem_service] gap model_range_forward=runtime_token_input_invalid local=node%u source=node%u key=%s\n",
                        local_node + 1U,
                        source_node + 1U,
                        token_result_key);
@@ -430,9 +430,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 token_record.object_backing_offset;
             memcpy(payload_words,
                    payload_view,
-                   MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                   MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
             if (payload_words[0] != decode_step - 1U) {
-                printf("[mem_service] gap qwen3_range_forward=runtime_token_input_step_mismatch local=node%u source=node%u key=%s got=%" PRIu64 " expected=%" PRIu64 "\n",
+                printf("[mem_service] gap model_range_forward=runtime_token_input_step_mismatch local=node%u source=node%u key=%s got=%" PRIu64 " expected=%" PRIu64 "\n",
                        local_node + 1U,
                        source_node + 1U,
                        token_result_key,
@@ -440,9 +440,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                        decode_step - 1U);
                 return -1;
             }
-            checksum = mem_service_qwen3_hidden_payload_checksum(
+            checksum = mem_service_model_payload_checksum(
                 payload_view,
-                MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
             if (checksum != token_record.object_payload_checksum) {
                 mem_service_cpu_relax_wait(&relax_attempt);
                 continue;
@@ -451,7 +451,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             break;
         }
         if (!token_input_found) {
-            printf("[mem_service] gap qwen3_range_forward=runtime_token_input_wait_failed local=node%u source=%s step=%" PRIu64 " epoch=%u attempts=%u desc_found=%u\n",
+            printf("[mem_service] gap model_range_forward=runtime_token_input_wait_failed local=node%u source=%s step=%" PRIu64 " epoch=%u attempts=%u desc_found=%u\n",
                    local_node + 1U,
                    source_node == UINT32_MAX ? "none" : "descriptor",
                    decode_step - 1U,
@@ -476,14 +476,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         }
         memset(view_out, 0, sizeof(*view_out));
         view_out->data = payload_view;
-        view_out->len = MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES;
+        view_out->len = MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES;
         view_out->checksum = checksum;
         view_out->owner_node = source_node;
         view_out->payload_kind = token_record.object_payload_kind;
         view_out->backing_offset = token_record.object_backing_offset;
         memcpy(view_out->token_result_words,
                payload_words,
-               MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+               MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
         if (mem_service_record_to_lingqu_object_ref(&token_record,
                                                     &view_out->object_ref) != 0) {
             return -1;
@@ -506,7 +506,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         view_out->wait_attempts = attempts;
         view_out->activate_ms = activate_ms;
         view_out->metadata_ms = metadata_ms;
-        printf("[mem_service] stage qwen3_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " token=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=0 validation=object_desc_backing queue=obmm_spsc receive=descriptor metadata=lingqu_object_service backing=obmm_shmem source=terminal_token_result target=mapped_view status=ok\n",
+        printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " token=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=0 validation=object_desc_backing queue=obmm_spsc receive=descriptor metadata=lingqu_object_service backing=obmm_shmem source=terminal_token_result target=mapped_view status=ok\n",
                local_node + 1U,
                source_node + 1U,
                token_result_key,
@@ -582,7 +582,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
 
         attempts++;
         if (allow_terminal_commit) {
-            mem_service_qwen3_format_runtime_wait_token_key(
+            mem_service_model_format_runtime_wait_token_key(
                 token_result_key,
                 sizeof(token_result_key),
                 request->model_key,
@@ -597,8 +597,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                             rt,
                             owner_idx,
                             expected_epoch,
-                            MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
-                            MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES,
+                            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                            MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES,
                             &terminal_desc)) {
                         terminal_source_node = (uint32_t)owner_idx;
                         terminal_desc_found = true;
@@ -612,8 +612,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         if (mem_service_token_result_desc_matches(
                                 &rx,
                                 expected_epoch,
-                                MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
-                                MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES)) {
+                                MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                                MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES)) {
                             terminal_desc = rx;
                             terminal_source_node = (uint32_t)owner_idx;
                             terminal_desc_found = true;
@@ -659,8 +659,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                             &seen) ||
                         !mem_service_slot_find_record_by_obmm_object_backing(
                             token_slot,
-                            MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT,
-                            MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
+                            MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
+                            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
                             terminal_desc.payload_offset,
                             terminal_desc.payload_len,
                             terminal_desc.cookie,
@@ -671,11 +671,11 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     metadata_ms +=
                         (uint64_t)(obmm_now_ms() - metadata_start_ms);
                 }
-                if (token_record.kind != MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT ||
+                if (token_record.kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
                     token_record.object_payload_kind !=
-                        MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT ||
+                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
                     token_record.object_backing_len !=
-                        MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES ||
+                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
                     token_record.object_backing_offset !=
                         terminal_desc.payload_offset ||
                     token_record.object_backing_len != terminal_desc.payload_len ||
@@ -694,14 +694,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     token_record.object_backing_offset;
                 memcpy(payload_words,
                        payload_view,
-                       MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                       MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                 if (payload_words[0] != decode_step) {
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
                 }
-                token_checksum = mem_service_qwen3_hidden_payload_checksum(
+                token_checksum = mem_service_model_payload_checksum(
                     payload_view,
-                    MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                    MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                 if (token_checksum != token_record.object_payload_checksum) {
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
@@ -722,14 +722,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 }
                 memset(view_out, 0, sizeof(*view_out));
                 view_out->data = payload_view;
-                view_out->len = MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES;
+                view_out->len = MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES;
                 view_out->checksum = token_checksum;
                 view_out->owner_node = terminal_source_node;
                 view_out->payload_kind = token_record.object_payload_kind;
                 view_out->backing_offset = token_record.object_backing_offset;
                 memcpy(view_out->token_result_words,
                        payload_words,
-                       MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                       MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                 if (mem_service_record_to_lingqu_object_ref(&token_record,
                                                             &view_out->object_ref) != 0) {
                     return -1;
@@ -753,7 +753,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 view_out->wait_attempts = attempts;
                 view_out->activate_ms = activate_ms;
                 view_out->metadata_ms = metadata_ms;
-                printf("[mem_service] stage qwen3_decode_round_terminal_committed"
+                printf("[mem_service] stage model_decode_round_terminal_committed"
                        " local=node%u source=node%u step=%" PRIu64
                        " token=%" PRIu64 " object_key=%s"
                        " checksum=0x%016" PRIx64
@@ -791,9 +791,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     !mem_service_slot_find_record(token_slot,
                                             token_result_key,
                                             &token_record) ||
-                    token_record.kind != MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT ||
-                    token_record.object_payload_kind != MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT ||
-                    token_record.object_backing_len != MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES ||
+                    token_record.kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
+                    token_record.object_payload_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
+                    token_record.object_backing_len != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
                     token_record.object_backing_offset > token_slot->region.len ||
                     token_record.object_backing_len >
                         token_slot->region.len - token_record.object_backing_offset) {
@@ -804,13 +804,13 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     token_record.object_backing_offset;
                 memcpy(payload_words,
                        payload_view,
-                       MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                       MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                 if (payload_words[0] != decode_step) {
                     continue;
                 }
-                token_checksum = mem_service_qwen3_hidden_payload_checksum(
+                token_checksum = mem_service_model_payload_checksum(
                     payload_view,
-                    MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                    MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                 if (token_checksum != token_record.object_payload_checksum) {
                     continue;
                 }
@@ -830,14 +830,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 }
                 memset(view_out, 0, sizeof(*view_out));
                 view_out->data = payload_view;
-                view_out->len = MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES;
+                view_out->len = MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES;
                 view_out->checksum = token_checksum;
                 view_out->owner_node = (uint32_t)owner_idx;
                 view_out->payload_kind = token_record.object_payload_kind;
                 view_out->backing_offset = token_record.object_backing_offset;
                 memcpy(view_out->token_result_words,
                        payload_words,
-                       MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                       MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                 if (mem_service_record_to_lingqu_object_ref(&token_record,
                                                             &view_out->object_ref) != 0) {
                     return -1;
@@ -861,7 +861,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 view_out->wait_attempts = attempts;
                 view_out->activate_ms = activate_ms;
                 view_out->metadata_ms = metadata_ms;
-                printf("[mem_service] stage qwen3_decode_round_terminal_committed"
+                printf("[mem_service] stage model_decode_round_terminal_committed"
                        " local=node%u source=node%d step=%" PRIu64
                        " token=%" PRIu64 " object_key=%s"
                        " checksum=0x%016" PRIx64
@@ -900,7 +900,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     if (!mem_service_runtime_range_input_desc_matches(&handoff_desc,
                                                 hidden_range_bytes,
                                                 expected_epoch)) {
-        printf("[mem_service] gap qwen3_range_forward=runtime_ingress_desc_wait_failed local=node%u source=node%u step=%" PRIu64 " attempts=%u\n",
+        printf("[mem_service] gap model_range_forward=runtime_ingress_desc_wait_failed local=node%u source=node%u step=%" PRIu64 " attempts=%u\n",
                local_node + 1U,
                source_node + 1U,
                decode_step,
@@ -946,7 +946,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             mem_service_cpu_relax_wait(&relax_attempt);
         }
         if (!metadata_found) {
-            printf("[mem_service] gap qwen3_range_forward=runtime_ingress_metadata_wait_failed local=node%u source=node%u step=%" PRIu64 " attempts=%u offset=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
+            printf("[mem_service] gap model_range_forward=runtime_ingress_metadata_wait_failed local=node%u source=node%u step=%" PRIu64 " attempts=%u offset=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
                    local_node + 1U,
                    source_node + 1U,
                    decode_step,
@@ -972,7 +972,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         !source_slot->region.addr ||
         remote_hidden_output.object_backing_offset + remote_hidden_output.object_backing_len >
             source_slot->region.len) {
-        printf("[mem_service] gap qwen3_range_forward=runtime_ingress_wait_failed local=node%u source=node%u step=%" PRIu64 " key=%s\n",
+        printf("[mem_service] gap model_range_forward=runtime_ingress_wait_failed local=node%u source=node%u step=%" PRIu64 " key=%s\n",
                local_node + 1U,
                source_node + 1U,
                decode_step,
@@ -981,7 +981,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     }
     if (remote_hidden_output.object_backend_kind ==
         MEM_SERVICE_OBJECT_BACKEND_UB_SSD_GSVA) {
-        if (mem_service_qwen3_read_runtime_input_from_ub_ssd_gsva_backend(
+        if (mem_service_model_read_runtime_input_from_ub_ssd_gsva_backend(
                 rt,
                 &remote_hidden_output,
                 local_node,
@@ -1044,7 +1044,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     view_out->wait_attempts = attempts;
     view_out->activate_ms = activate_ms;
     view_out->metadata_ms = metadata_ms;
-    printf("[mem_service] stage qwen3_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=%ld validation=object_desc_backing queue=obmm_spsc receive=descriptor metadata=lingqu_object_service backing=%s target=%s status=ok\n",
+    printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=%ld validation=object_desc_backing queue=obmm_spsc receive=descriptor metadata=lingqu_object_service backing=%s target=%s status=ok\n",
            local_node + 1U,
            source_node + 1U,
            ingress_key,
@@ -1129,8 +1129,8 @@ int mem_service_range_flow_wait_scheduler_work_item(
         !view.data) {
         return -1;
     }
-    if (view.payload_kind == MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT &&
-        view.len == MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES) {
+    if (view.payload_kind == MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT &&
+        view.len == MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES) {
         uint64_t token_words[8];
 
         if (local_placement.layer_start == 0) {
@@ -1140,9 +1140,9 @@ int mem_service_range_flow_wait_scheduler_work_item(
         }
         memcpy(token_words,
                view.token_result_words,
-               MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+               MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
         if (token_words[0] != decode_step) {
-            printf("[mem_service] gap qwen3_scheduler_work_item=terminal_step_mismatch local=node%u got=%" PRIu64 " expected=%" PRIu64 "\n",
+            printf("[mem_service] gap model_scheduler_work_item=terminal_step_mismatch local=node%u got=%" PRIu64 " expected=%" PRIu64 "\n",
                    local_node + 1U,
                    token_words[0],
                    decode_step);
@@ -1171,7 +1171,7 @@ int mem_service_range_flow_wait_scheduler_work_item(
         return 0;
     }
     if (view.payload_kind != MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT) {
-        printf("[mem_service] gap qwen3_scheduler_work_item=input_kind_invalid local=node%u kind=%u bytes=%" PRIu64 "\n",
+        printf("[mem_service] gap model_scheduler_work_item=input_kind_invalid local=node%u kind=%u bytes=%" PRIu64 "\n",
                local_node + 1U,
                view.payload_kind,
                view.len);

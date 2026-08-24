@@ -31,16 +31,16 @@ int mem_service_publish_decode_round_done(struct mem_service *svc,
     local_slot = &rt->slots[rt->local_idx];
     if ((uint32_t)rt->local_idx != local_node || !local_slot->region.addr ||
         local_slot->region.len <
-            MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_OFFSET +
-                MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_REGION_BYTES) {
+            MEM_SERVICE_OBMM_ROUND_DONE_OFFSET +
+                MEM_SERVICE_OBMM_ROUND_DONE_REGION_BYTES) {
         return -1;
     }
 
     slot_index = (decode_step ^
                   (round_scope_hash * 11400714819323198485ULL)) &
-                 (MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_SLOTS - 1ULL);
-    slot_offset = MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_OFFSET +
-                  slot_index * MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES;
+                 (MEM_SERVICE_OBMM_ROUND_DONE_SLOTS - 1ULL);
+    slot_offset = MEM_SERVICE_OBMM_ROUND_DONE_OFFSET +
+                  slot_index * MEM_SERVICE_OBMM_ROUND_DONE_BYTES;
     payload_words[0] = 0x71336465636f6465ULL;
     payload_words[1] = decode_step;
     payload_words[2] = local_node;
@@ -51,15 +51,15 @@ int mem_service_publish_decode_round_done(struct mem_service *svc,
     payload_words[7] = mem_service_checksum_bytes((const uint8_t *)payload_words,
                                             7U * sizeof(payload_words[0]));
     checksum = mem_service_checksum_bytes((const uint8_t *)payload_words,
-                                    MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES);
+                                    MEM_SERVICE_OBMM_ROUND_DONE_BYTES);
 
     base = (uint8_t *)local_slot->region.addr;
-    memcpy(base + slot_offset, payload_words, MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES);
+    memcpy(base + slot_offset, payload_words, MEM_SERVICE_OBMM_ROUND_DONE_BYTES);
     if (mem_service_update_region_range_at(local_slot, slot_offset,
-                                     MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES, true) != 0) {
+                                     MEM_SERVICE_OBMM_ROUND_DONE_BYTES, true) != 0) {
         return -1;
     }
-    (void)msync(base + slot_offset, MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES, MS_SYNC);
+    (void)msync(base + slot_offset, MEM_SERVICE_OBMM_ROUND_DONE_BYTES, MS_SYNC);
     printf("[mem_service] stage decode_round_done_publish local=node%u step=%" PRIu64
            " offset=0x%016" PRIx64 " slot=%" PRIu64
            " bytes=%" PRIu64 " scope_hash=0x%016" PRIx64
@@ -69,7 +69,7 @@ int mem_service_publish_decode_round_done(struct mem_service *svc,
            decode_step,
            slot_offset,
            slot_index,
-           (uint64_t)MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES,
+           (uint64_t)MEM_SERVICE_OBMM_ROUND_DONE_BYTES,
            round_scope_hash,
            checksum);
     mem_service_report_obmm_pool_usage(rt, local_node, decode_step);
@@ -98,9 +98,9 @@ int mem_service_wait_all_decode_round_done(struct mem_service *svc,
     }
     slot_index = (decode_step ^
                   (round_scope_hash * 11400714819323198485ULL)) &
-                 (MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_SLOTS - 1ULL);
-    slot_offset = MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_OFFSET +
-                  slot_index * MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES;
+                 (MEM_SERVICE_OBMM_ROUND_DONE_SLOTS - 1ULL);
+    slot_offset = MEM_SERVICE_OBMM_ROUND_DONE_OFFSET +
+                  slot_index * MEM_SERVICE_OBMM_ROUND_DONE_BYTES;
     expected_mask = (1U << cluster_node_count) - 1U;
     deadline = obmm_now_ms() + (long)timeout_ms;
     while (obmm_now_ms() < deadline) {
@@ -116,12 +116,12 @@ int mem_service_wait_all_decode_round_done(struct mem_service *svc,
             slot = &rt->slots[i];
             if (!slot->region.addr ||
                 slot->region.len <
-                    slot_offset + MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES) {
+                    slot_offset + MEM_SERVICE_OBMM_ROUND_DONE_BYTES) {
                 continue;
             }
             memcpy(payload_words,
                    (uint8_t *)slot->region.addr + slot_offset,
-                   MEM_SERVICE_OBMM_QWEN3_ROUND_DONE_BYTES);
+                   MEM_SERVICE_OBMM_ROUND_DONE_BYTES);
             if (payload_words[0] == 0x71336465636f6465ULL &&
                 payload_words[1] == decode_step &&
                 payload_words[2] == i &&

@@ -5,7 +5,7 @@
 #include "mem_service_qwen3_runtime.h"
 #include "mem_service_record_table.h"
 
-uint64_t mem_service_qwen3_hidden_payload_checksum(const uint8_t *bytes,
+uint64_t mem_service_model_payload_checksum(const uint8_t *bytes,
                                                    uint64_t len)
 {
     uint64_t acc = 0xcbf29ce484222325ULL;
@@ -18,7 +18,7 @@ uint64_t mem_service_qwen3_hidden_payload_checksum(const uint8_t *bytes,
     return acc;
 }
 
-static int mem_service_qwen3_kv_state_block_span(uint64_t payload_len,
+static int mem_service_model_kv_state_block_span(uint64_t payload_len,
                                            uint64_t *block_bytes_out,
                                            uint64_t *block_count_out,
                                            uint64_t *reserved_bytes_out)
@@ -31,20 +31,20 @@ static int mem_service_qwen3_kv_state_block_span(uint64_t payload_len,
         payload_len == 0) {
         return -1;
     }
-    if (payload_len <= MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER0_BYTES) {
-        block_bytes = MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER0_BYTES;
+    if (payload_len <= MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER0_BYTES) {
+        block_bytes = MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER0_BYTES;
         block_count = 1U;
-    } else if (payload_len <= MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER1_BYTES) {
-        block_bytes = MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER1_BYTES;
+    } else if (payload_len <= MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER1_BYTES) {
+        block_bytes = MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER1_BYTES;
         block_count = 1U;
-    } else if (payload_len <= MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER2_BYTES) {
-        block_bytes = MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER2_BYTES;
+    } else if (payload_len <= MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER2_BYTES) {
+        block_bytes = MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER2_BYTES;
         block_count = 1U;
-    } else if (payload_len <= MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER3_BYTES) {
-        block_bytes = MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER3_BYTES;
+    } else if (payload_len <= MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER3_BYTES) {
+        block_bytes = MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER3_BYTES;
         block_count = 1U;
     } else {
-        block_bytes = MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER3_BYTES;
+        block_bytes = MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER3_BYTES;
         block_count =
             (payload_len + block_bytes - 1U) / block_bytes;
     }
@@ -61,7 +61,7 @@ static int mem_service_qwen3_kv_state_block_span(uint64_t payload_len,
     return 0;
 }
 
-int mem_service_qwen3_kv_state_alloc(struct mem_service_cluster_runtime *rt,
+int mem_service_model_kv_state_alloc(struct mem_service_cluster_runtime *rt,
                                      uint64_t payload_len,
                                      uint64_t *offset_out,
                                      uint64_t *block_bytes_out,
@@ -73,7 +73,7 @@ int mem_service_qwen3_kv_state_alloc(struct mem_service_cluster_runtime *rt,
     uint64_t reserved_bytes = 0;
 
     if (!offset_out ||
-        mem_service_qwen3_kv_state_block_span(payload_len,
+        mem_service_model_kv_state_block_span(payload_len,
                                         &block_bytes,
                                         &block_count,
                                         &reserved_bytes) != 0) {
@@ -106,7 +106,7 @@ void mem_service_report_obmm_pool_layout_once(struct mem_service_cluster_runtime
     if (!local_slot->region.addr) {
         return;
     }
-    printf("[mem_service] stage qwen3_obmm_pool_layout local=node%d nodes=%d per_node_region_bytes=%" PRIu64
+    printf("[mem_service] stage obmm_pool_layout local=node%d nodes=%d per_node_region_bytes=%" PRIu64
            " cluster_region_bytes=%" PRIu64 " payload_offset=%" PRIu64
            " payload_bytes=%zu arena_base=0x%016" PRIx64
            " allocator=linear_payload_arena status=ok\n",
@@ -116,7 +116,7 @@ void mem_service_report_obmm_pool_layout_once(struct mem_service_cluster_runtime
            rt->region_size * (uint64_t)rt->node_count,
            rt->payload_offset,
            local_slot->region.len,
-           (uint64_t)MEM_SERVICE_OBMM_QWEN3_DYNAMIC_ARENA_OFFSET);
+           (uint64_t)MEM_SERVICE_OBMM_DYNAMIC_ARENA_OFFSET);
     rt->pool_layout_reported = true;
 }
 
@@ -141,7 +141,7 @@ void mem_service_report_obmm_pool_usage(struct mem_service_cluster_runtime *rt,
             rt->payload_arena_high_water - rt->payload_arena_base :
             0;
     payload_used = rt->payload_arena_high_water;
-    printf("[mem_service] stage qwen3_obmm_pool_usage local=node%u step=%" PRIu64
+    printf("[mem_service] stage obmm_pool_usage local=node%u step=%" PRIu64
            " per_node_region_bytes=%" PRIu64 " cluster_region_bytes=%" PRIu64
            " payload_bytes=%zu payload_high_water_bytes=%" PRIu64
            " payload_used_pct_milli=%" PRIu64 " arena_base=0x%016" PRIx64

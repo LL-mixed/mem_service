@@ -46,21 +46,21 @@ SERVICE_OBMM_OBJECTS_C = SERVICE_DIR / "mem_service_obmm_objects.c"
 SERVICE_OBMM_OBJECTS_H = SERVICE_DIR / "mem_service_obmm_objects.h"
 SERVICE_QWEN3_RECORDS_C = SERVICE_DIR / "mem_service_qwen3_records.c"
 SERVICE_QWEN3_RUNTIME_C = SERVICE_DIR / "mem_service_qwen3_runtime.c"
-SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW_C = (
-    SERVICE_DIR / "mem_service_qwen3_runtime_range_wait_flow.c"
+SERVICE_MODEL_RANGE_WAIT_FLOW_C = (
+    SERVICE_DIR / "mem_service_model_range_wait_flow.c"
 )
-SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW_C = (
-    SERVICE_DIR / "mem_service_qwen3_runtime_range_publish_flow.c"
+SERVICE_MODEL_RANGE_PUBLISH_FLOW_C = (
+    SERVICE_DIR / "mem_service_model_range_publish_flow.c"
 )
-SERVICE_QWEN3_KV_STATE_FLOW_C = SERVICE_DIR / "mem_service_qwen3_kv_state_flow.c"
-SERVICE_QWEN3_TERMINAL_TOKEN_FLOW_C = (
-    SERVICE_DIR / "mem_service_qwen3_terminal_token_flow.c"
+SERVICE_MODEL_RANGE_KV_STATE_FLOW_C = SERVICE_DIR / "mem_service_model_range_kv_state_flow.c"
+SERVICE_MODEL_TERMINAL_TOKEN_FLOW_C = (
+    SERVICE_DIR / "mem_service_model_terminal_token_flow.c"
 )
 SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW_C = (
     SERVICE_DIR / "mem_service_qwen3_engram_publish_flow.c"
 )
 SERVICE_QWEN3_ENGRAM_WAIT_FLOW_C = SERVICE_DIR / "mem_service_qwen3_engram_wait_flow.c"
-SERVICE_QWEN3_DECODE_BARRIER_C = SERVICE_DIR / "mem_service_qwen3_decode_barrier.c"
+SERVICE_MODEL_DECODE_BARRIER_C = SERVICE_DIR / "mem_service_model_decode_barrier.c"
 SERVICE_METADATA_C = SERVICE_DIR / "mem_service_metadata.c"
 SERVICE_CLUSTER_PAYLOAD_C = SERVICE_DIR / "mem_service_cluster_payload.c"
 SERVICE_CLUSTER_PAYLOAD_H = SERVICE_DIR / "mem_service_cluster_payload.h"
@@ -259,23 +259,23 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
-            'MEM_SERVICE_QWEN3_DECODE_BARRIER_SRC="$ROOT_DIR/components/mem_service/mem_service_qwen3_decode_barrier.c"',
+            'MEM_SERVICE_MODEL_DECODE_BARRIER_SRC="$ROOT_DIR/components/mem_service/mem_service_model_decode_barrier.c"',
             build_script,
         )
         self.assertIn(
-            'MEM_SERVICE_QWEN3_KV_STATE_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_qwen3_kv_state_flow.c"',
+            'MEM_SERVICE_MODEL_RANGE_KV_STATE_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_model_range_kv_state_flow.c"',
             build_script,
         )
         self.assertIn(
-            'MEM_SERVICE_QWEN3_TERMINAL_TOKEN_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_qwen3_terminal_token_flow.c"',
+            'MEM_SERVICE_MODEL_TERMINAL_TOKEN_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_model_terminal_token_flow.c"',
             build_script,
         )
         self.assertIn(
-            'MEM_SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_qwen3_runtime_range_wait_flow.c"',
+            'MEM_SERVICE_MODEL_RANGE_WAIT_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_model_range_wait_flow.c"',
             build_script,
         )
         self.assertIn(
-            'MEM_SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_qwen3_runtime_range_publish_flow.c"',
+            'MEM_SERVICE_MODEL_RANGE_PUBLISH_FLOW_SRC="$ROOT_DIR/components/mem_service/mem_service_model_range_publish_flow.c"',
             build_script,
         )
         self.assertIn(
@@ -331,17 +331,17 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             '"$MEM_SERVICE_DEEPSEEK_V4_FLASH_SRC" '
             '"$MEM_SERVICE_EXPERT_ROUTE_FLOW_SRC" "$MEM_SERVICE_EXPERT_CACHE_SRC" '
             '"$MEM_SERVICE_QWEN3_RECORDS_SRC" '
-            '"$MEM_SERVICE_QWEN3_RUNTIME_SRC" "$MEM_SERVICE_QWEN3_DECODE_BARRIER_SRC" '
-            '"$MEM_SERVICE_QWEN3_KV_STATE_FLOW_SRC" "$MEM_SERVICE_QWEN3_TERMINAL_TOKEN_FLOW_SRC" '
-            '"$MEM_SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW_SRC" '
-            '"$MEM_SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW_SRC" '
+            '"$MEM_SERVICE_QWEN3_RUNTIME_SRC" "$MEM_SERVICE_MODEL_DECODE_BARRIER_SRC" '
+            '"$MEM_SERVICE_MODEL_RANGE_KV_STATE_FLOW_SRC" "$MEM_SERVICE_MODEL_TERMINAL_TOKEN_FLOW_SRC" '
+            '"$MEM_SERVICE_MODEL_RANGE_WAIT_FLOW_SRC" '
+            '"$MEM_SERVICE_MODEL_RANGE_PUBLISH_FLOW_SRC" '
             '"$MEM_SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW_SRC" '
             '"$MEM_SERVICE_QWEN3_ENGRAM_WAIT_FLOW_SRC" "$MEM_SERVICE_QWEN3_SRC" '
             '"$LLM_INFER_SRC" -lm -o "$MEM_SERVICE_QWEN3_CLI_BIN"',
             build_script,
         )
         self.assertIn(
-            '"$LLM_INFER_APP_SRC" "$MEM_SERVICE_SRC" "$MEM_SERVICE_CLUSTER_UTILS_SRC" "$MEM_SERVICE_CLUSTER_PAYLOAD_SRC" "$MEM_SERVICE_CLUSTER_READ_SRC" "$MEM_SERVICE_CLUSTER_RUNTIME_SRC" "$MEM_SERVICE_CLUSTER_QUEUE_SRC" "$MEM_SERVICE_CLUSTER_OBSERVE_SRC" "$MEM_SERVICE_OBMM_OBJECT_FLOW_SRC" "$MEM_SERVICE_CLIENT_SRC" "$MEM_SERVICE_WIRE_CLIENT_SRC" "$MEM_SERVICE_METADATA_SRC" "$MEM_SERVICE_PROVIDER_SRC" "$MEM_SERVICE_KEYS_SRC" "$MEM_SERVICE_OBJECT_REFS_SRC" "$MEM_SERVICE_OBMM_OBJECTS_SRC" "$MEM_SERVICE_UB_SSD_GSVA_BACKEND_SRC" "$MEM_SERVICE_UB_SSD_GSVA_IO_SRC" "$MEM_SERVICE_RECORDS_SRC" "$MEM_SERVICE_PROFILE_SRC" "$MEM_SERVICE_DEEPSEEK_V4_FLASH_SRC" "$MEM_SERVICE_EXPERT_ROUTE_FLOW_SRC" "$MEM_SERVICE_EXPERT_CACHE_SRC" "$MEM_SERVICE_QWEN3_RECORDS_SRC" "$MEM_SERVICE_QWEN3_RUNTIME_SRC" "$MEM_SERVICE_QWEN3_DECODE_BARRIER_SRC" "$MEM_SERVICE_QWEN3_KV_STATE_FLOW_SRC" "$MEM_SERVICE_QWEN3_TERMINAL_TOKEN_FLOW_SRC" "$MEM_SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW_SRC" "$MEM_SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW_SRC" "$MEM_SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW_SRC" "$MEM_SERVICE_QWEN3_ENGRAM_WAIT_FLOW_SRC" "$MEM_SERVICE_QWEN3_SRC" "$LLM_INFER_SRC" -lm -o "$LLM_INFER_APP_BIN"',
+            '"$LLM_INFER_APP_SRC" "$MEM_SERVICE_SRC" "$MEM_SERVICE_CLUSTER_UTILS_SRC" "$MEM_SERVICE_CLUSTER_PAYLOAD_SRC" "$MEM_SERVICE_CLUSTER_READ_SRC" "$MEM_SERVICE_CLUSTER_RUNTIME_SRC" "$MEM_SERVICE_CLUSTER_QUEUE_SRC" "$MEM_SERVICE_CLUSTER_OBSERVE_SRC" "$MEM_SERVICE_OBMM_OBJECT_FLOW_SRC" "$MEM_SERVICE_CLIENT_SRC" "$MEM_SERVICE_WIRE_CLIENT_SRC" "$MEM_SERVICE_METADATA_SRC" "$MEM_SERVICE_PROVIDER_SRC" "$MEM_SERVICE_KEYS_SRC" "$MEM_SERVICE_OBJECT_REFS_SRC" "$MEM_SERVICE_OBMM_OBJECTS_SRC" "$MEM_SERVICE_UB_SSD_GSVA_BACKEND_SRC" "$MEM_SERVICE_UB_SSD_GSVA_IO_SRC" "$MEM_SERVICE_RECORDS_SRC" "$MEM_SERVICE_PROFILE_SRC" "$MEM_SERVICE_DEEPSEEK_V4_FLASH_SRC" "$MEM_SERVICE_EXPERT_ROUTE_FLOW_SRC" "$MEM_SERVICE_EXPERT_CACHE_SRC" "$MEM_SERVICE_QWEN3_RECORDS_SRC" "$MEM_SERVICE_QWEN3_RUNTIME_SRC" "$MEM_SERVICE_MODEL_DECODE_BARRIER_SRC" "$MEM_SERVICE_MODEL_RANGE_KV_STATE_FLOW_SRC" "$MEM_SERVICE_MODEL_TERMINAL_TOKEN_FLOW_SRC" "$MEM_SERVICE_MODEL_RANGE_WAIT_FLOW_SRC" "$MEM_SERVICE_MODEL_RANGE_PUBLISH_FLOW_SRC" "$MEM_SERVICE_QWEN3_ENGRAM_PUBLISH_FLOW_SRC" "$MEM_SERVICE_QWEN3_ENGRAM_WAIT_FLOW_SRC" "$MEM_SERVICE_QWEN3_SRC" "$LLM_INFER_SRC" -lm -o "$LLM_INFER_APP_BIN"',
             build_script,
         )
         self.assertIn("linqu_mem_service", build_script)
@@ -2611,7 +2611,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn('#include "mem_service_object_contract.h"', internal_header)
         self.assertIn("MEM_SERVICE_OBMM_KIND_WEIGHT_TILE", object_contract)
         self.assertIn("MEM_SERVICE_OBMM_KIND_HIDDEN_RANGE_RUNTIME_OUTPUT", object_contract)
-        self.assertIn("MEM_SERVICE_OBMM_QWEN3_KV_STATE_SLOT_BYTES", object_contract)
+        self.assertIn("MEM_SERVICE_OBMM_KV_STATE_SLOT_BYTES", object_contract)
         self.assertIn("MEM_SERVICE_OBMM_QWEN3_ENGRAM_STATE_BYTES", object_contract)
         self.assertIn("device-independent OBMM object", readme)
         self.assertIn("guest and host service deployments", readme)
@@ -2621,7 +2621,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
         self.assertNotRegex(
             internal_header,
-            r"#define MEM_SERVICE_OBMM_QWEN3_KV_STATE_SLOT_BYTES\s+0x",
+            r"#define MEM_SERVICE_OBMM_KV_STATE_SLOT_BYTES\s+0x",
         )
 
     def test_full_record_table_recycles_old_qwen3_runtime_records(self):
@@ -3085,34 +3085,34 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             r"\(struct mem_service \*svc,",
         )
 
-    def test_qwen3_runtime_helpers_are_split_from_service_core(self):
+    def test_model_runtime_helpers_are_split_from_service_core(self):
         source = SERVICE_C.read_text()
         qwen3_runtime = SERVICE_QWEN3_RUNTIME_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn('#include "mem_service_qwen3_runtime.inc"', source)
         self.assertIn('#include "mem_service_internal.h"', qwen3_runtime)
-        self.assertIn("mem_service_qwen3_hidden_payload_checksum", qwen3_runtime)
-        self.assertIn("mem_service_qwen3_kv_state_alloc", qwen3_runtime)
+        self.assertIn("mem_service_model_payload_checksum", qwen3_runtime)
+        self.assertIn("mem_service_model_kv_state_alloc", qwen3_runtime)
         self.assertIn("mem_service_qwen3_engram_candidates_key", qwen3_runtime)
         self.assertIn("mem_service_publish_qwen3_layer_range_placements", qwen3_runtime)
-        self.assertIn("Qwen3 runtime payload checksum", readme)
-        self.assertIn("standalone model helper", readme)
+        self.assertIn("model-neutral payload checksum", readme)
+        self.assertIn("model-neutral runtime helpers", readme)
         self.assertFalse((SERVICE_DIR / "mem_service_qwen3_runtime.inc").exists())
         self.assertNotRegex(
             source,
-            r"static uint64_t mem_service_qwen3_hidden_payload_checksum"
+            r"static uint64_t mem_service_model_payload_checksum"
             r"\(const uint8_t \*bytes,",
         )
         self.assertNotRegex(
             source,
-            r"static int mem_service_qwen3_kv_state_block_span"
+            r"static int mem_service_model_kv_state_block_span"
             r"\(uint64_t payload_len,",
         )
 
-    def test_qwen3_decode_barrier_is_split_from_runtime_main(self):
+    def test_model_decode_barrier_is_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
-        decode_barrier = SERVICE_QWEN3_DECODE_BARRIER_C.read_text()
+        decode_barrier = SERVICE_MODEL_DECODE_BARRIER_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn('#include "mem_service_qwen3_decode_barrier.inc"', source)
@@ -3136,9 +3136,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             r"\(struct mem_service \*svc,",
         )
 
-    def test_qwen3_runtime_range_wait_flow_is_split_from_runtime_main(self):
+    def test_model_runtime_range_wait_flow_is_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
-        range_wait_flow = SERVICE_QWEN3_RUNTIME_RANGE_WAIT_FLOW_C.read_text()
+        range_wait_flow = SERVICE_MODEL_RANGE_WAIT_FLOW_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn(
@@ -3161,7 +3161,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("mem_service_cluster_runtime_current", range_wait_flow)
         self.assertIn('#include "mem_service_ub_ssd_gsva_io.h"', range_wait_flow)
         self.assertIn(
-            "mem_service_qwen3_read_runtime_input_from_ub_ssd_gsva_backend",
+            "mem_service_model_read_runtime_input_from_ub_ssd_gsva_backend",
             range_wait_flow,
         )
         self.assertIn("MEM_SERVICE_UB_SSD_GSVA_OP_BLOCK_READ", range_wait_flow)
@@ -3171,7 +3171,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn(
-            "qwen3_range_forward_runtime_input_ub_ssd_gsva_read",
+            "model_range_forward_runtime_input_ub_ssd_gsva_read",
             range_wait_flow,
         )
         self.assertIn('resolved_backing = "ub_ssd_gsva"', range_wait_flow)
@@ -3183,9 +3183,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "return -1;\n    }\n    if (completion.committed_ref.bytes",
             range_wait_flow,
         )
-        self.assertIn("Qwen3 runtime range", readme)
+        self.assertIn("model-neutral runtime range", readme)
         self.assertIn("scheduler work-item resolution", readme)
-        self.assertIn("standalone model data-flow", readme)
+        self.assertIn("model-neutral runtime range", readme)
         self.assertFalse(
             (SERVICE_DIR / "mem_service_qwen3_runtime_range_wait_flow.inc").exists()
         )
@@ -3200,9 +3200,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             r"\s*\(",
         )
 
-    def test_qwen3_runtime_range_publish_flow_is_split_from_runtime_main(self):
+    def test_model_runtime_range_publish_flow_is_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
-        range_publish_flow = SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW_C.read_text()
+        range_publish_flow = SERVICE_MODEL_RANGE_PUBLISH_FLOW_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn('#include "mem_service_qwen3_runtime_range_publish_flow.inc"', source)
@@ -3211,12 +3211,12 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "mem_service_obmm_service_v0_publish_runtime_range_output",
             range_publish_flow,
         )
-        self.assertIn("mem_service_qwen3_kv_state_alloc", range_publish_flow)
+        self.assertIn("mem_service_model_kv_state_alloc", range_publish_flow)
         self.assertIn("mem_service_push_obmm_object_desc_to", range_publish_flow)
         self.assertIn("mem_service_cluster_runtime_current", range_publish_flow)
         self.assertIn('#include "mem_service_ub_ssd_gsva_io.h"', range_publish_flow)
         self.assertIn(
-            "mem_service_qwen3_publish_record_to_ub_ssd_gsva_backend",
+            "mem_service_model_publish_record_to_ub_ssd_gsva_backend",
             range_publish_flow,
         )
         self.assertIn("mem_service_ub_ssd_gsva_submit", range_publish_flow)
@@ -3225,11 +3225,11 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_publish_flow,
         )
         self.assertIn(
-            '"qwen3_range_runtime_output"',
+            '"model_range_runtime_output"',
             range_publish_flow,
         )
         self.assertIn(
-            '"qwen3_range_kv_state"',
+            '"model_range_kv_state"',
             range_publish_flow,
         )
         self.assertIn(
@@ -3240,10 +3240,10 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
                       range_publish_flow)
         self.assertNotIn("MEM_SERVICE_PAYLOAD_KIND_UB_SSD_GSVA_BLOCK",
                          range_publish_flow)
-        self.assertIn("Qwen3 runtime", readme)
-        self.assertIn("range output", readme)
+        self.assertIn("model-neutral runtime range", readme)
+        self.assertIn("model-neutral runtime range", readme)
         self.assertIn("KV-state object publication", readme)
-        self.assertIn("standalone model", readme)
+        self.assertIn("downstream descriptor publication", readme)
         self.assertFalse(
             (SERVICE_DIR / "mem_service_qwen3_runtime_range_publish_flow.inc").exists()
         )
@@ -3253,9 +3253,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             r"\s*\(\s*struct mem_service \*svc,",
         )
 
-    def test_qwen3_kv_state_flow_is_split_from_runtime_main(self):
+    def test_model_range_kv_state_flow_is_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
-        kv_state_flow = SERVICE_QWEN3_KV_STATE_FLOW_C.read_text()
+        kv_state_flow = SERVICE_MODEL_RANGE_KV_STATE_FLOW_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn('#include "mem_service_qwen3_kv_state_flow.inc"', source)
@@ -3264,7 +3264,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("mem_service_obmm_service_v0_try_resolve_range_kv_state_view", kv_state_flow)
         self.assertIn("mem_service_obmm_service_v0_resolve_previous_range_kv_state", kv_state_flow)
         self.assertIn("mem_service_cluster_runtime_current", kv_state_flow)
-        self.assertIn("Qwen3 runtime range KV-state", readme)
+        self.assertIn("model-neutral range KV", readme)
         self.assertIn("standalone model", readme)
         self.assertFalse((SERVICE_DIR / "mem_service_qwen3_kv_state_flow.inc").exists())
         self.assertNotRegex(
@@ -3273,9 +3273,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             r"\s*\(\s*struct mem_service \*svc,",
         )
 
-    def test_qwen3_terminal_token_flow_is_split_from_runtime_main(self):
+    def test_model_terminal_token_flow_is_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
-        terminal_token_flow = SERVICE_QWEN3_TERMINAL_TOKEN_FLOW_C.read_text()
+        terminal_token_flow = SERVICE_MODEL_TERMINAL_TOKEN_FLOW_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn('#include "mem_service_qwen3_terminal_token_flow.inc"', source)
@@ -3290,7 +3290,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
         self.assertIn("mem_service_obmm_service_v0_wait_terminal_token_result", terminal_token_flow)
         self.assertIn("mem_service_cluster_runtime_current", terminal_token_flow)
-        self.assertIn("Qwen3 terminal token", readme)
+        self.assertIn("model-neutral terminal", readme)
         self.assertIn("standalone model", readme)
         self.assertFalse((SERVICE_DIR / "mem_service_qwen3_terminal_token_flow.inc").exists())
         self.assertNotRegex(
@@ -3364,7 +3364,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
     def test_mem_service_uses_neutral_run_id_env_with_w5_compatibility(self):
         source = SERVICE_C.read_text()
         runtime_config = SERVICE_RUNTIME_CONFIG_H.read_text()
-        range_publish_flow = SERVICE_QWEN3_RUNTIME_RANGE_PUBLISH_FLOW_C.read_text()
+        range_publish_flow = SERVICE_MODEL_RANGE_PUBLISH_FLOW_C.read_text()
 
         self.assertIn('#include "mem_service_internal.h"', source)
         self.assertIn("mem_service_run_id_from_env", runtime_config)
@@ -3395,7 +3395,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("mem_service_obmm_service_v0_wait_engram", qwen3_header)
         self.assertIn("MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT", qwen3_header)
 
-    def test_qwen3_kv_state_uses_tiered_block_spans(self):
+    def test_model_range_kv_state_uses_tiered_block_spans(self):
         source = (
             SERVICE_OBJECT_CONTRACT_H.read_text()
             + "\n"
@@ -3407,10 +3407,10 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
 
         tier_names = [
-            "MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER0_BYTES",
-            "MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER1_BYTES",
-            "MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER2_BYTES",
-            "MEM_SERVICE_OBMM_QWEN3_KV_STATE_BLOCK_TIER3_BYTES",
+            "MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER0_BYTES",
+            "MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER1_BYTES",
+            "MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER2_BYTES",
+            "MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER3_BYTES",
         ]
         tier_values = []
 
@@ -3421,7 +3421,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
                 tier_values.append(int(match.group(1), 16))
 
         slot_bytes = re.search(
-            r"#define MEM_SERVICE_OBMM_QWEN3_KV_STATE_SLOT_BYTES\s+0x([0-9a-fA-F]+)ULL",
+            r"#define MEM_SERVICE_OBMM_KV_STATE_SLOT_BYTES\s+0x([0-9a-fA-F]+)ULL",
             source,
         )
         self.assertIsNotNone(slot_bytes)
@@ -3433,22 +3433,22 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             (over_max_payload_bytes + max_block_bytes - 1) // max_block_bytes,
             2,
         )
-        self.assertIn("mem_service_qwen3_kv_state_block_span", source)
-        self.assertIn("mem_service_qwen3_kv_state_alloc", source)
+        self.assertIn("mem_service_model_kv_state_block_span", source)
+        self.assertIn("mem_service_model_kv_state_alloc", source)
         self.assertIn("block_count =", source)
         self.assertIn("reserved_bytes = block_count * block_bytes", source)
-        self.assertNotIn("kv_payload_len > MEM_SERVICE_OBMM_QWEN3_KV_STATE_SLOT_BYTES", source)
+        self.assertNotIn("kv_payload_len > MEM_SERVICE_OBMM_KV_STATE_SLOT_BYTES", source)
 
-    def test_qwen3_kv_state_flow_uses_ub_ssd_gsva_backend_when_attached(self):
-        source = SERVICE_QWEN3_KV_STATE_FLOW_C.read_text()
+    def test_model_range_kv_state_flow_uses_ub_ssd_gsva_backend_when_attached(self):
+        source = SERVICE_MODEL_RANGE_KV_STATE_FLOW_C.read_text()
 
         self.assertIn('#include "mem_service_ub_ssd_gsva_io.h"', source)
         self.assertIn(
-            "mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend",
+            "mem_service_model_kv_publish_record_to_ub_ssd_gsva_backend",
             source,
         )
         self.assertIn(
-            "mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend",
+            "mem_service_model_kv_read_from_ub_ssd_gsva_backend",
             source,
         )
         self.assertIn("MEM_SERVICE_UB_SSD_GSVA_OP_BLOCK_WRITE", source)
@@ -3462,8 +3462,8 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "mem_service_record_attach_ub_ssd_gsva_backend_ref",
             source,
         )
-        self.assertIn("qwen3_range_kv_state_ub_ssd_gsva_backend_attach", source)
-        self.assertIn("qwen3_range_kv_state_ub_ssd_gsva_read", source)
+        self.assertIn("model_range_kv_state_ub_ssd_gsva_backend_attach", source)
+        self.assertIn("model_range_kv_state_ub_ssd_gsva_read", source)
         self.assertIn('resolved_backing = "ub_ssd_gsva"', source)
         self.assertIn(
             'resolved_target = "local_backend_read_buffer"',

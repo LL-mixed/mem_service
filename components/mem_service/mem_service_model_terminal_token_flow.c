@@ -10,7 +10,7 @@
 #include "mem_service_qwen3_runtime.h"
 #include "mem_service_record_table.h"
 
-static void mem_service_qwen3_format_token_result_key(
+static void mem_service_model_format_token_result_key(
     char *key,
     size_t key_len,
     const char *model_key,
@@ -86,7 +86,7 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     local_slot = &rt->slots[rt->local_idx];
     if ((uint32_t)rt->local_idx != local_node || !local_slot->region.addr ||
         mem_service_payload_arena_alloc(rt,
-                                  MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES,
+                                  MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES,
                                   64,
                                   &token_result_offset) != 0) {
         return -1;
@@ -100,21 +100,21 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     payload_words[5] = text_checksum;
     payload_words[6] = piece_word0;
     payload_words[7] = piece_word1;
-    checksum = mem_service_qwen3_hidden_payload_checksum(
+    checksum = mem_service_model_payload_checksum(
         (const uint8_t *)payload_words,
-        MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
 
     base = (uint8_t *)local_slot->region.addr;
-    memcpy(base + token_result_offset, payload_words, MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+    memcpy(base + token_result_offset, payload_words, MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
     if (mem_service_update_region_range_at(local_slot,
                                      token_result_offset,
-                                     MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES,
+                                     MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES,
                                      true) != 0) {
         return -1;
     }
-    (void)msync(base + token_result_offset, MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES, MS_SYNC);
+    (void)msync(base + token_result_offset, MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES, MS_SYNC);
 
-    mem_service_qwen3_format_token_result_key(token_result_key,
+    mem_service_model_format_token_result_key(token_result_key,
                                               sizeof(token_result_key),
                                               request->model_key,
                                               decode_step);
@@ -123,12 +123,12 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     producer_clock_offset_ms = producer_publish_ms - producer_publish_monotonic_ms;
     if (mem_service_put_obmm_object_record(svc,
                                      request->recycle_runtime_record,
-                                     MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT,
+                                     MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
                                      token_result_key,
                                      local_node,
-                                     MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
+                                     MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
                                      token_result_offset,
-                                     MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES,
+                                     MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES,
                                      checksum,
                                      &local_token_result) != 0) {
         return -1;
@@ -182,12 +182,12 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
                 }
                 memset(&desc, 0, sizeof(desc));
                 desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
-                desc.flags = MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT;
+                desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
                 desc.seq = ((uint64_t)object_epoch << 48) |
                            ((uint64_t)(rt->local_idx + 1) << 32) |
                            (local_token_result.object_backing_offset &
                             0xffffffffULL);
-                desc.region_id = MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT;
+                desc.region_id = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
                 desc.payload_len =
                     (uint32_t)local_token_result.object_backing_len;
                 desc.payload_offset = local_token_result.object_backing_offset;
@@ -199,7 +199,7 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
             } else if (mem_service_push_obmm_object_desc_to(
                            rt,
                            node_idx,
-                           MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
+                           MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
                            local_token_result.object_backing_offset,
                            local_token_result.object_backing_len,
                            local_token_result.object_payload_checksum,
@@ -216,11 +216,11 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
         }
         memset(&desc, 0, sizeof(desc));
         desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
-        desc.flags = MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT;
+        desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
         desc.seq = ((uint64_t)object_epoch << 48) |
                    ((uint64_t)(rt->local_idx + 1) << 32) |
                    (local_token_result.object_backing_offset & 0xffffffffULL);
-        desc.region_id = MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT;
+        desc.region_id = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
         desc.payload_len = (uint32_t)local_token_result.object_backing_len;
         desc.payload_offset = local_token_result.object_backing_offset;
         desc.cookie =
@@ -230,14 +230,14 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     } else if (mem_service_push_obmm_object_desc_to(
                    rt,
                    target_node,
-                   MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT,
+                   MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
                    local_token_result.object_backing_offset,
                    local_token_result.object_backing_len,
                    local_token_result.object_payload_checksum,
                    object_epoch) != 0) {
         return -1;
     }
-    printf("[mem_service] stage qwen3_terminal_token_result_publish local=node%u target=node%u step=%" PRIu64 " token=%" PRIu64 " runner_up=%" PRIu64 " margin_milli=%" PRIu64 " logits_checksum=0x%016" PRIx64 " text_checksum=0x%016" PRIx64 " piece_word0=0x%016" PRIx64 " piece_word1=0x%016" PRIx64 " object_key=%s offset=0x%016" PRIx64 " bytes=%" PRIu64 " checksum=0x%016" PRIx64 " epoch=%u seq=%u backing=obmm_pool metadata=db queue=%s status=ok publisher=%s broadcast_targets=%u\n",
+    printf("[mem_service] stage model_terminal_token_result_publish local=node%u target=node%u step=%" PRIu64 " token=%" PRIu64 " runner_up=%" PRIu64 " margin_milli=%" PRIu64 " logits_checksum=0x%016" PRIx64 " text_checksum=0x%016" PRIx64 " piece_word0=0x%016" PRIx64 " piece_word1=0x%016" PRIx64 " object_key=%s offset=0x%016" PRIx64 " bytes=%" PRIu64 " checksum=0x%016" PRIx64 " epoch=%u seq=%u backing=obmm_pool metadata=db queue=%s status=ok publisher=%s broadcast_targets=%u\n",
            local_node + 1U,
            target_node + 1U,
            decode_step,
@@ -376,7 +376,7 @@ static int mem_service_wait_terminal_token_result_for_model(
     if (!svc || !model_key || model_key[0] == '\0') {
         return -1;
     }
-    mem_service_qwen3_format_token_result_key(token_result_key,
+    mem_service_model_format_token_result_key(token_result_key,
                                               sizeof(token_result_key),
                                               model_key,
                                               decode_step);
@@ -404,22 +404,22 @@ static int mem_service_wait_terminal_token_result_for_model(
                     mem_service_slot_find_record(owner_slot,
                                            token_result_key,
                                            &token_record) &&
-                    token_record.kind == MEM_SERVICE_RECORD_QWEN3_TOKEN_RESULT &&
+                    token_record.kind == MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT &&
                     token_record.object_payload_kind ==
-                        MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT &&
+                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT &&
                     token_record.object_backing_len ==
-                        MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES &&
+                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES &&
                     token_record.object_backing_offset <= owner_slot->region.len &&
                     token_record.object_backing_len <=
                         owner_slot->region.len - token_record.object_backing_offset) {
                     memcpy(payload_words,
                            (uint8_t *)owner_slot->region.addr +
                                token_record.object_backing_offset,
-                           MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                           MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                     if (payload_words[0] == decode_step) {
-                        checksum = mem_service_qwen3_hidden_payload_checksum(
+                        checksum = mem_service_model_payload_checksum(
                             (const uint8_t *)payload_words,
-                            MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES);
+                            MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
                         if (checksum != token_record.object_payload_checksum) {
                             usleep(10000);
                             continue;
@@ -427,7 +427,7 @@ static int mem_service_wait_terminal_token_result_for_model(
                         if (sampled_token_out) {
                             *sampled_token_out = payload_words[1];
                         }
-                        printf("[mem_service] stage qwen3_terminal_token_result_wait step=%" PRIu64
+                        printf("[mem_service] stage model_terminal_token_result_wait step=%" PRIu64
                                " object_key=%s owner=node%d offset=0x%016" PRIx64
                                " bytes=%" PRIu64
                                " token=%" PRIu64 " checksum=0x%016" PRIx64
@@ -436,7 +436,7 @@ static int mem_service_wait_terminal_token_result_for_model(
                                token_result_key,
                                owner_idx + 1,
                                token_record.object_backing_offset,
-                               (uint64_t)MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES,
+                               (uint64_t)MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES,
                                payload_words[1],
                                checksum);
                         return 0;
@@ -450,7 +450,7 @@ static int mem_service_wait_terminal_token_result_for_model(
         usleep(10000);
     }
     if (timeout_ms != 0) {
-        printf("[mem_service] gap qwen3_terminal_token_result_wait=timeout step=%" PRIu64
+        printf("[mem_service] gap model_terminal_token_result_wait=timeout step=%" PRIu64
                " object_key=%s\n",
                decode_step,
                token_result_key);

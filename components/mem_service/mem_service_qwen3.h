@@ -13,9 +13,6 @@
 #define MEM_SERVICE_RECORD_QWEN3_ENGRAM_SELECTED MEM_SERVICE_RECORD_MODEL_ENGRAM_SELECTED
 #define MEM_SERVICE_RECORD_QWEN3_ENGRAM_STATE MEM_SERVICE_RECORD_MODEL_ENGRAM_STATE
 
-#define MEM_SERVICE_OBMM_KIND_QWEN3_TOKEN_RESULT 6U
-#define MEM_SERVICE_OBMM_QWEN3_TOKEN_RESULT_BYTES 64ULL
-
 uint32_t mem_service_qwen3_layer_count(void);
 uint32_t mem_service_qwen3_range_nodes(void);
 uint64_t mem_service_qwen3_hidden_range_bytes(void);

@@ -50,7 +50,7 @@ static void mem_service_format_range_kv_state_key(
              object_decode_step);
 }
 
-static void mem_service_qwen3_format_kv_state_key(
+static void mem_service_model_format_kv_state_key(
     char *key,
     size_t key_len,
     uint32_t local_node,
@@ -69,7 +69,7 @@ static void mem_service_qwen3_format_kv_state_key(
                                           decode_step);
 }
 
-static uint64_t mem_service_qwen3_kv_backend_key_hash(const char *key)
+static uint64_t mem_service_model_kv_backend_key_hash(const char *key)
 {
     uint64_t hash = 1469598103934665603ULL;
 
@@ -83,7 +83,7 @@ static uint64_t mem_service_qwen3_kv_backend_key_hash(const char *key)
     return hash;
 }
 
-static const char *mem_service_qwen3_kv_ub_ssd_status_name(
+static const char *mem_service_model_kv_ub_ssd_status_name(
     enum mem_service_ub_ssd_gsva_io_status status)
 {
     switch (status) {
@@ -107,7 +107,7 @@ static const char *mem_service_qwen3_kv_ub_ssd_status_name(
     }
 }
 
-static int mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
+static int mem_service_model_kv_publish_record_to_ub_ssd_gsva_backend(
     struct mem_service_cluster_runtime *rt,
     struct mem_service_record *record,
     uint64_t decode_step)
@@ -122,14 +122,14 @@ static int mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
         return -1;
     }
     if (mem_service_cluster_runtime_make_gsva_buffer_desc(rt, record, &desc) != 0) {
-        printf("[mem_service] stage qwen3_range_kv_state_ub_ssd_gsva_backend_attach"
+        printf("[mem_service] stage model_range_kv_state_ub_ssd_gsva_backend_attach"
                " key=%s step=%" PRIu64
                " status=not_attached reason=descriptor_unavailable\n",
                record->key,
                decode_step);
         return 0;
     }
-    key_hash = mem_service_qwen3_kv_backend_key_hash(record->key);
+    key_hash = mem_service_model_kv_backend_key_hash(record->key);
     memset(&request, 0, sizeof(request));
     memset(&completion, 0, sizeof(completion));
     request.opcode = MEM_SERVICE_UB_SSD_GSVA_OP_BLOCK_WRITE;
@@ -147,7 +147,7 @@ static int mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
     request.buffer = desc;
     status = mem_service_ub_ssd_gsva_submit(&request, &completion);
     if (status == MEM_SERVICE_UB_SSD_GSVA_IO_UNSUPPORTED) {
-        printf("[mem_service] stage qwen3_range_kv_state_ub_ssd_gsva_backend_attach"
+        printf("[mem_service] stage model_range_kv_state_ub_ssd_gsva_backend_attach"
                " key=%s key_hash=0x%016" PRIx64 " step=%" PRIu64
                " status=not_attached reason=ub_ssd_device_unavailable\n",
                record->key,
@@ -156,9 +156,9 @@ static int mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
         return 0;
     }
     if (status != MEM_SERVICE_UB_SSD_GSVA_IO_OK) {
-        printf("[mem_service] gap qwen3_range_kv_state_ub_ssd_gsva_backend_attach=%s"
+        printf("[mem_service] gap model_range_kv_state_ub_ssd_gsva_backend_attach=%s"
                " key=%s key_hash=0x%016" PRIx64 " step=%" PRIu64 "\n",
-               mem_service_qwen3_kv_ub_ssd_status_name(status),
+               mem_service_model_kv_ub_ssd_status_name(status),
                record->key,
                key_hash,
                decode_step);
@@ -172,7 +172,7 @@ static int mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
                                                           false) != 0) {
         return -1;
     }
-    printf("[mem_service] stage qwen3_range_kv_state_ub_ssd_gsva_backend_attach"
+    printf("[mem_service] stage model_range_kv_state_ub_ssd_gsva_backend_attach"
            " key=%s key_hash=0x%016" PRIx64 " step=%" PRIu64
            " gsva_base=0x%016" PRIx64 " bytes=%" PRIu64
            " backend_device_cna=0x%08" PRIx32
@@ -193,7 +193,7 @@ static int mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
     return 0;
 }
 
-static int mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
+static int mem_service_model_kv_read_from_ub_ssd_gsva_backend(
     struct mem_service_cluster_runtime *rt,
     const struct mem_service_record *kv_state,
     uint32_t local_node,
@@ -260,12 +260,12 @@ static int mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
     request.buffer = desc;
     status = mem_service_ub_ssd_gsva_submit(&request, &completion);
     if (status != MEM_SERVICE_UB_SSD_GSVA_IO_OK) {
-        printf("[mem_service] gap qwen3_range_kv_state_ub_ssd_gsva_read=%s"
+        printf("[mem_service] gap model_range_kv_state_ub_ssd_gsva_read=%s"
                " local=node%u key=%s kv_step=%" PRIu64
                " backend_device_cna=0x%08" PRIx32
                " block_hi=%" PRIu64 " block_lo=%" PRIu64
                " version=%" PRIu64 " bytes=%" PRIu64 "\n",
-               mem_service_qwen3_kv_ub_ssd_status_name(status),
+               mem_service_model_kv_ub_ssd_status_name(status),
                local_node + 1U,
                kv_state->key,
                kv_step,
@@ -285,7 +285,7 @@ static int mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
                                            false) != 0) {
         return -1;
     }
-    checksum = mem_service_qwen3_hidden_payload_checksum(
+    checksum = mem_service_model_payload_checksum(
         (const uint8_t *)local_slot->region.addr + local_offset,
         kv_state->object_backing_len);
     if (checksum != kv_state->object_payload_checksum) {
@@ -294,14 +294,14 @@ static int mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
 
         if (kv_state->object_backing_offset + kv_state->object_backing_len <=
             local_slot->region.len) {
-            primary_checksum = mem_service_qwen3_hidden_payload_checksum(
+            primary_checksum = mem_service_model_payload_checksum(
                 (const uint8_t *)local_slot->region.addr +
                     kv_state->object_backing_offset,
                 kv_state->object_backing_len);
             primary_status = primary_checksum == kv_state->object_payload_checksum ?
                 "matches_expected" : "mismatch";
         }
-        printf("[mem_service] gap qwen3_range_kv_state_ub_ssd_gsva_read=checksum_mismatch"
+        printf("[mem_service] gap model_range_kv_state_ub_ssd_gsva_read=checksum_mismatch"
                " local=node%u key=%s kv_step=%" PRIu64
                " checksum=0x%016" PRIx64 " expected=0x%016" PRIx64
                " backend_expected=0x%016" PRIx64
@@ -323,7 +323,7 @@ static int mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
     }
     *payload_view_out = (const uint8_t *)local_slot->region.addr + local_offset;
     *local_backing_offset_out = local_offset;
-    printf("[mem_service] stage qwen3_range_kv_state_ub_ssd_gsva_read"
+    printf("[mem_service] stage model_range_kv_state_ub_ssd_gsva_read"
            " local=node%u key=%s kv_step=%" PRIu64
            " gsva_base=0x%016" PRIx64 " bytes=%" PRIu64
            " backend_device_cna=0x%08" PRIx32
@@ -372,9 +372,9 @@ int mem_service_obmm_service_v0_publish_runtime_range_kv_state(
         local_node >= cluster_node_count) {
         return -1;
     }
-    kv_checksum = mem_service_qwen3_hidden_payload_checksum(kv_payload, kv_payload_len);
+    kv_checksum = mem_service_model_payload_checksum(kv_payload, kv_payload_len);
     if (kv_checksum != expected_kv_checksum) {
-        printf("[mem_service] gap qwen3_range_forward=runtime_kv_checksum_mismatch local=node%u checksum=0x%016" PRIx64 " expected=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
+        printf("[mem_service] gap model_range_forward=runtime_kv_checksum_mismatch local=node%u checksum=0x%016" PRIx64 " expected=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
                local_node + 1U,
                kv_checksum,
                expected_kv_checksum,
@@ -390,7 +390,7 @@ int mem_service_obmm_service_v0_publish_runtime_range_kv_state(
     }
     local_slot = &rt->slots[rt->local_idx];
     if ((uint32_t)rt->local_idx != local_node || !local_slot->region.addr ||
-        mem_service_qwen3_kv_state_alloc(rt,
+        mem_service_model_kv_state_alloc(rt,
                                    kv_payload_len,
                                    &kv_state_offset,
                                    &kv_state_block_bytes,
@@ -407,7 +407,7 @@ int mem_service_obmm_service_v0_publish_runtime_range_kv_state(
         return -1;
     }
     (void)msync(base + kv_state_offset, kv_payload_len, MS_SYNC);
-    mem_service_qwen3_format_kv_state_key(local_kv_state_key,
+    mem_service_model_format_kv_state_key(local_kv_state_key,
                                           sizeof(local_kv_state_key),
                                           local_node,
                                           &local_placement,
@@ -443,7 +443,7 @@ int mem_service_obmm_service_v0_publish_runtime_range_kv_state(
             producer_publish_ms > 0 ? (uint64_t)producer_publish_ms : 0;
         published_record->object_publish_supernode_offset_ms =
             producer_clock_offset_ms;
-        if (mem_service_qwen3_kv_publish_record_to_ub_ssd_gsva_backend(
+        if (mem_service_model_kv_publish_record_to_ub_ssd_gsva_backend(
                 rt,
                 published_record,
                 decode_step) != 0) {
@@ -463,7 +463,7 @@ int mem_service_obmm_service_v0_publish_runtime_range_kv_state(
     if (object_epoch == 0) {
         object_epoch = 1;
     }
-    printf("[mem_service] stage qwen3_range_kv_state_publish local=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " slot_bytes=%" PRIu64 " block_bytes=%" PRIu64 " blocks=%" PRIu64 " reserved_bytes=%" PRIu64 " producer_publish_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service status=ok\n",
+    printf("[mem_service] stage model_range_kv_state_publish local=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " slot_bytes=%" PRIu64 " block_bytes=%" PRIu64 " blocks=%" PRIu64 " reserved_bytes=%" PRIu64 " producer_publish_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service status=ok\n",
            local_node + 1U,
            decode_step,
            local_kv_state_key,
@@ -524,7 +524,7 @@ int mem_service_obmm_service_v0_try_resolve_range_kv_state_view(
     if ((uint32_t)rt->local_idx != local_node || !local_slot->region.addr) {
         return -1;
     }
-    mem_service_qwen3_format_kv_state_key(kv_state_key,
+    mem_service_model_format_kv_state_key(kv_state_key,
                                           sizeof(kv_state_key),
                                           local_node,
                                           &local_placement,
@@ -545,7 +545,7 @@ int mem_service_obmm_service_v0_try_resolve_range_kv_state_view(
         (!backend_selected &&
          kv_state.object_backing_offset + kv_state.object_backing_len >
              local_slot->region.len)) {
-        printf("[mem_service] stage qwen3_range_kv_state_resolve_missing local=node%u kv_step=%" PRIu64 " key=%s status=miss\n",
+        printf("[mem_service] stage model_range_kv_state_resolve_missing local=node%u kv_step=%" PRIu64 " key=%s status=miss\n",
                local_node + 1U,
                kv_step,
                kv_state_key);
@@ -553,7 +553,7 @@ int mem_service_obmm_service_v0_try_resolve_range_kv_state_view(
     }
     checksum = kv_state.object_payload_checksum;
     if (backend_selected) {
-        if (mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
+        if (mem_service_model_kv_read_from_ub_ssd_gsva_backend(
                 rt,
                 &kv_state,
                 local_node,
@@ -578,7 +578,7 @@ int mem_service_obmm_service_v0_try_resolve_range_kv_state_view(
     if (mem_service_record_to_lingqu_object_ref(&kv_state, &view_out->object_ref) != 0) {
         return -1;
     }
-    printf("[mem_service] stage qwen3_range_kv_state_resolve local=node%u kv_step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " validation=object_ref_metadata source=obmm_object_view backing=%s metadata=lingqu_object_service target=%s status=ok\n",
+    printf("[mem_service] stage model_range_kv_state_resolve local=node%u kv_step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " validation=object_ref_metadata source=obmm_object_view backing=%s metadata=lingqu_object_service target=%s status=ok\n",
            local_node + 1U,
            kv_step,
            kv_state_key,
@@ -661,7 +661,7 @@ int mem_service_range_flow_try_resolve_kv_state_view(
         return 1;
     }
     if (backend_selected) {
-        if (mem_service_qwen3_kv_read_from_ub_ssd_gsva_backend(
+        if (mem_service_model_kv_read_from_ub_ssd_gsva_backend(
                 rt,
                 &kv_state,
                 local_node,
@@ -727,7 +727,7 @@ int mem_service_obmm_service_v0_resolve_previous_range_kv_state_view(
         decode_step - 1U,
         view_out);
     if (rc > 0) {
-        printf("[mem_service] gap qwen3_range_kv_state_resolve=missing local=node%u step=%" PRIu64 " previous_step=%" PRIu64 "\n",
+        printf("[mem_service] gap model_range_kv_state_resolve=missing local=node%u step=%" PRIu64 " previous_step=%" PRIu64 "\n",
                local_node + 1U,
                decode_step,
                decode_step - 1U);
@@ -767,7 +767,7 @@ int mem_service_obmm_service_v0_resolve_previous_range_kv_state(struct mem_servi
         return 0;
     }
     if (view.len > payload_capacity) {
-        printf("[mem_service] gap qwen3_range_kv_state_resolve=payload_too_large local=node%u step=%" PRIu64 " bytes=%" PRIu64 " capacity=%" PRIu64 "\n",
+        printf("[mem_service] gap model_range_kv_state_resolve=payload_too_large local=node%u step=%" PRIu64 " bytes=%" PRIu64 " capacity=%" PRIu64 "\n",
                local_node + 1U,
                decode_step,
                view.len,
