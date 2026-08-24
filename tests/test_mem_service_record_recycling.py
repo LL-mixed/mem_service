@@ -3246,7 +3246,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
         self.assertIn('range_resolution = "object_record"', range_wait_flow)
         self.assertIn(
-            "MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS 30000L",
+            "MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS \\\n    (MEM_SERVICE_CLUSTER_WAIT_MS / 2L)",
             range_wait_flow,
         )
         self.assertIn(

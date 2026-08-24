@@ -12,7 +12,10 @@
 #include "mem_service_record_table.h"
 #include "mem_service_ub_ssd_gsva_io.h"
 
-#define MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS 30000L
+/* Descriptor delivery plus consumer ACK is authoritative. Record lookup is a
+ * delayed recovery path for a lost/backpressured notification. */
+#define MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS \
+    (MEM_SERVICE_CLUSTER_WAIT_MS / 2L)
 #define MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS 5000L
 
 static bool mem_service_model_record_recovery_due(long *next_probe_ms,
