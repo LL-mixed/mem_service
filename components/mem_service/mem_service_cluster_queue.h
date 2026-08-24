@@ -75,6 +75,18 @@ int mem_service_try_push_obmm_object_desc_to(
     uint64_t payload_len,
     uint64_t checksum,
     uint16_t epoch);
+int mem_service_ack_obmm_object_desc_to(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t target_node,
+    const struct obmm_desc *put_desc);
+int mem_service_wait_obmm_object_ack_from(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t source_node,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint64_t checksum,
+    uint16_t epoch);
 int mem_service_wait_remote_obmm_object_descs(struct mem_service_cluster_runtime *rt,
                                              uint32_t owner_node,
                                              uint16_t epoch,

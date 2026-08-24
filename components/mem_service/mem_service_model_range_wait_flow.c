@@ -1245,6 +1245,11 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                                                 &view_out->object_ref) != 0) {
         return -1;
     }
+    if (mem_service_ack_obmm_object_desc_to(rt,
+                                            source_node,
+                                            &handoff_desc) != 0) {
+        return -1;
+    }
     view_out->wait_enter_monotonic_ms =
         wait_enter_ms > 0 ? (uint64_t)wait_enter_ms : 0;
     view_out->found_monotonic_ms =
@@ -1263,7 +1268,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     view_out->wait_attempts = attempts;
     view_out->activate_ms = activate_ms;
     view_out->metadata_ms = metadata_ms;
-    printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=%ld validation=object_desc_backing queue=obmm_spsc receive=%s metadata=lingqu_object_service backing=%s target=%s status=ok\n",
+    printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=%ld validation=object_desc_backing queue=obmm_spsc receive=%s metadata=lingqu_object_service backing=%s target=%s handoff_ack=sent status=ok\n",
            local_node + 1U,
            source_node + 1U,
            ingress_key,

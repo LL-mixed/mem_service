@@ -3017,12 +3017,19 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("mem_service_queue_barrier", cluster_queue)
         self.assertIn("mem_service_push_obmm_object_descs", cluster_queue)
         self.assertIn("mem_service_try_push_obmm_object_desc_to", cluster_queue)
+        self.assertIn("mem_service_ack_obmm_object_desc_to", cluster_queue)
+        self.assertIn("mem_service_wait_obmm_object_ack_from", cluster_queue)
         self.assertIn("mem_service_wait_remote_obmm_object_descs", cluster_queue)
         self.assertIn("mem_service_runtime_range_input_desc_matches", cluster_queue)
         self.assertIn("mem_service_queue_barrier", cluster_queue_contract)
         self.assertIn("mem_service_push_obmm_object_descs", cluster_queue_contract)
         self.assertIn(
             "mem_service_try_push_obmm_object_desc_to",
+            cluster_queue_contract,
+        )
+        self.assertIn("mem_service_ack_obmm_object_desc_to", cluster_queue_contract)
+        self.assertIn(
+            "mem_service_wait_obmm_object_ack_from",
             cluster_queue_contract,
         )
         self.assertIn("mem_service_wait_remote_obmm_object_descs", cluster_queue_contract)
@@ -3236,6 +3243,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn('range_resolution = "object_record"', range_wait_flow)
+        self.assertIn("mem_service_ack_obmm_object_desc_to", range_wait_flow)
         self.assertIn("receive=%s metadata=lingqu_object_service", range_wait_flow)
         self.assertIn(
             "return -1;\n    }\n    if (completion.committed_ref.bytes",
@@ -3272,6 +3280,10 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("mem_service_model_kv_state_alloc", range_publish_flow)
         self.assertIn(
             "mem_service_try_push_obmm_object_desc_to",
+            range_publish_flow,
+        )
+        self.assertIn(
+            "mem_service_wait_obmm_object_ack_from",
             range_publish_flow,
         )
         self.assertIn('"backpressured"', range_publish_flow)

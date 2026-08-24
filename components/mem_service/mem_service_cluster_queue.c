@@ -519,6 +519,139 @@ int mem_service_try_push_obmm_object_desc_to(
     return rc == 0 ? 0 : -1;
 }
 
+static bool mem_service_object_ack_matches(const struct obmm_desc *ack,
+                                           const struct obmm_desc *put)
+{
+    return ack && put &&
+           ack->type == OBMM_DESC_MEM_SERVICE_OBJECT_GET &&
+           put->type == OBMM_DESC_MEM_SERVICE_OBJECT_PUT &&
+           ack->flags == put->flags && ack->seq == put->seq &&
+           ack->region_id == put->region_id &&
+           ack->payload_len == put->payload_len &&
+           ack->payload_offset == put->payload_offset &&
+           ack->cookie == put->cookie;
+}
+
+static bool mem_service_take_pending_object_ack(
+    struct mem_service_cluster_runtime *rt,
+    int owner_idx,
+    const struct obmm_desc *put)
+{
+    uint8_t count;
+    uint8_t i;
+
+    if (!rt || !put || owner_idx < 0 || owner_idx >= rt->node_count) {
+        return false;
+    }
+    count = rt->pending_desc_count[owner_idx];
+    for (i = 0; i < count; ++i) {
+        if (mem_service_object_ack_matches(&rt->pending_descs[owner_idx][i],
+                                           put)) {
+            if (i + 1 < count) {
+                memmove(&rt->pending_descs[owner_idx][i],
+                        &rt->pending_descs[owner_idx][i + 1],
+                        (size_t)(count - i - 1) * sizeof(struct obmm_desc));
+            }
+            rt->pending_desc_count[owner_idx] = (uint8_t)(count - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+int mem_service_ack_obmm_object_desc_to(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t target_node,
+    const struct obmm_desc *put_desc)
+{
+    struct obmm_desc ack;
+    long deadline = obmm_now_ms() + MEM_SERVICE_CLUSTER_WAIT_MS;
+
+    if (!rt || !put_desc ||
+        put_desc->type != OBMM_DESC_MEM_SERVICE_OBJECT_PUT ||
+        target_node >= (uint32_t)rt->node_count ||
+        target_node == (uint32_t)rt->local_idx) {
+        return -1;
+    }
+    if (!rt->egress_queues[target_node] &&
+        mem_service_activate_remote_slot(rt, (int)target_node) != 0) {
+        return -1;
+    }
+    if (!rt->egress_queues[target_node]) {
+        return -1;
+    }
+    ack = *put_desc;
+    ack.type = OBMM_DESC_MEM_SERVICE_OBJECT_GET;
+    while (obmm_spsc_push(rt->egress_queues[target_node], &ack) != 0) {
+        if (obmm_now_ms() >= deadline) {
+            fprintf(stderr,
+                    "[mem_service] object ack push timeout"
+                    " kind=%u target=%u offset=%#" PRIx64 "\n",
+                    ack.flags,
+                    target_node + 1U,
+                    ack.payload_offset);
+            return -1;
+        }
+        usleep(1000);
+    }
+    return 0;
+}
+
+int mem_service_wait_obmm_object_ack_from(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t source_node,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint64_t checksum,
+    uint16_t epoch)
+{
+    struct obmm_desc put;
+    long deadline = obmm_now_ms() + MEM_SERVICE_CLUSTER_WAIT_MS;
+
+    if (!rt || source_node >= (uint32_t)rt->node_count ||
+        source_node == (uint32_t)rt->local_idx || payload_len > UINT32_MAX ||
+        payload_kind > UINT16_MAX) {
+        return -1;
+    }
+    memset(&put, 0, sizeof(put));
+    put.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
+    put.flags = (uint16_t)payload_kind;
+    put.seq = ((uint64_t)epoch << 48) |
+              ((uint64_t)(rt->local_idx + 1) << 32) |
+              (payload_offset & 0xffffffffULL);
+    put.region_id = payload_kind;
+    put.payload_len = (uint32_t)payload_len;
+    put.payload_offset = payload_offset;
+    put.cookie = (uint32_t)(checksum ^ (checksum >> 32));
+
+    while (obmm_now_ms() < deadline) {
+        struct obmm_desc rx;
+
+        if (mem_service_take_pending_object_ack(rt,
+                                                (int)source_node,
+                                                &put)) {
+            return 0;
+        }
+        while (mem_service_pop_ingress_desc(rt,
+                                            (int)source_node,
+                                            &rx) == 0) {
+            if (mem_service_object_ack_matches(&rx, &put)) {
+                return 0;
+            }
+            mem_service_stash_pending_desc(rt, (int)source_node, &rx);
+        }
+        usleep(1000);
+    }
+    fprintf(stderr,
+            "[mem_service] object ack wait timeout"
+            " kind=%u source=%u offset=%#" PRIx64 "\n",
+            payload_kind,
+            source_node + 1U,
+            payload_offset);
+    return -1;
+}
+
 int mem_service_wait_remote_obmm_object_descs(struct mem_service_cluster_runtime *rt,
                                              uint32_t owner_node,
                                              uint16_t epoch,
