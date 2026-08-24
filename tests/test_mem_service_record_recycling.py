@@ -3223,6 +3223,18 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn("mem_service_sync_remote_range(", range_wait_flow)
+        self.assertIn(
+            "offsetof(struct mem_service_cluster_payload, records)",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "header.record_count * sizeof(struct mem_service_record)",
+            range_wait_flow,
+        )
+        self.assertNotIn(
+            "sizeof(struct mem_service_cluster_payload)) == 0",
+            range_wait_flow,
+        )
         self.assertIn('range_resolution = "object_record"', range_wait_flow)
         self.assertIn("receive=%s metadata=lingqu_object_service", range_wait_flow)
         self.assertIn(

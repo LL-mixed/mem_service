@@ -78,14 +78,48 @@ static bool mem_service_model_refresh_remote_metadata(
     const struct mem_service_cluster_runtime *rt,
     const struct mem_service_cluster_slot *slot)
 {
+    struct mem_service_cluster_payload_header header;
+    struct mem_service_cluster_payload_header confirm;
+    uint64_t records_offset;
+    uint64_t records_len;
+
     if (!rt || !slot || !slot->region.addr) {
         return false;
     }
-    return slot->is_local ||
-           mem_service_sync_remote_range(
-               slot,
-               rt->payload_offset,
-               sizeof(struct mem_service_cluster_payload)) == 0;
+    if (slot->is_local) {
+        return true;
+    }
+    records_offset = offsetof(struct mem_service_cluster_payload, records);
+    if (mem_service_sync_remote_range(slot,
+                                      rt->payload_offset,
+                                      records_offset) != 0) {
+        return false;
+    }
+    memcpy(&header, slot->region.addr, sizeof(header));
+    if (header.publish_seq == 0 ||
+        header.publish_seq != header.publish_done_seq ||
+        header.magic != MEM_SERVICE_CLUSTER_PAYLOAD_MAGIC ||
+        header.version != MEM_SERVICE_CLUSTER_PAYLOAD_VERSION ||
+        header.record_count == 0 ||
+        header.record_count > MEM_SERVICE_CLUSTER_MAX_RECORDS) {
+        return false;
+    }
+    records_len =
+        (uint64_t)header.record_count * sizeof(struct mem_service_record);
+    if (mem_service_sync_remote_range(slot,
+                                      rt->payload_offset + records_offset,
+                                      records_len) != 0 ||
+        mem_service_sync_remote_range(slot,
+                                      rt->payload_offset,
+                                      sizeof(header)) != 0) {
+        return false;
+    }
+    memcpy(&confirm, slot->region.addr, sizeof(confirm));
+    return confirm.publish_seq == header.publish_seq &&
+           confirm.publish_done_seq == header.publish_done_seq &&
+           confirm.magic == header.magic &&
+           confirm.version == header.version &&
+           confirm.record_count == header.record_count;
 }
 
 static bool mem_service_model_refresh_remote_payload(
