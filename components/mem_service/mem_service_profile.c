@@ -47,6 +47,7 @@ int mem_service_init_obmm_range_flow_request(
         !layer_range_for_node) {
         return -1;
     }
+    memset(req, 0, sizeof(*req));
     if (layer_range_for_node(local_node,
                              range_nodes,
                              &local_start,
@@ -75,7 +76,6 @@ int mem_service_init_obmm_range_flow_request(
         return -1;
     }
 
-    memset(&predecessor, 0, sizeof(predecessor));
     for (uint32_t node = 0; node < range_nodes; ++node) {
         uint32_t start = 0;
         uint32_t end = 0;

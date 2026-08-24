@@ -46,6 +46,7 @@ struct mem_service_obmm_range_flow_request {
     struct mem_service_layer_range_placement next_placement;
     bool has_predecessor;
     struct mem_service_layer_range_placement predecessor_placement;
+    bool allow_terminal_shortpath;
     mem_service_record_recycler_fn recycle_runtime_record;
 };
 

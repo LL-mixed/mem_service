@@ -2703,7 +2703,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         # mem_service_profile is still only a request contract: no active
         # model registry and no global profile selector.
         self.assertIn("struct mem_service_obmm_range_flow_request", profile_h)
+        self.assertIn("bool allow_terminal_shortpath", profile_h)
         self.assertIn("mem_service_record_recycler_fn recycle_runtime_record", profile_h)
+        self.assertIn("memset(req, 0, sizeof(*req));", SERVICE_PROFILE_C.read_text())
         self.assertNotIn("active_model", profile_h)
         self.assertNotIn("lookup_model_profile", profile_h)
 

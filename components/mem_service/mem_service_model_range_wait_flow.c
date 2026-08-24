@@ -1406,7 +1406,8 @@ int mem_service_range_flow_wait_scheduler_work_item(
             local_node,
             cluster_node_count,
             decode_step,
-            local_placement.layer_start > 0,
+            local_placement.layer_start > 0 &&
+                request->allow_terminal_shortpath,
             &view) != 0 ||
         !view.data) {
         return -1;
