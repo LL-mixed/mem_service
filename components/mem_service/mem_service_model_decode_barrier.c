@@ -104,11 +104,13 @@ int mem_service_wait_all_decode_round_done(struct mem_service *svc,
     expected_mask = (1U << cluster_node_count) - 1U;
     deadline = obmm_now_ms() + (long)timeout_ms;
     while (obmm_now_ms() < deadline) {
-        ready_mask = 0;
         for (uint32_t i = 0; i < cluster_node_count; ++i) {
             struct mem_service_cluster_slot *slot;
             uint64_t payload_words[8];
 
+            if ((ready_mask & (1U << i)) != 0U) {
+                continue;
+            }
             if ((int)i != rt->local_idx &&
                 mem_service_activate_remote_slot(rt, (int)i) != 0) {
                 continue;
@@ -117,6 +119,13 @@ int mem_service_wait_all_decode_round_done(struct mem_service *svc,
             if (!slot->region.addr ||
                 slot->region.len <
                     slot_offset + MEM_SERVICE_OBMM_ROUND_DONE_BYTES) {
+                continue;
+            }
+            if ((int)i != rt->local_idx &&
+                mem_service_sync_remote_range(
+                    slot,
+                    rt->payload_offset + slot_offset,
+                    MEM_SERVICE_OBMM_ROUND_DONE_BYTES) != 0) {
                 continue;
             }
             memcpy(payload_words,
