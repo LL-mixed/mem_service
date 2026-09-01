@@ -3573,6 +3573,18 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("MEM_SERVICE_OBMM_SERVICE_OBJECT_BYTES", source)
         self.assertNotIn("MEM_SERVICE_OBMM_DEMO_OBJECT_BYTES", source)
 
+    def test_model_range_output_can_publish_a_reserved_payload_in_place(self):
+        profile = SERVICE_PROFILE_H.read_text()
+        publish = SERVICE_MODEL_RANGE_PUBLISH_FLOW_C.read_text()
+
+        self.assertIn("bool publish_payload_in_place;", profile)
+        self.assertIn("uint64_t publish_payload_offset;", profile)
+        self.assertIn("if (request->publish_payload_in_place)", publish)
+        self.assertIn("payload != base + request->publish_payload_offset", publish)
+        self.assertIn("runtime_output_in_place_invalid", publish)
+        self.assertIn("if (!request->publish_payload_in_place)", publish)
+        self.assertIn('request->publish_payload_in_place ? "in_place" : "copy"', publish)
+
 
 if __name__ == "__main__":
     unittest.main()

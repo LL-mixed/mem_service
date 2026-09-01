@@ -128,3 +128,45 @@ scripts/run_w5_memory_service_bootstrap.sh
 - 组件头文件找不到：确认编译时带有 `-I$(MEM_SERVICE_ROOT)`（vendored 依赖
   `common/obmm_common.h`、`libs/obmm_queue/`、`kernel_ub/include/uapi/ub/`
   均通过该 include 根解析）。
+
+## 6. Simpler/PTO 原地发布契约
+
+W5 可以把已提交 hidden-state ObjectRef 对应的 OBMM payload range 交给
+`lingqu_shmem` compute adapter，并形成 `AddressSpace::UB_GM` memref。Simpler
+执行 PTO callable 时，输入由 `TLOAD` 读取，输出由 `TSTORE` 写入当前节点的
+Memory Service payload arena。guest 不携带 tensor inline payload。
+
+本地输出使用两类地址：
+
+| 地址 | 使用者 | 生命周期 |
+| --- | --- | --- |
+| OBMM self-import alias | Simpler/PTO `TSTORE` 与 QEMU UB_GM callback | 从 memref acquire 持续到 PTO completion 后 release |
+| 原始本地 OBMM arena 指针与 `backing_offset` | Memory Service runtime output publish | payload 对象完成发布并结束其正常对象生命周期 |
+
+`mem_service_obmm_range_flow_request` 的
+`publish_payload_in_place=true` 要求调用者同时传入
+`publish_payload_offset`。publish flow 会检查：
+
+1. range 已位于当前 payload arena 的已预留区间；
+2. `payload_len` 没有越过 arena 或 OBMM slot 边界；
+3. `payload` 精确等于本地 OBMM slot 基址加 `publish_payload_offset`。
+
+检查通过后，publish flow 直接以该 offset 建立 runtime output ObjectRef，并
+跳过 payload `memcpy`。KV state 仍遵循现有独立分配与复制路径。当前接口面向
+同进程、受信的 model runtime；多 dispatch 并发阶段还要增加 allocation token
+和 owner 校验，防止一个并发调用发布另一个调用预留的 range。
+
+ub_sim 的目标导向入口为：
+
+```bash
+python3 guest-linux/aarch64/scripts/run_w5_lingqu_shmem_pto.py \
+  --manifest <host_vector_manifest.json> \
+  --node-count 2 \
+  --decode-steps 2 \
+  --qwen-weights-path <qwen3-0.6b-weights>
+```
+
+该入口默认执行两个 decode step。正式通过要求每个下游节点、每个 step 的
+全部 4096-byte tile 均出现 2 次 `TLOAD`、1 次 `TSTORE`、1 次 fence，且
+`segment_payload_staging_bytes=0`、精确公式校验通过、输出以
+`payload_mode=in_place` 发布、无残留 QEMU。

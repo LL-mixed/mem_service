@@ -291,11 +291,35 @@ int mem_service_range_flow_publish_runtime_output(
                      local_placement.layer_end >= request->total_layers;
     target_node = terminal_range ? local_node : local_placement.next_owner_node;
     local_slot = &rt->slots[rt->local_idx];
-    if ((uint32_t)rt->local_idx != local_node || !local_slot->region.addr ||
-        mem_service_payload_arena_alloc(rt,
-                                  payload_len,
-                                  64,
-                                  &runtime_output_offset) != 0) {
+    if ((uint32_t)rt->local_idx != local_node || !local_slot->region.addr) {
+        return -1;
+    }
+    base = (uint8_t *)local_slot->region.addr;
+    if (request->publish_payload_in_place) {
+        if (request->publish_payload_offset < rt->payload_arena_base ||
+            request->publish_payload_offset > rt->payload_arena_next ||
+            payload_len > rt->payload_arena_next -
+                              request->publish_payload_offset ||
+            request->publish_payload_offset > local_slot->region.len ||
+            payload_len > local_slot->region.len -
+                              request->publish_payload_offset ||
+            payload != base + request->publish_payload_offset) {
+            printf("[mem_service] gap model_range_forward="
+                   "runtime_output_in_place_invalid local=node%u"
+                   " offset=0x%016" PRIx64 " bytes=%" PRIu64
+                   " arena=[0x%016" PRIx64 ",0x%016" PRIx64 ")\n",
+                   local_node + 1U,
+                   request->publish_payload_offset,
+                   payload_len,
+                   rt->payload_arena_base,
+                   rt->payload_arena_next);
+            return -1;
+        }
+        runtime_output_offset = request->publish_payload_offset;
+    } else if (mem_service_payload_arena_alloc(rt,
+                                                payload_len,
+                                                64,
+                                                &runtime_output_offset) != 0) {
         return -1;
     }
     if (mem_service_model_kv_state_alloc(rt,
@@ -314,8 +338,9 @@ int mem_service_range_flow_publish_runtime_output(
                local_slot->region.len);
         return -1;
     }
-    base = (uint8_t *)local_slot->region.addr;
-    memcpy(base + runtime_output_offset, payload, payload_len);
+    if (!request->publish_payload_in_place) {
+        memcpy(base + runtime_output_offset, payload, payload_len);
+    }
     memcpy(base + kv_state_offset, kv_payload, kv_payload_len);
     if (mem_service_update_region_range_at(local_slot,
                                      runtime_output_offset,
@@ -510,7 +535,7 @@ int mem_service_range_flow_publish_runtime_output(
                local_publish_seq,
                notification_status == 0 ? "delivered" : "backpressured");
     }
-    printf("[mem_service] stage model_range_forward_runtime_output_publish local=node%u step=%" PRIu64 " key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u output_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok notification=%s\n",
+    printf("[mem_service] stage model_range_forward_runtime_output_publish local=node%u step=%" PRIu64 " key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u output_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " payload_mode=%s producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service queue=obmm_spsc status=ok notification=%s\n",
            local_node + 1U,
            decode_step,
            hidden_ref.key_hash,
@@ -520,6 +545,7 @@ int mem_service_range_flow_publish_runtime_output(
            local_placement.layer_count,
            checksum,
            payload_len,
+           request->publish_payload_in_place ? "in_place" : "copy",
            producer_publish_ms,
            producer_publish_monotonic_ms,
            producer_clock_offset_ms,

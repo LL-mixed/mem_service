@@ -4,6 +4,22 @@
 inference guest harnesses and is being promoted into a standalone Memory
 Service process.
 
+## Reserved payload in-place publication
+
+An in-process model runtime may reserve output bytes from the local payload
+arena, let a compute provider fill that range, and publish it through
+`mem_service_range_flow_publish_runtime_output()`. Set
+`publish_payload_in_place` and pass the reserved `publish_payload_offset` in
+`mem_service_obmm_range_flow_request`. The payload pointer must equal the local
+OBMM slot base plus that offset, and the complete range must remain within the
+already reserved arena. A successful in-place publish records
+`payload_mode=in_place` and skips the payload copy. KV-state publication keeps
+its independent allocation path.
+
+This contract currently trusts the in-process caller that performed the arena
+reservation. Allocation tokens and concurrent owner validation are required
+before exposing the path to unrelated callers or concurrent dispatch owners.
+
 ## Model/runtime naming boundary
 
 Layer-range dispatch, hidden-state handoff, per-range KV publication and
