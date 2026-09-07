@@ -413,7 +413,7 @@ static int mem_service_wait_terminal_token_result_for_model(
                     continue;
                 }
                 owner_slot = &rt->slots[owner_idx];
-                if (owner_slot->region.addr &&
+                if (mem_service_model_refresh_remote_metadata(rt, owner_slot) &&
                     mem_service_try_read_stable_compact_summary_region(owner_slot,
                                                                  &compact,
                                                                  &seen) &&
@@ -428,6 +428,11 @@ static int mem_service_wait_terminal_token_result_for_model(
                     token_record.object_backing_offset <= owner_slot->region.len &&
                     token_record.object_backing_len <=
                         owner_slot->region.len - token_record.object_backing_offset) {
+                    if (!mem_service_model_refresh_remote_payload(
+                            rt, owner_slot, token_record.object_backing_offset,
+                            MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES)) {
+                        continue;
+                    }
                     memcpy(payload_words,
                            (uint8_t *)owner_slot->region.addr +
                                token_record.object_backing_offset,

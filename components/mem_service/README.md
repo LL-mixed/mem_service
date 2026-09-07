@@ -20,6 +20,24 @@ This contract currently trusts the in-process caller that performed the arena
 reservation. Allocation tokens and concurrent owner validation are required
 before exposing the path to unrelated callers or concurrent dispatch owners.
 
+## Remote token visibility
+
+Range and terminal-token readers share the bounded remote refresh helpers in
+`mem_service_cluster_read.c`. An existing imported mapping requires explicit
+metadata refresh before lookup and payload refresh before copying token bytes.
+The metadata refresh confirms the publication sequence after copying records;
+sync failures and inconsistent publications leave the read unsuccessful.
+Local slots do not require remote synchronization. Token step, bounds, kind,
+and checksum checks remain required after refresh.
+
+Run the following command from the repository root for
+the executable stale-import, local-read, sync-failure, publication-consistency,
+checksum, bounds, and address-overflow regression cases.
+
+```sh
+python3 -m unittest discover -s tests -p test_mem_service_terminal_token_visibility.py
+```
+
 ## Model/runtime naming boundary
 
 Layer-range dispatch, hidden-state handoff, per-range KV publication and

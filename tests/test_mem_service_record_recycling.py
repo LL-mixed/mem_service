@@ -3186,6 +3186,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
     def test_model_runtime_range_wait_flow_is_split_from_runtime_main(self):
         source = SERVICE_C.read_text()
         range_wait_flow = SERVICE_MODEL_RANGE_WAIT_FLOW_C.read_text()
+        cluster_read = SERVICE_CLUSTER_READ_C.read_text()
+        cluster_read_header = SERVICE_CLUSTER_READ_H.read_text()
+        terminal_flow = SERVICE_MODEL_TERMINAL_TOKEN_FLOW_C.read_text()
         readme = (SERVICE_DIR / "README.md").read_text()
 
         self.assertNotIn(
@@ -3234,18 +3237,28 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "mem_service_model_refresh_remote_metadata(rt, source_slot)",
             range_wait_flow,
         )
-        self.assertIn("mem_service_sync_remote_range(", range_wait_flow)
+        for helper in (
+            "mem_service_model_refresh_remote_metadata",
+            "mem_service_model_refresh_remote_payload",
+        ):
+            self.assertIn(helper, cluster_read_header)
+            self.assertIn(f"bool {helper}(", cluster_read)
+            self.assertIn(helper, range_wait_flow)
+            self.assertIn(helper, terminal_flow)
+            self.assertNotIn(f"static bool {helper}(", range_wait_flow)
+            self.assertNotIn(f"static bool {helper}(", terminal_flow)
+        self.assertIn("mem_service_sync_remote_range(", cluster_read)
         self.assertIn(
             "offsetof(struct mem_service_cluster_payload, records)",
-            range_wait_flow,
+            cluster_read,
         )
         self.assertIn(
             "header.record_count * sizeof(struct mem_service_record)",
-            range_wait_flow,
+            cluster_read,
         )
         self.assertNotIn(
             "sizeof(struct mem_service_cluster_payload)) == 0",
-            range_wait_flow,
+            cluster_read,
         )
         self.assertIn('range_resolution = "object_record"', range_wait_flow)
         self.assertIn(

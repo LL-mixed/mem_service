@@ -8,6 +8,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct mem_service_cluster_runtime;
+
+bool mem_service_model_refresh_remote_metadata(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot);
+
+bool mem_service_model_refresh_remote_payload(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    uint64_t payload_offset,
+    uint64_t payload_len);
+
 bool mem_service_try_read_stable_payload_region(
     const struct mem_service_cluster_slot *slot,
     struct mem_service_cluster_payload *snapshot,
