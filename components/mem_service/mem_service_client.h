@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mem_service_provider.h"
 #include "mem_service_wire.h"
 #include "mem_service_wire_client.h"
 
@@ -607,5 +608,42 @@ int mem_service_client_provider_status(
     const struct mem_service_client *client,
     struct mem_service_client_provider_directory *view_out,
     enum mem_service_wire_status *status_out);
+
+/*
+ * Client-side object mapping (AM1 data path, plan 2026-09-08 section 3.4).
+ *
+ * Map/unmap execute in the SDK's own process through the caller-supplied
+ * provider channel; the control RPC only manages references, handles and
+ * publish state and is not involved here. The caller passes the allocation
+ * view obtained from a successful acquire or inspect of an ACTIVE,
+ * provider-backed object and keeps the matching holder reference for the
+ * whole mapped lifetime: unmap must complete before release. The mapping is
+ * pinned at the strict address carried by the view (user VA == UBA ==
+ * home VA + object offset); any address or permission conflict fails
+ * closed instead of silently substituting a local VA. The opaque
+ * descriptor is passed through untouched; the SDK never parses CNA/GSVA
+ * fields. Mapping handles live in the client process and are never part
+ * of the wire view.
+ */
+#define MEM_SERVICE_CLIENT_MAP_READ (1ULL << 0)
+#define MEM_SERVICE_CLIENT_MAP_WRITE (1ULL << 1)
+
+struct mem_service_client_object_mapping {
+    char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    uint64_t generation;
+    void *base;
+    uint64_t len;
+    uint64_t flags;
+    struct mem_service_provider_mapping_binding binding;
+};
+
+int mem_service_client_map_allocation(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    uint64_t flags,
+    struct mem_service_client_object_mapping *mapping_out);
+int mem_service_client_unmap_allocation(
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping);
 
 #endif

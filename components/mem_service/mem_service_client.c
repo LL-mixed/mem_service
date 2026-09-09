@@ -1792,6 +1792,110 @@ int mem_service_client_reclaim_allocation(
                                               status_out);
 }
 
+/*
+ * Client-side object mapping. No control RPC is issued here: the caller
+ * supplies the allocation view from a successful acquire/inspect and a
+ * ready provider channel, and the mapping is created locally through the
+ * provider contract. Returns 0 on success, -1 on any validation or
+ * mapping failure (fail-closed; no fallback VA is ever substituted).
+ */
+int mem_service_client_map_allocation(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    uint64_t flags,
+    struct mem_service_client_object_mapping *mapping_out)
+{
+    struct mem_service_provider_remote_region remote;
+    struct mem_service_client_object_mapping mapping;
+    size_t key_len;
+
+    if (channel == NULL || channel->provider == NULL ||
+        allocation == NULL || mapping_out == NULL ||
+        (flags & ~(MEM_SERVICE_CLIENT_MAP_READ |
+                   MEM_SERVICE_CLIENT_MAP_WRITE)) != 0 ||
+        (flags & (MEM_SERVICE_CLIENT_MAP_READ |
+                  MEM_SERVICE_CLIENT_MAP_WRITE)) == 0 ||
+        strcmp(allocation->state, "active") != 0 ||
+        !allocation->provider_backed ||
+        (allocation->capabilities & MEM_SERVICE_CLIENT_MANAGED_CAP_MAP) == 0 ||
+        allocation->descriptor_len == 0 ||
+        allocation->descriptor_len >
+            MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN ||
+        allocation->descriptor_len > MEM_SERVICE_PROVIDER_DESCRIPTOR_LEN ||
+        allocation->address == 0 || allocation->address_len == 0 ||
+        allocation->address_len < allocation->size_bytes) {
+        return -1;
+    }
+    key_len = strlen(allocation->key);
+    if (key_len == 0 || key_len >= MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN) {
+        return -1;
+    }
+    memset(&remote, 0, sizeof(remote));
+    snprintf(remote.provider_name,
+             sizeof(remote.provider_name),
+             "%s",
+             channel->provider->name);
+    remote.len = allocation->address_len;
+    remote.memory_kind = MEM_SERVICE_MEMORY_HOST;
+    remote.descriptor.len = allocation->descriptor_len;
+    memcpy(remote.descriptor.bytes,
+           allocation->descriptor,
+           allocation->descriptor_len);
+
+    memset(&mapping, 0, sizeof(mapping));
+    if (mem_service_provider_channel_map_remote_region(
+            channel,
+            &remote,
+            0,
+            allocation->address_len,
+            (void *)(uintptr_t)allocation->address,
+            MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS |
+                ((flags & MEM_SERVICE_CLIENT_MAP_READ) != 0
+                     ? MEM_SERVICE_MAPPING_FLAG_READ
+                     : 0) |
+                ((flags & MEM_SERVICE_CLIENT_MAP_WRITE) != 0
+                     ? MEM_SERVICE_MAPPING_FLAG_WRITE
+                     : 0),
+            &mapping.binding) != 0) {
+        return -1;
+    }
+    /* Strict same-VA: the provider must deliver exactly the requested
+     * UBA; anything else is torn down and reported as a failure. */
+    if (mapping.binding.mapping.base !=
+            (void *)(uintptr_t)allocation->address ||
+        mapping.binding.mapping.len != allocation->address_len) {
+        (void)mem_service_provider_channel_unmap_remote_region(channel,
+                                                               &mapping.binding);
+        return -1;
+    }
+    memcpy(mapping.key, allocation->key, key_len + 1);
+    mapping.generation = allocation->generation;
+    mapping.base = mapping.binding.mapping.base;
+    mapping.len = mapping.binding.mapping.len;
+    mapping.flags = flags;
+    *mapping_out = mapping;
+    return 0;
+}
+
+int mem_service_client_unmap_allocation(
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping)
+{
+    if (channel == NULL || mapping == NULL || mapping->base == NULL ||
+        !mapping->binding.mapped) {
+        return -1;
+    }
+    if (mem_service_provider_channel_unmap_remote_region(channel,
+                                                         &mapping->binding) !=
+        0) {
+        return -1;
+    }
+    mapping->base = NULL;
+    mapping->len = 0;
+    mapping->binding.mapped = false;
+    return 0;
+}
+
 static void mem_service_client_parse_provider_directory(
     const char *response,
     struct mem_service_client_provider_directory *view_out)
