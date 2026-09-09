@@ -10,6 +10,11 @@
 
 ## 1. 消费契约：只依赖安装布局
 
+进程内 model range flow 的 `publish_kv_in_place` / `publish_kv_offset`
+扩展用于源码集成的计算输出发布。DS4 当前消费的 client/provider 安装 SDK
+不使用该 request struct；本次扩展不改变其 wire schema、SDK API 或 provider
+配置格式。若后续采用进程内 range flow，需另行约定源码/ABI 与预留区间契约。
+
 ds4 不编译本仓库源码树，只消费 `make install` 产出的安装布局
 （`installed-layout-v1`，受 `package-manifest.txt` 契约约束）：
 

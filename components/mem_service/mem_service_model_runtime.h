@@ -13,6 +13,15 @@ int mem_service_model_kv_state_alloc(struct mem_service_cluster_runtime *rt,
                                      uint64_t *block_bytes_out,
                                      uint64_t *block_count_out,
                                      uint64_t *reserved_bytes_out);
+/* Validate a trusted in-process reservation without allocating or reading it. */
+int mem_service_model_kv_state_validate_reserved(
+    const struct mem_service_cluster_runtime *rt,
+    const uint8_t *payload,
+    uint64_t payload_len,
+    uint64_t offset,
+    uint64_t *block_bytes_out,
+    uint64_t *block_count_out,
+    uint64_t *reserved_bytes_out);
 void mem_service_report_obmm_pool_layout_once(
     struct mem_service_cluster_runtime *rt);
 void mem_service_report_obmm_pool_usage(struct mem_service_cluster_runtime *rt,

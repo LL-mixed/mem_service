@@ -50,6 +50,8 @@ struct mem_service_obmm_range_flow_request {
     bool publish_payload_in_place;
     uint64_t publish_payload_offset;
     mem_service_record_recycler_fn recycle_runtime_record;
+    bool publish_kv_in_place;
+    uint64_t publish_kv_offset;
 };
 
 int mem_service_init_obmm_range_flow_request(

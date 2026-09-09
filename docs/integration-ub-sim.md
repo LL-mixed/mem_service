@@ -152,7 +152,18 @@ Memory Service payload arena。guest 不携带 tensor inline payload。
 3. `payload` 精确等于本地 OBMM slot 基址加 `publish_payload_offset`。
 
 检查通过后，publish flow 直接以该 offset 建立 runtime output ObjectRef，并
-跳过 payload `memcpy`。KV state 仍遵循现有独立分配与复制路径。当前接口面向
+跳过 payload `memcpy`。KV state 可独立选择原地发布：计算前通过
+`mem_service_model_kv_state_alloc()` 预留完整 KV payload 所需的最终 block
+span（包含 header）；计算成功后设置 `publish_kv_in_place=true` 和
+`publish_kv_offset`。发布检查实际指针、block 对齐、整个预留 span 的
+arena/slot 边界，并验证 checksum；成功时跳过再次分配与复制，日志包含
+`payload_mode=in_place publication_copy_bytes=0`。普通 64-byte 对齐的
+临时 buffer 不满足该预留契约。未设置新字段的请求保留原分配/复制行为。
+
+该扩展改变进程内 request struct 大小，源码消费者必须整体重新构建，
+不能混用旧对象文件；wire schema 与安装 client SDK 的 ABI 保持原有契约。
+ub_sim 接线后还需以两节点实际运行证明最终 KV backing 与 PTO 输出一致。
+当前接口面向
 同进程、受信的 model runtime；多 dispatch 并发阶段还要增加 allocation token
 和 owner 校验，防止一个并发调用发布另一个调用预留的 range。
 

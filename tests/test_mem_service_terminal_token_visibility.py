@@ -25,7 +25,8 @@ class TerminalTokenVisibilityTests(unittest.TestCase):
             "-fdata-sections",
             "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections",
         ]
-        for include in (ROOT, COMPONENT, ROOT / "vendor/obmm/src/libobmm"):
+        for include in (ROOT, COMPONENT, ROOT / "vendor/obmm/src/libobmm",
+                        ROOT / "kernel_ub/include/uapi"):
             command.extend(["-I", str(include)])
         command.extend([
             str(ROOT / "tests/mem_service_terminal_token_visibility.c"),

@@ -266,6 +266,21 @@ int mem_service_range_flow_publish_runtime_output(
         !kv_payload || kv_payload_len == 0) {
         return -1;
     }
+    /* Validate the complete reservation before dereferencing KV for checksum. */
+    if (request->publish_kv_in_place) {
+        if (mem_service_cluster_runtime_require(rt) != 0 ||
+            (uint32_t)rt->local_idx != local_node ||
+            mem_service_model_kv_state_validate_reserved(
+                rt, kv_payload, kv_payload_len, request->publish_kv_offset,
+                &kv_state_block_bytes, &kv_state_block_count,
+                &kv_state_reserved_bytes) != 0) {
+            printf("[mem_service] gap model_range_forward="
+                   "runtime_kv_in_place_invalid local=node%u\n",
+                   local_node + 1U);
+            return -1;
+        }
+        kv_state_offset = request->publish_kv_offset;
+    }
     checksum = mem_service_model_payload_checksum(payload, payload_len);
     if (checksum != expected_checksum) {
         printf("[mem_service] gap model_range_forward=runtime_output_checksum_mismatch local=node%u checksum=0x%016" PRIx64 " expected=0x%016" PRIx64 "\n",
@@ -322,7 +337,8 @@ int mem_service_range_flow_publish_runtime_output(
                                                 &runtime_output_offset) != 0) {
         return -1;
     }
-    if (mem_service_model_kv_state_alloc(rt,
+    if (!request->publish_kv_in_place &&
+        mem_service_model_kv_state_alloc(rt,
                                    kv_payload_len,
                                    &kv_state_offset,
                                    &kv_state_block_bytes,
@@ -341,7 +357,9 @@ int mem_service_range_flow_publish_runtime_output(
     if (!request->publish_payload_in_place) {
         memcpy(base + runtime_output_offset, payload, payload_len);
     }
-    memcpy(base + kv_state_offset, kv_payload, kv_payload_len);
+    if (!request->publish_kv_in_place) {
+        memcpy(base + kv_state_offset, kv_payload, kv_payload_len);
+    }
     if (mem_service_update_region_range_at(local_slot,
                                      runtime_output_offset,
                                      payload_len,
@@ -554,7 +572,7 @@ int mem_service_range_flow_publish_runtime_output(
            terminal_range ?
                "not_applicable" :
                (notification_status == 0 ? "delivered" : "backpressured"));
-    printf("[mem_service] stage model_range_kv_state_publish local=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " slot_bytes=%" PRIu64 " block_bytes=%" PRIu64 " blocks=%" PRIu64 " reserved_bytes=%" PRIu64 " producer_publish_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service status=ok\n",
+    printf("[mem_service] stage model_range_kv_state_publish local=node%u step=%" PRIu64 " key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) count=%u kv_bytes=%" PRIu64 " kv_checksum=0x%016" PRIx64 " offset=0x%016" PRIx64 " slot_bytes=%" PRIu64 " block_bytes=%" PRIu64 " blocks=%" PRIu64 " reserved_bytes=%" PRIu64 " payload_mode=%s publication_copy_bytes=%" PRIu64 " producer_publish_ms=%ld epoch=%u seq=%u backing=obmm_shmem metadata=lingqu_object_service status=ok\n",
            local_node + 1U,
            decode_step,
            local_kv_state_key,
@@ -570,6 +588,8 @@ int mem_service_range_flow_publish_runtime_output(
            kv_state_block_bytes,
            kv_state_block_count,
            kv_state_reserved_bytes,
+           request->publish_kv_in_place ? "in_place" : "copy",
+           request->publish_kv_in_place ? UINT64_C(0) : kv_payload_len,
            producer_publish_ms,
            object_epoch,
            local_publish_seq);

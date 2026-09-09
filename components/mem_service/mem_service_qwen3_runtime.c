@@ -45,8 +45,8 @@ static int mem_service_model_kv_state_block_span(uint64_t payload_len,
         block_count = 1U;
     } else {
         block_bytes = MEM_SERVICE_OBMM_KV_STATE_BLOCK_TIER3_BYTES;
-        block_count =
-            (payload_len + block_bytes - 1U) / block_bytes;
+        block_count = payload_len / block_bytes +
+                      (payload_len % block_bytes != 0);
     }
     if (block_count == 0 || block_count > UINT64_MAX / block_bytes) {
         return -1;
@@ -92,6 +92,47 @@ int mem_service_model_kv_state_alloc(struct mem_service_cluster_runtime *rt,
                                      reserved_bytes,
                                      block_bytes,
                                      offset_out);
+}
+
+int mem_service_model_kv_state_validate_reserved(
+    const struct mem_service_cluster_runtime *rt,
+    const uint8_t *payload,
+    uint64_t payload_len,
+    uint64_t offset,
+    uint64_t *block_bytes_out,
+    uint64_t *block_count_out,
+    uint64_t *reserved_bytes_out)
+{
+    const struct mem_service_cluster_slot *slot;
+    uint64_t block_bytes;
+    uint64_t block_count;
+    uint64_t reserved_bytes;
+    uintptr_t base;
+
+    if (!rt || !payload || !block_bytes_out || !block_count_out ||
+        !reserved_bytes_out || rt->node_count <= 0 ||
+        rt->node_count > MEM_SERVICE_CLUSTER_MAX_NODES ||
+        rt->local_idx < 0 || rt->local_idx >= rt->node_count ||
+        mem_service_model_kv_state_block_span(payload_len, &block_bytes,
+                                             &block_count,
+                                             &reserved_bytes) != 0) {
+        return -1;
+    }
+    slot = &rt->slots[rt->local_idx];
+    base = (uintptr_t)slot->region.addr;
+    if (!base || !rt->payload_arena_base || offset % block_bytes != 0 ||
+        offset < rt->payload_arena_base || offset > rt->payload_arena_next ||
+        reserved_bytes > rt->payload_arena_next - offset ||
+        offset > slot->region.len || reserved_bytes > slot->region.len - offset ||
+        offset > UINTPTR_MAX - base ||
+        reserved_bytes > UINTPTR_MAX - (base + offset) ||
+        (uintptr_t)payload != base + offset) {
+        return -1;
+    }
+    *block_bytes_out = block_bytes;
+    *block_count_out = block_count;
+    *reserved_bytes_out = reserved_bytes;
+    return 0;
 }
 
 void mem_service_report_obmm_pool_layout_once(struct mem_service_cluster_runtime *rt)

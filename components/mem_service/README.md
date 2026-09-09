@@ -13,8 +13,29 @@ arena, let a compute provider fill that range, and publish it through
 `mem_service_obmm_range_flow_request`. The payload pointer must equal the local
 OBMM slot base plus that offset, and the complete range must remain within the
 already reserved arena. A successful in-place publish records
-`payload_mode=in_place` and skips the payload copy. KV-state publication keeps
-its independent allocation path.
+`payload_mode=in_place` and skips the payload copy.
+
+KV output can use an independent in-place reservation. Before computation,
+call `mem_service_model_kv_state_alloc()` with the complete KV payload length
+(including its header). Bind that reserved range to the compute provider, then
+set `publish_kv_in_place` and `publish_kv_offset` after successful completion.
+Publication validates the exact local pointer, block alignment, and the entire
+tier-rounded reservation against arena and slot bounds before reading its
+checksum. It skips allocation and copy, reporting `payload_mode=in_place` and
+`publication_copy_bytes=0`. Zero-initialized requests retain the allocation and
+copy path. The in-process request struct has grown; source consumers must rebuild.
+
+The reservation validator and allocator are exercised through:
+
+```sh
+python3 -m unittest discover -s tests -p test_mem_service_kv_reserved.py
+```
+
+This executable test covers reservation validation and the actual publisher
+with host-side visibility/notification fixtures. It measures explicit payload
+copies, arena growth and the resulting record offset, including the legacy copy
+path and invalid-pointer/checksum/visibility failures. Guest integration and
+end-to-end in-place publication require separate W5 runtime evidence.
 
 This contract currently trusts the in-process caller that performed the arena
 reservation. Allocation tokens and concurrent owner validation are required
