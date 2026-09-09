@@ -35,6 +35,16 @@ enum mem_service_wire_operation {
     MEM_SERVICE_WIRE_OP_QUERY_EXECUTION_ARTIFACT = 81,
     MEM_SERVICE_WIRE_OP_REGISTER_TRAINING_ARTIFACT = 96,
     MEM_SERVICE_WIRE_OP_QUERY_TRAINING_ARTIFACT = 97,
+    /* 0x70 segment: managed object allocation control operations. These
+     * manage object identity, references and lifecycle only; payload access
+     * stays on provider channels and legacy put/materialize semantics are
+     * unchanged. */
+    MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT = 0x70,
+    MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT = 0x71,
+    MEM_SERVICE_WIRE_OP_RELEASE_OBJECT = 0x72,
+    MEM_SERVICE_WIRE_OP_RETIRE_OBJECT = 0x73,
+    MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION = 0x74,
+    MEM_SERVICE_WIRE_OP_ALLOCATION_STATS = 0x75,
 };
 
 enum mem_service_wire_status {

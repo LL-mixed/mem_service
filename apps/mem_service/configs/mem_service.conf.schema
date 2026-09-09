@@ -13,12 +13,14 @@ optional=checkpoint_retention
 optional=record_retention
 optional=encryption
 optional=auth_mode
+optional=network_peer
+optional=network_io_timeout_ms
 optional=metrics_mode
 optional=metrics_listen
 optional=adapter_enablement
-field=listen type=string description=service endpoint, must be unix:<path> while auth_mode=none
+field=listen type=string description=service endpoint, must be unix:<path> while auth_mode=none; tcp:<ipv4>:<port> requires auth_mode=trusted-guest-network
 field=store type=string description=snapshot store path; append-only idempotency/audit journal uses <store>.journal
-field=node_id type=string description=stable deployment node identity
+field=node_id type=string description=stable deployment node identity; required with auth_mode=trusted-guest-network
 field=cluster_id type=string description=stable deployment cluster identity
 field=storage_root type=string description=base directory for durable catalog manifest, derived store, sealed block storage, and quarantine layout
 field=backend type=enum values=snapshot,snapshot+journal description=current durable backend selector
@@ -28,7 +30,9 @@ field=retention type=enum values=manual,audit-log:<events> description=audit ret
 field=checkpoint_retention type=enum values=manual,latest:<records> description=checkpoint record retention policy
 field=record_retention type=enum values=manual,latest:<records>,ttl-ms:<age-ms>,kind:<record-kind>:latest:<records>,kind:<record-kind>:ttl-ms:<age-ms>,tenant:<owner-node>:latest:<records>,tenant:<owner-node>:ttl-ms:<age-ms> description=global,kind-scoped,or tenant-scoped record retention policy
 field=encryption type=enum values=none description=explicit encryption policy; unsupported modes fail closed
-field=auth_mode type=enum values=none description=local-only deployment mode; network service endpoints are rejected
+field=auth_mode type=enum values=none,trusted-guest-network description=none keeps local-only unix deployment and network service endpoints are rejected; trusted-guest-network serves the wire protocol on an exact tcp:<ipv4>:<port> endpoint for an isolated guest network and requires node_id plus a non-empty network_peer allowlist
+field=network_peer type=string repeatable format=<node_id>@<ipv4> description=trusted guest allowlist entry; exact dotted-quad IPv4 only, no wildcards/CIDR, node IDs and addresses each unique; only valid with auth_mode=trusted-guest-network
+field=network_io_timeout_ms type=u64 description=per-connection header+body+response I/O deadline for trusted-guest-network clients; only valid with auth_mode=trusted-guest-network
 field=metrics_mode type=enum values=text-kv description=current metrics export mode
 field=metrics_listen type=string description=optional HTTP metrics endpoint, must be tcp:127.0.0.1:<port>
 field=adapter_enablement type=enum values=core,qwen3 description=enabled adapter surface

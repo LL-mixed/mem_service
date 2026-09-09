@@ -199,6 +199,44 @@ static const struct mem_service_wire_payload_field
         {"expected_checksum", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
 };
 
+static const struct mem_service_wire_payload_field
+    mem_service_wire_allocate_object_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"session_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+        {"size_bytes", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"alignment_bytes", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+        {"capabilities", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_acquire_object_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"session_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"expected_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_release_object_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"session_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"expected_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_retire_object_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"expected_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_inspect_allocation_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+};
+
 static const struct mem_service_wire_operation_schema
     mem_service_wire_operation_schemas[] = {
         {MEM_SERVICE_WIRE_OP_HEALTH,
@@ -409,6 +447,59 @@ static const struct mem_service_wire_operation_schema
          mem_service_wire_artifact_query_fields,
          sizeof(mem_service_wire_artifact_query_fields) /
              sizeof(mem_service_wire_artifact_query_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT,
+         "allocate_object",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_allocate_object_fields,
+         sizeof(mem_service_wire_allocate_object_fields) /
+             sizeof(mem_service_wire_allocate_object_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT,
+         "acquire_object",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_acquire_object_fields,
+         sizeof(mem_service_wire_acquire_object_fields) /
+             sizeof(mem_service_wire_acquire_object_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_RELEASE_OBJECT,
+         "release_object",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_release_object_fields,
+         sizeof(mem_service_wire_release_object_fields) /
+             sizeof(mem_service_wire_release_object_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_RETIRE_OBJECT,
+         "retire_object",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_retire_object_fields,
+         sizeof(mem_service_wire_retire_object_fields) /
+             sizeof(mem_service_wire_retire_object_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION,
+         "inspect_allocation",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_inspect_allocation_fields,
+         sizeof(mem_service_wire_inspect_allocation_fields) /
+             sizeof(mem_service_wire_inspect_allocation_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_ALLOCATION_STATS,
+         "allocation_stats",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         NULL,
+         0,
          NULL,
          0},
 };

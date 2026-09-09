@@ -391,4 +391,117 @@ int mem_service_client_resolve_training_step(
     struct mem_service_client_record *record_out,
     enum mem_service_wire_status *status_out);
 
+/*
+ * Managed object allocation control (M1.1, wire ops 0x70-0x75).
+ *
+ * These structures and functions are deliberately separate from the
+ * 808-byte client record layout above: managed allocations carry object
+ * identity, owner session, generation, content version, size/alignment/
+ * capabilities, holder sessions, lifecycle state, provider incarnation
+ * and an opaque descriptor length, none of which belongs to the legacy
+ * record ABI. Mapping handles live in client processes and are never
+ * part of this view.
+ */
+#define MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN 96U
+#define MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN 64U
+#define MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN 32U
+#define MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS 8U
+
+#define MEM_SERVICE_CLIENT_MANAGED_CAP_MAP (1ULL << 0)
+#define MEM_SERVICE_CLIENT_MANAGED_CAP_BLOCK_IO (1ULL << 1)
+
+struct mem_service_client_allocate {
+    const char *key;
+    const char *idempotency_key;
+    const char *session_id;
+    uint64_t size_bytes;
+    uint64_t alignment_bytes;
+    uint64_t capabilities;
+};
+
+struct mem_service_client_allocation_holder {
+    char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    uint64_t generation;
+};
+
+struct mem_service_client_allocation {
+    char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    char state[MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN];
+    char owner_session[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    uint64_t generation;
+    uint64_t version;
+    uint64_t size_bytes;
+    uint64_t alignment_bytes;
+    uint64_t capabilities;
+    uint32_t live_refs;
+    uint64_t provider_incarnation;
+    uint32_t descriptor_len;
+    uint32_t holder_count;
+    struct mem_service_client_allocation_holder
+        holders[MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS];
+};
+
+struct mem_service_client_allocation_stats {
+    uint64_t backing_registered;
+    uint64_t live_objects;
+    uint64_t backing_allocated_bytes;
+    uint64_t address_reserved_bytes;
+    uint64_t export_mappings;
+    uint64_t import_mappings;
+    uint64_t live_refs;
+    uint64_t in_flight;
+    uint64_t quarantined_objects;
+    uint64_t quarantined_bytes;
+    uint64_t allocate_ok_count;
+    uint64_t acquire_ok_count;
+    uint64_t release_ok_count;
+    uint64_t retire_ok_count;
+    uint64_t allocate_rejected_count;
+    uint64_t acquire_rejected_count;
+    uint64_t release_rejected_count;
+    uint64_t retire_rejected_count;
+    uint64_t quarantine_events;
+};
+
+int mem_service_client_allocate_object(
+    const struct mem_service_client *client,
+    const struct mem_service_client_allocate *request,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_acquire_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_release_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_retire_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_inspect_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_allocation_stats(
+    const struct mem_service_client *client,
+    struct mem_service_client_allocation_stats *stats_out,
+    enum mem_service_wire_status *status_out);
+
 #endif

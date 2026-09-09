@@ -6859,6 +6859,282 @@ int mem_service_run_typed_payload_fixture_check(void)
     return 0;
 }
 
+struct mem_service_allocation_stub_backing {
+    uint32_t reserve_calls;
+    uint32_t release_calls;
+    uint32_t next_descriptor;
+    bool fail_release;
+};
+
+static int mem_service_allocation_stub_reserve(
+    void *context,
+    uint64_t size_bytes,
+    uint64_t alignment_bytes,
+    uint64_t capabilities,
+    uint8_t *descriptor_out,
+    uint32_t descriptor_capacity,
+    uint32_t *descriptor_len_out)
+{
+    struct mem_service_allocation_stub_backing *stub =
+        (struct mem_service_allocation_stub_backing *)context;
+    uint32_t token;
+
+    if (stub == NULL || descriptor_out == NULL ||
+        descriptor_len_out == NULL || descriptor_capacity < 8U ||
+        size_bytes == 0 || capabilities == 0 ||
+        (alignment_bytes != 0 &&
+         (alignment_bytes & (alignment_bytes - 1U)) != 0)) {
+        return -1;
+    }
+    stub->reserve_calls += 1U;
+    token = stub->next_descriptor++;
+    memset(descriptor_out, 0, 8U);
+    descriptor_out[0] = 'S';
+    descriptor_out[1] = 'T';
+    descriptor_out[2] = 'B';
+    descriptor_out[3] = (uint8_t)(token & 0xffU);
+    descriptor_out[4] = (uint8_t)(size_bytes & 0xffU);
+    descriptor_out[5] = (uint8_t)((size_bytes >> 8) & 0xffU);
+    *descriptor_len_out = 8U;
+    return 0;
+}
+
+static int mem_service_allocation_stub_release(void *context,
+                                               const uint8_t *descriptor,
+                                               uint32_t descriptor_len)
+{
+    struct mem_service_allocation_stub_backing *stub =
+        (struct mem_service_allocation_stub_backing *)context;
+
+    if (stub == NULL || descriptor == NULL || descriptor_len == 0 ||
+        descriptor[0] != 'S' || descriptor[1] != 'T' ||
+        descriptor[2] != 'B') {
+        return -1;
+    }
+    stub->release_calls += 1U;
+    return stub->fail_release ? -1 : 0;
+}
+
+/*
+ * Managed allocation state machine fixture (M1.1). Exercises the core
+ * against a stub backing: fail-closed allocate with zero backing,
+ * idempotent replay, key conflict, holder lifecycle, stale generation,
+ * retire transitions, re-allocation with a fresh generation, quarantine
+ * on unconfirmed release and the stats shape. The stub is the only
+ * place a backing is faked; production daemons register no backing in
+ * M1.1 and stay fail-closed.
+ */
+int mem_service_run_allocation_fixture_check(void)
+{
+    static const struct mem_service_managed_backing_ops stub_ops = {
+        mem_service_allocation_stub_reserve,
+        mem_service_allocation_stub_release,
+    };
+    struct mem_service_managed_table table;
+    struct mem_service_allocation_stub_backing stub;
+    struct mem_service_managed_request request;
+    struct mem_service_managed_view view;
+    struct mem_service_managed_stats stats;
+    int failures = 0;
+
+    /* 1. Zero backing: allocate is fail-closed. */
+    mem_service_managed_table_init(&table);
+    memset(&request, 0, sizeof(request));
+    request.key = "obj-a";
+    request.idempotency_key = "alloc-1";
+    request.session_id = "session-a";
+    request.size_bytes = 4096U;
+    request.capabilities = MEM_SERVICE_MANAGED_CAP_MAP;
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_BACKING_UNAVAILABLE) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: zero backing not fail-closed\n");
+        failures -= 1;
+    }
+
+    /* 2. Stub backing: allocate lands ACTIVE with generation 1. */
+    memset(&stub, 0, sizeof(stub));
+    if (mem_service_managed_table_register_backing(&table, &stub_ops, &stub) != 0) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: backing registration failed\n");
+        return 1;
+    }
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_ACTIVE ||
+        view.generation != 1U || view.holder_count != 0 ||
+        view.descriptor_len != 8U ||
+        strcmp(view.owner_session, "session-a") != 0) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: allocate view mismatch\n");
+        failures -= 1;
+    }
+    /* 3. Idempotent replay returns the same identity. */
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.generation != 1U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: idempotent replay mismatch\n");
+        failures -= 1;
+    }
+    /* 4. Same key with a different identity conflicts. */
+    request.idempotency_key = "alloc-other";
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: key conflict not detected\n");
+        failures -= 1;
+    }
+    request.idempotency_key = "alloc-1";
+    /* 5. Acquire/re-acquire by a second session. */
+    if (mem_service_managed_acquire(&table, "obj-a", "session-b", false, 0,
+                                    &view) != MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.holder_count != 1U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: acquire mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_acquire(&table, "obj-a", "session-b", false, 0,
+                                    &view) != MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.holder_count != 1U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: re-acquire not idempotent\n");
+        failures -= 1;
+    }
+    /* 6. Stale expected generation is rejected. */
+    if (mem_service_managed_acquire(&table, "obj-a", "session-c", true, 99U,
+                                    &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: stale generation accepted\n");
+        failures -= 1;
+    }
+    /* 7. The owner session is not an implicit holder. */
+    if (mem_service_managed_release(&table, "obj-a", "session-a", false, 0,
+                                    &view) != MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: owner was implicit holder\n");
+        failures -= 1;
+    }
+    /* 8. Retire with live holders enters RETIRING and blocks acquire. */
+    if (mem_service_managed_retire(&table, "obj-a", true, 1U, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRING) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: retire transition mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_acquire(&table, "obj-a", "session-c", false, 0,
+                                    &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: acquire on retiring allowed\n");
+        failures -= 1;
+    }
+    /* 9. Last release drives the object to RETIRED via the stub release. */
+    if (mem_service_managed_release(&table, "obj-a", "session-b", false, 0,
+                                    &view) != MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED ||
+        stub.release_calls != 1U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: final release mismatch\n");
+        failures -= 1;
+    }
+    /* 10. Re-allocation of the retired key gets a fresh generation. */
+    request.idempotency_key = "alloc-2";
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_ACTIVE ||
+        view.generation != 2U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: re-allocation generation mismatch\n");
+        failures -= 1;
+    }
+    /* 11. Retire of a reference-free object completes immediately. */
+    if (mem_service_managed_retire(&table, "obj-a", false, 0, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: reference-free retire mismatch\n");
+        failures -= 1;
+    }
+    /* 12. Stats shape after the lifecycle. */
+    mem_service_managed_stats_snapshot(&table, &stats);
+    if (stats.backing_registered != 1U || stats.live_objects != 0U ||
+        stats.allocate_ok_count != 3U || stats.allocate_rejected_count != 2U ||
+        stats.acquire_ok_count != 2U || stats.acquire_rejected_count != 2U ||
+        stats.release_ok_count != 1U || stats.release_rejected_count != 1U ||
+        stats.retire_ok_count != 2U || stats.retire_rejected_count != 0U ||
+        stats.quarantine_events != 0U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: stats mismatch "
+                "alloc_ok=%llu alloc_rej=%llu acq_ok=%llu acq_rej=%llu "
+                "rel_ok=%llu rel_rej=%llu ret_ok=%llu ret_rej=%llu\n",
+                (unsigned long long)stats.allocate_ok_count,
+                (unsigned long long)stats.allocate_rejected_count,
+                (unsigned long long)stats.acquire_ok_count,
+                (unsigned long long)stats.acquire_rejected_count,
+                (unsigned long long)stats.release_ok_count,
+                (unsigned long long)stats.release_rejected_count,
+                (unsigned long long)stats.retire_ok_count,
+                (unsigned long long)stats.retire_rejected_count);
+        failures -= 1;
+    }
+
+    /* 13. Unconfirmed backing release quarantines the object. */
+    mem_service_managed_table_init(&table);
+    memset(&stub, 0, sizeof(stub));
+    stub.fail_release = true;
+    if (mem_service_managed_table_register_backing(&table, &stub_ops, &stub) != 0) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: quarantine backing failed\n");
+        return 1;
+    }
+    request.key = "obj-q";
+    request.idempotency_key = "alloc-q";
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        mem_service_managed_retire(&table, "obj-q", false, 0, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: quarantine transition mismatch\n");
+        failures -= 1;
+    }
+    mem_service_managed_stats_snapshot(&table, &stats);
+    if (stats.quarantined_objects != 1U ||
+        stats.quarantined_bytes != 4096U || stats.quarantine_events != 1U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: quarantine stats mismatch\n");
+        failures -= 1;
+    }
+    /* 14. A quarantined key never comes back to life: replaying the
+     * original identity still reports the quarantined object, and a
+     * fresh identity for the same key conflicts. */
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: quarantined replay mismatch\n");
+        failures -= 1;
+    }
+    request.idempotency_key = "alloc-q2";
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: quarantined key reused\n");
+        failures -= 1;
+    }
+    if (failures != 0) {
+        return 1;
+    }
+    printf("mem_service allocation-fixtures: status=ok "
+           "states=allocating,active,retiring,retired,quarantined "
+           "idempotent_replay=ok key_conflict=ok stale_generation=ok "
+           "quarantine=ok backing=stub checks=14\n");
+    return 0;
+}
+
 int mem_service_run_durable_catalog_fixture_check(void)
 {
     char storage_root[160];
@@ -9864,6 +10140,12 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              "query_execution_artifact_count=%" PRIu64 "\n"
              "register_training_artifact_count=%" PRIu64 "\n"
              "query_training_artifact_count=%" PRIu64 "\n"
+             "allocate_object_count=%" PRIu64 "\n"
+             "acquire_object_count=%" PRIu64 "\n"
+             "release_object_count=%" PRIu64 "\n"
+             "retire_object_count=%" PRIu64 "\n"
+             "inspect_allocation_count=%" PRIu64 "\n"
+             "allocation_stats_count=%" PRIu64 "\n"
              "artifact_query_hit_count=%" PRIu64 "\n"
              "artifact_query_miss_count=%" PRIu64 "\n"
              "idempotency_replay_count=%" PRIu64 "\n"
@@ -9920,6 +10202,12 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              m->query_execution_artifact_count,
              m->register_training_artifact_count,
              m->query_training_artifact_count,
+             m->allocate_object_count,
+             m->acquire_object_count,
+             m->release_object_count,
+             m->retire_object_count,
+             m->inspect_allocation_count,
+             m->allocation_stats_count,
              m->artifact_query_hit_count,
              m->artifact_query_miss_count,
              m->idempotency_replay_count,
@@ -10356,6 +10644,362 @@ static enum mem_service_wire_status mem_service_audit_log(struct mem_service *sv
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+/*
+ * Managed object allocation operations (0x70 segment). These handlers
+ * manage object identity, holder references and lifecycle only; payload
+ * access stays on provider channels and legacy put/materialize semantics
+ * are unchanged. With zero managed backing registered the data operations
+ * are fail-closed (backing_unavailable); stub backings are registered by
+ * fixture tests only.
+ */
+static enum mem_service_wire_status mem_service_managed_result_to_wire(
+    enum mem_service_managed_result result)
+{
+    switch (result) {
+    case MEM_SERVICE_MANAGED_RESULT_OK:
+        return MEM_SERVICE_WIRE_STATUS_OK;
+    case MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST:
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    case MEM_SERVICE_MANAGED_RESULT_NOT_FOUND:
+    case MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER:
+        return MEM_SERVICE_WIRE_STATUS_NOT_FOUND;
+    case MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT:
+        return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+    case MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION:
+    case MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT:
+        return MEM_SERVICE_WIRE_STATUS_STALE_REF;
+    case MEM_SERVICE_MANAGED_RESULT_CAPACITY:
+        return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
+    case MEM_SERVICE_MANAGED_RESULT_BACKING_UNAVAILABLE:
+    case MEM_SERVICE_MANAGED_RESULT_BACKING_ERROR:
+    default:
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+}
+
+static void mem_service_managed_render_view(
+    const struct mem_service_managed_view *view,
+    char *response,
+    size_t response_len)
+{
+    snprintf(response,
+             response_len,
+             "status=ok\n"
+             "key=%s\n"
+             "state=%s\n"
+             "generation=%" PRIu64 "\n"
+             "version=%" PRIu64 "\n"
+             "size_bytes=%" PRIu64 "\n"
+             "alignment_bytes=%" PRIu64 "\n"
+             "capabilities=%" PRIu64 "\n"
+             "live_refs=%u\n"
+             "provider_incarnation=%" PRIu64 "\n"
+             "descriptor_len=%u\n",
+             view->key,
+             mem_service_managed_state_name(view->state),
+             view->generation,
+             view->version,
+             view->size_bytes,
+             view->alignment_bytes,
+             view->capabilities,
+             view->holder_count,
+             view->provider_incarnation,
+             view->descriptor_len);
+}
+
+static enum mem_service_wire_status mem_service_managed_finish(
+    enum mem_service_managed_result result,
+    const struct mem_service_managed_view *view,
+    const char *key,
+    char *response,
+    size_t response_len)
+{
+    if (result == MEM_SERVICE_MANAGED_RESULT_OK && view != NULL) {
+        mem_service_managed_render_view(view, response, response_len);
+        return MEM_SERVICE_WIRE_STATUS_OK;
+    }
+    snprintf(response,
+             response_len,
+             "status=%s\nreason=%s\nkey=%s\n",
+             mem_service_wire_status_name(
+                 mem_service_managed_result_to_wire(result)),
+             mem_service_managed_result_name(result),
+             key != NULL ? key : "-");
+    return mem_service_managed_result_to_wire(result);
+}
+
+static bool mem_service_managed_payload_valid(
+    const char *payload,
+    enum mem_service_wire_operation operation,
+    char *response,
+    size_t response_len)
+{
+    const struct mem_service_wire_operation_schema *schema =
+        mem_service_wire_schema_for_operation(operation);
+    struct mem_service_wire_payload_view view =
+        mem_service_wire_payload_view_from_cstr(payload);
+    const char *failed_field = NULL;
+
+    if (mem_service_wire_schema_validate_payload(schema, &view, &failed_field)) {
+        return true;
+    }
+    snprintf(response,
+             response_len,
+             "status=invalid_session\nreason=invalid_request\noperation=%s\nfield=%s\n",
+             schema != NULL ? schema->name : "unknown",
+             failed_field != NULL ? failed_field : "-");
+    return false;
+}
+
+static enum mem_service_wire_status mem_service_allocate_object(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char idempotency_key[MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN];
+    char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+    struct mem_service_managed_request request;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    memset(&request, 0, sizeof(request));
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload,
+                                         "idempotency_key",
+                                         idempotency_key,
+                                         sizeof(idempotency_key));
+    request.key = key;
+    request.idempotency_key = idempotency_key;
+    if (mem_service_payload_get_string(payload,
+                                       "session_id",
+                                       session_id,
+                                       sizeof(session_id))) {
+        request.session_id = session_id;
+    }
+    request.size_bytes = mem_service_payload_get_u64(payload, "size_bytes", 0);
+    request.alignment_bytes =
+        mem_service_payload_get_u64(payload, "alignment_bytes", 0);
+    request.capabilities = mem_service_payload_get_u64(payload, "capabilities", 0);
+    result = mem_service_managed_allocate(&svc->managed, &request, &view);
+    return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
+static enum mem_service_wire_status mem_service_acquire_object(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+    uint64_t expected_generation = 0;
+    bool has_expected_generation;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload,
+                                         "session_id",
+                                         session_id,
+                                         sizeof(session_id));
+    has_expected_generation = mem_service_payload_get_u64_checked(
+        payload,
+        "expected_generation",
+        &expected_generation);
+    result = mem_service_managed_acquire(&svc->managed,
+                                         key,
+                                         session_id,
+                                         has_expected_generation,
+                                         expected_generation,
+                                         &view);
+    return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
+static enum mem_service_wire_status mem_service_release_object(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+    uint64_t expected_generation = 0;
+    bool has_expected_generation;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_RELEASE_OBJECT,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload,
+                                         "session_id",
+                                         session_id,
+                                         sizeof(session_id));
+    has_expected_generation = mem_service_payload_get_u64_checked(
+        payload,
+        "expected_generation",
+        &expected_generation);
+    result = mem_service_managed_release(&svc->managed,
+                                         key,
+                                         session_id,
+                                         has_expected_generation,
+                                         expected_generation,
+                                         &view);
+    return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
+static enum mem_service_wire_status mem_service_retire_object(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    uint64_t expected_generation = 0;
+    bool has_expected_generation;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_RETIRE_OBJECT,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    has_expected_generation = mem_service_payload_get_u64_checked(
+        payload,
+        "expected_generation",
+        &expected_generation);
+    result = mem_service_managed_retire(&svc->managed,
+                                        key,
+                                        has_expected_generation,
+                                        expected_generation,
+                                        &view);
+    return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
+static enum mem_service_wire_status mem_service_inspect_allocation(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+    size_t used;
+    uint32_t i;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    result = mem_service_managed_inspect(&svc->managed, key, &view);
+    if (result != MEM_SERVICE_MANAGED_RESULT_OK) {
+        return mem_service_managed_finish(result, NULL, key, response, response_len);
+    }
+    mem_service_managed_render_view(&view, response, response_len);
+    used = strlen(response);
+    if (view.owner_session[0] != '\0') {
+        used += (size_t)snprintf(response + used,
+                                 used < response_len ? response_len - used : 0,
+                                 "owner_session=%s\n",
+                                 view.owner_session);
+    }
+    for (i = 0; i < view.holder_count && used < response_len; ++i) {
+        int written = snprintf(response + used,
+                               response_len - used,
+                               "holder.%u.session_id=%s\n"
+                               "holder.%u.generation=%" PRIu64 "\n",
+                               i,
+                               view.holders[i].session_id,
+                               i,
+                               view.holders[i].generation);
+
+        if (written < 0) {
+            break;
+        }
+        used += (size_t)written;
+    }
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static enum mem_service_wire_status mem_service_allocation_stats(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    struct mem_service_managed_stats stats;
+
+    (void)payload;
+    mem_service_managed_stats_snapshot(&svc->managed, &stats);
+    snprintf(response,
+             response_len,
+             "status=ok\n"
+             "backing_registered=%" PRIu64 "\n"
+             "live_objects=%" PRIu64 "\n"
+             "backing_allocated_bytes=%" PRIu64 "\n"
+             "address_reserved_bytes=%" PRIu64 "\n"
+             "export_mappings=%" PRIu64 "\n"
+             "import_mappings=%" PRIu64 "\n"
+             "live_refs=%" PRIu64 "\n"
+             "in_flight=%" PRIu64 "\n"
+             "quarantined_objects=%" PRIu64 "\n"
+             "quarantined_bytes=%" PRIu64 "\n"
+             "allocate_ok_count=%" PRIu64 "\n"
+             "acquire_ok_count=%" PRIu64 "\n"
+             "release_ok_count=%" PRIu64 "\n"
+             "retire_ok_count=%" PRIu64 "\n"
+             "allocate_rejected_count=%" PRIu64 "\n"
+             "acquire_rejected_count=%" PRIu64 "\n"
+             "release_rejected_count=%" PRIu64 "\n"
+             "retire_rejected_count=%" PRIu64 "\n"
+             "quarantine_events=%" PRIu64 "\n",
+             stats.backing_registered,
+             stats.live_objects,
+             stats.backing_allocated_bytes,
+             stats.address_reserved_bytes,
+             stats.export_mappings,
+             stats.import_mappings,
+             stats.live_refs,
+             stats.in_flight,
+             stats.quarantined_objects,
+             stats.quarantined_bytes,
+             stats.allocate_ok_count,
+             stats.acquire_ok_count,
+             stats.release_ok_count,
+             stats.retire_ok_count,
+             stats.allocate_rejected_count,
+             stats.acquire_rejected_count,
+             stats.release_rejected_count,
+             stats.retire_rejected_count,
+             stats.quarantine_events);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
 static enum mem_service_wire_status mem_service_dispatch_operation(
     struct mem_service *svc,
     enum mem_service_wire_operation operation,
@@ -10466,6 +11110,18 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
                                           response,
                                           response_len,
                                           storage_root);
+    case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
+        return mem_service_allocate_object(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
+        return mem_service_acquire_object(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
+        return mem_service_release_object(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+        return mem_service_retire_object(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION:
+        return mem_service_inspect_allocation(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_ALLOCATION_STATS:
+        return mem_service_allocation_stats(svc, payload, response, response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -10665,6 +11321,24 @@ static void mem_service_record_operation_metrics(
         } else if (status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND) {
             metrics->artifact_query_miss_count += 1U;
         }
+        break;
+    case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
+        metrics->allocate_object_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
+        metrics->acquire_object_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
+        metrics->release_object_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+        metrics->retire_object_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION:
+        metrics->inspect_allocation_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_ALLOCATION_STATS:
+        metrics->allocation_stats_count += 1U;
         break;
     default:
         break;
@@ -11172,6 +11846,10 @@ static bool mem_service_operation_mutates(enum mem_service_wire_operation operat
     case MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF:
     case MEM_SERVICE_WIRE_OP_REGISTER_EXECUTION_ARTIFACT:
     case MEM_SERVICE_WIRE_OP_REGISTER_TRAINING_ARTIFACT:
+    case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
         return true;
     default:
         return false;
@@ -11258,6 +11936,13 @@ static uint64_t mem_service_estimate_new_record_count(
         return mem_service_estimate_new_kv_record_count(svc, payload);
     case MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY:
         return mem_service_estimate_new_prefix_record_count(svc, payload);
+    case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+        /* Managed allocations live in their own table with its own
+         * capacity gate; they do not consume legacy records. */
+        return 0U;
     default:
         return mem_service_operation_mutates(operation, payload) ? UINT64_MAX : 0U;
     }
@@ -12504,11 +13189,68 @@ static int mem_service_run_record_retention_ttl_fixture_check(void)
     return 0;
 }
 
+/*
+ * Per-connection context for network (trusted-guest-network) clients. Unix
+ * clients pass NULL and keep the existing local-trust behavior; network
+ * clients carry the allowlist-derived node identity so the daemon can match
+ * declared request identities against the connection's source.
+ */
+struct mem_service_connection_context {
+    bool network;
+    char node_id[MEM_SERVICE_NETWORK_NODE_ID_LEN];
+    char peer_ipv4[MEM_SERVICE_NETWORK_IPV4_LEN];
+};
+
+/*
+ * Operations exposed on network endpoints in this stage: health/readiness
+ * queries plus the managed object allocation control set (allocate,
+ * acquire, release, retire, inspect-allocation, allocation-stats). Legacy
+ * inline/path put, materialize, snapshot/restore and other local file or
+ * admin operations stay available on unix endpoints and are rejected with
+ * UNSUPPORTED on network endpoints. Provider control operations join this
+ * set when their wire operations land.
+ */
+static bool mem_service_network_operation_allowed(
+    enum mem_service_wire_operation operation)
+{
+    switch (operation) {
+    case MEM_SERVICE_WIRE_OP_HEALTH:
+    case MEM_SERVICE_WIRE_OP_READY:
+    case MEM_SERVICE_WIRE_OP_STATUS:
+    case MEM_SERVICE_WIRE_OP_METRICS:
+    case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION:
+    case MEM_SERVICE_WIRE_OP_ALLOCATION_STATS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Rejection audit: reason, peer and operation only. Token values, opaque
+ * descriptors and payload bytes must never appear in this log.
+ */
+static void mem_service_log_network_reject(const char *reason,
+                                           const char *peer_ipv4,
+                                           uint32_t operation)
+{
+    fprintf(stderr,
+            "mem_service serve: network request rejected reason=%s peer=%s operation=%u\n",
+            reason,
+            peer_ipv4 != NULL ? peer_ipv4 : "-",
+            operation);
+}
+
 static int mem_service_handle_client(int client_fd,
                                      struct mem_service *svc,
                                      const char *store_path,
                                      const char *storage_root,
-                                     const struct mem_service_daemon_limits *limits)
+                                     const struct mem_service_daemon_limits *limits,
+                                     const struct mem_service_connection_context *connection)
 {
     struct mem_service_wire_header request;
     enum mem_service_wire_status status;
@@ -12547,6 +13289,50 @@ static int mem_service_handle_client(int client_fd,
                                          MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH,
                                          "checksum_mismatch\n");
     }
+    if (connection != NULL && connection->network) {
+        char declared_node[MEM_SERVICE_NETWORK_NODE_ID_LEN];
+
+        if (!mem_service_network_operation_allowed(
+                (enum mem_service_wire_operation)request.operation)) {
+            mem_service_log_network_reject("operation_not_allowed",
+                                           connection->peer_ipv4,
+                                           request.operation);
+            mem_service_record_operation_metrics(
+                svc,
+                (enum mem_service_wire_operation)request.operation,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+                0);
+            return mem_service_send_response(
+                client_fd,
+                &request,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+                "status=unsupported\nreason=network_operation_not_allowed\n");
+        }
+        /*
+         * A request that declares a node identity must declare the identity
+         * of the allowlisted node this connection came from; a mismatched
+         * declaration is a spoofing attempt and is not executed.
+         */
+        if (mem_service_payload_get_string((const char *)request_payload,
+                                           "node_id",
+                                           declared_node,
+                                           sizeof(declared_node)) &&
+            strcmp(declared_node, connection->node_id) != 0) {
+            mem_service_log_network_reject("node_id_mismatch",
+                                           connection->peer_ipv4,
+                                           request.operation);
+            mem_service_record_operation_metrics(
+                svc,
+                (enum mem_service_wire_operation)request.operation,
+                MEM_SERVICE_WIRE_STATUS_INVALID_SESSION,
+                0);
+            return mem_service_send_response(
+                client_fd,
+                &request,
+                MEM_SERVICE_WIRE_STATUS_INVALID_SESSION,
+                "status=invalid_session\nreason=node_id_mismatch\n");
+        }
+    }
     status = mem_service_handle_operation_with_limits(
         svc,
         (enum mem_service_wire_operation)request.operation,
@@ -12578,6 +13364,136 @@ static int mem_service_prepare_unix_addr(const char *path, struct sockaddr_un *a
     memset(addr, 0, sizeof(*addr));
     addr->sun_family = AF_UNIX;
     memcpy(addr->sun_path, path, path_len + 1);
+    return 0;
+}
+
+/*
+ * Parse a "tcp:<ipv4>:<port>" main listen endpoint for the wire service.
+ * Only numeric dotted-quad IPv4 addresses are accepted; wildcard
+ * (0.0.0.0), limited broadcast (255.255.255.255) and multicast (224/4)
+ * bind addresses are rejected so the control endpoint is always bound to
+ * one exact configured interface. Loopback stays allowed for local
+ * two-process tests. This parser is intentionally separate from the
+ * metrics listener parser, which keeps its loopback-only restriction.
+ */
+static int mem_service_parse_tcp_bind_spec(const char *listen_spec,
+                                           struct sockaddr_in *addr)
+{
+    char host[64];
+    const char *port_colon;
+    const char *port_text;
+    char *end = NULL;
+    unsigned long port;
+    size_t host_len;
+    uint32_t host_order;
+
+    if (listen_spec == NULL || addr == NULL ||
+        strncmp(listen_spec,
+                MEM_SERVICE_TCP_SPEC_PREFIX,
+                strlen(MEM_SERVICE_TCP_SPEC_PREFIX)) != 0) {
+        return -1;
+    }
+    listen_spec += strlen(MEM_SERVICE_TCP_SPEC_PREFIX);
+    port_colon = strrchr(listen_spec, ':');
+    if (port_colon == NULL || port_colon == listen_spec) {
+        return -1;
+    }
+    host_len = (size_t)(port_colon - listen_spec);
+    if (host_len == 0 || host_len >= sizeof(host)) {
+        return -1;
+    }
+    memcpy(host, listen_spec, host_len);
+    host[host_len] = '\0';
+    port_text = port_colon + 1;
+    if (port_text[0] == '\0') {
+        return -1;
+    }
+    errno = 0;
+    port = strtoul(port_text, &end, 10);
+    if (errno != 0 || end == port_text || *end != '\0' ||
+        port == 0UL || port > 65535UL) {
+        return -1;
+    }
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host, &addr->sin_addr) != 1) {
+        return -1;
+    }
+    host_order = ntohl(addr->sin_addr.s_addr);
+    if (host_order == 0U ||
+        host_order == 0xFFFFFFFFU ||
+        (host_order & 0xF0000000U) == 0xE0000000U) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Validate an accepted TCP connection against the trusted-guest-network
+ * allowlist, arm the per-connection I/O deadline and derive the connection
+ * identity. Returns 0 when the connection may be served; the caller closes
+ * the fd otherwise. The deadline bounds the whole header+body+response
+ * exchange so a slow or partitioned peer cannot block other clients beyond
+ * the configured budget.
+ */
+static int mem_service_prepare_network_connection(
+    int client_fd,
+    const struct sockaddr_storage *peer_addr,
+    const struct mem_service_network_access *network,
+    struct mem_service_connection_context *connection)
+{
+    char peer_ipv4[MEM_SERVICE_NETWORK_IPV4_LEN];
+    const struct mem_service_network_peer *peer = NULL;
+    struct timeval timeout;
+    uint64_t timeout_ms;
+    size_t i;
+
+    if (peer_addr == NULL || network == NULL || connection == NULL ||
+        peer_addr->ss_family != AF_INET) {
+        mem_service_log_network_reject("peer_family_unsupported", NULL, 0);
+        return -1;
+    }
+    if (inet_ntop(AF_INET,
+                  &((const struct sockaddr_in *)peer_addr)->sin_addr,
+                  peer_ipv4,
+                  sizeof(peer_ipv4)) == NULL) {
+        return -1;
+    }
+    for (i = 0; i < network->peer_count; ++i) {
+        if (strcmp(network->peers[i].ipv4, peer_ipv4) == 0) {
+            peer = &network->peers[i];
+            break;
+        }
+    }
+    if (peer == NULL) {
+        mem_service_log_network_reject("peer_not_allowed", peer_ipv4, 0);
+        return -1;
+    }
+    timeout_ms = network->io_timeout_ms != 0
+                     ? network->io_timeout_ms
+                     : MEM_SERVICE_NETWORK_DEFAULT_IO_TIMEOUT_MS;
+    timeout.tv_sec = (time_t)(timeout_ms / 1000U);
+    timeout.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
+    if (timeout.tv_sec == 0 && timeout.tv_usec == 0) {
+        timeout.tv_usec = 1000;
+    }
+    if (setsockopt(client_fd,
+                   SOL_SOCKET,
+                   SO_RCVTIMEO,
+                   &timeout,
+                   sizeof(timeout)) != 0 ||
+        setsockopt(client_fd,
+                   SOL_SOCKET,
+                   SO_SNDTIMEO,
+                   &timeout,
+                   sizeof(timeout)) != 0) {
+        return -1;
+    }
+    memset(connection, 0, sizeof(*connection));
+    connection->network = true;
+    memcpy(connection->node_id, peer->node_id, strlen(peer->node_id) + 1U);
+    memcpy(connection->peer_ipv4, peer_ipv4, strlen(peer_ipv4) + 1U);
     return 0;
 }
 
@@ -12909,6 +13825,103 @@ static int mem_service_handle_metrics_http_client(int client_fd, struct mem_serv
     return status == MEM_SERVICE_WIRE_STATUS_OK ? 0 : -1;
 }
 
+/*
+ * Shared bootstrap for all main listen transports: initialize the core
+ * service, adopt and probe the provider registry, prepare and load the
+ * durable store and apply configured retention before the first client is
+ * served. Returns 0 on success; on failure the caller must not serve.
+ */
+static int mem_service_daemon_bootstrap(
+    struct mem_service *svc,
+    const char *store_path,
+    const char *storage_root,
+    const struct mem_service_daemon_limits *limits,
+    const struct mem_service_provider_registry *providers)
+{
+    if (mem_service_init(svc, true, true, true) != 0) {
+        fprintf(stderr, "mem_service serve: init failed\n");
+        return 1;
+    }
+    if (providers != NULL) {
+        if (!providers->initialized ||
+            providers->count > MEM_SERVICE_MAX_PROVIDERS) {
+            fprintf(stderr,
+                    "mem_service serve: invalid provider registry\n");
+            return 1;
+        }
+        svc->providers = *providers;
+        if (mem_service_provider_registry_refresh(&svc->providers) != 0) {
+            fprintf(stderr,
+                    "mem_service serve: provider probe failed\n");
+            return 1;
+        }
+    }
+    if (mem_service_prepare_durable_catalog_layout(storage_root) != 0) {
+        fprintf(stderr,
+                "mem_service serve: durable catalog layout failed root=%s\n",
+                storage_root != NULL ? storage_root : "");
+        return 1;
+    }
+    if (mem_service_admit_or_migrate_catalog_schema_version(storage_root,
+                                                            store_path) != 0) {
+        fprintf(stderr,
+                "mem_service serve: unknown catalog schema version root=%s\n",
+                storage_root != NULL ? storage_root : "");
+        return 1;
+    }
+    if (mem_service_load_durable_store(svc, store_path) != 0) {
+        fprintf(stderr, "mem_service serve: store load failed path=%s\n", store_path);
+        return 1;
+    }
+    if (limits != NULL && limits->max_audit_events > 0 &&
+        mem_service_apply_audit_retention(svc, limits->max_audit_events) &&
+        store_path != NULL && store_path[0] != '\0' &&
+        (mem_service_save_store(svc, store_path) != 0 ||
+         mem_service_compact_journal_now(store_path) != 0)) {
+        fprintf(stderr, "mem_service serve: retention save failed path=%s\n", store_path);
+        return 1;
+    }
+    if (limits != NULL && limits->max_checkpoint_records > 0 &&
+        mem_service_apply_checkpoint_retention(svc,
+                                               limits->max_checkpoint_records,
+                                               storage_root,
+                                               NULL) &&
+        store_path != NULL && store_path[0] != '\0' &&
+        (mem_service_save_store(svc, store_path) != 0 ||
+         mem_service_compact_journal_now(store_path) != 0)) {
+        fprintf(stderr,
+                "mem_service serve: checkpoint retention save failed path=%s\n",
+                store_path);
+        return 1;
+    }
+    if (limits != NULL &&
+        (limits->max_retained_records > 0 ||
+         limits->max_retained_record_age_ms > 0) &&
+        mem_service_apply_record_retention(svc,
+                                           limits->max_retained_records,
+                                           limits->max_retained_record_age_ms,
+                                           limits->max_retained_record_kind,
+                                           limits->max_retained_record_tenant_enabled,
+                                           limits->max_retained_record_tenant,
+                                           storage_root,
+                                           NULL) &&
+        store_path != NULL && store_path[0] != '\0' &&
+        (mem_service_save_store(svc, store_path) != 0 ||
+         mem_service_compact_journal_now(store_path) != 0)) {
+        fprintf(stderr,
+                "mem_service serve: record retention save failed path=%s\n",
+                store_path);
+        return 1;
+    }
+    if (mem_service_write_durable_catalog_manifest(storage_root, store_path) != 0) {
+        fprintf(stderr,
+                "mem_service serve: durable catalog manifest failed root=%s\n",
+                storage_root != NULL ? storage_root : "");
+        return 1;
+    }
+    return 0;
+}
+
 int mem_service_run_unix_daemon_with_store_metrics_and_catalog(
     const char *listen_spec,
     const char *store_path,
@@ -12967,85 +13980,11 @@ int mem_service_run_unix_daemon_with_runtime(
         fprintf(stderr, "mem_service serve: invalid unix listen path\n");
         return 2;
     }
-    if (mem_service_init(&svc, true, true, true) != 0) {
-        fprintf(stderr, "mem_service serve: init failed\n");
-        return 1;
-    }
-    if (providers != NULL) {
-        if (!providers->initialized ||
-            providers->count > MEM_SERVICE_MAX_PROVIDERS) {
-            fprintf(stderr,
-                    "mem_service serve: invalid provider registry\n");
-            return 1;
-        }
-        svc.providers = *providers;
-        if (mem_service_provider_registry_refresh(&svc.providers) != 0) {
-            fprintf(stderr,
-                    "mem_service serve: provider probe failed\n");
-            return 1;
-        }
-    }
-    if (mem_service_prepare_durable_catalog_layout(storage_root) != 0) {
-        fprintf(stderr,
-                "mem_service serve: durable catalog layout failed root=%s\n",
-                storage_root != NULL ? storage_root : "");
-        return 1;
-    }
-    if (mem_service_admit_or_migrate_catalog_schema_version(storage_root,
-                                                            store_path) != 0) {
-        fprintf(stderr,
-                "mem_service serve: unknown catalog schema version root=%s\n",
-                storage_root != NULL ? storage_root : "");
-        return 1;
-    }
-    if (mem_service_load_durable_store(&svc, store_path) != 0) {
-        fprintf(stderr, "mem_service serve: store load failed path=%s\n", store_path);
-        return 1;
-    }
-    if (limits != NULL && limits->max_audit_events > 0 &&
-        mem_service_apply_audit_retention(&svc, limits->max_audit_events) &&
-        store_path != NULL && store_path[0] != '\0' &&
-        (mem_service_save_store(&svc, store_path) != 0 ||
-         mem_service_compact_journal_now(store_path) != 0)) {
-        fprintf(stderr, "mem_service serve: retention save failed path=%s\n", store_path);
-        return 1;
-    }
-    if (limits != NULL && limits->max_checkpoint_records > 0 &&
-        mem_service_apply_checkpoint_retention(&svc,
-                                               limits->max_checkpoint_records,
-                                               storage_root,
-                                               NULL) &&
-        store_path != NULL && store_path[0] != '\0' &&
-        (mem_service_save_store(&svc, store_path) != 0 ||
-         mem_service_compact_journal_now(store_path) != 0)) {
-        fprintf(stderr,
-                "mem_service serve: checkpoint retention save failed path=%s\n",
-                store_path);
-        return 1;
-    }
-    if (limits != NULL &&
-        (limits->max_retained_records > 0 ||
-         limits->max_retained_record_age_ms > 0) &&
-        mem_service_apply_record_retention(&svc,
-                                           limits->max_retained_records,
-                                           limits->max_retained_record_age_ms,
-                                           limits->max_retained_record_kind,
-                                           limits->max_retained_record_tenant_enabled,
-                                           limits->max_retained_record_tenant,
-                                           storage_root,
-                                           NULL) &&
-        store_path != NULL && store_path[0] != '\0' &&
-        (mem_service_save_store(&svc, store_path) != 0 ||
-         mem_service_compact_journal_now(store_path) != 0)) {
-        fprintf(stderr,
-                "mem_service serve: record retention save failed path=%s\n",
-                store_path);
-        return 1;
-    }
-    if (mem_service_write_durable_catalog_manifest(storage_root, store_path) != 0) {
-        fprintf(stderr,
-                "mem_service serve: durable catalog manifest failed root=%s\n",
-                storage_root != NULL ? storage_root : "");
+    if (mem_service_daemon_bootstrap(&svc,
+                                     store_path,
+                                     storage_root,
+                                     limits,
+                                     providers) != 0) {
         return 1;
     }
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -13153,7 +14092,8 @@ int mem_service_run_unix_daemon_with_runtime(
                                               &svc,
                                               store_path,
                                               storage_root,
-                                              limits) != 0) {
+                                              limits,
+                                              NULL) != 0) {
                     fprintf(stderr, "mem_service serve: client request failed\n");
                 }
                 close(client_fd);
@@ -13181,6 +14121,259 @@ int mem_service_run_unix_daemon_with_runtime(
         close(metrics_fd);
     }
     unlink(path);
+    printf("mem_service serve: status=stopped\n");
+    return rc;
+}
+
+/*
+ * Classify the main listen endpoint. NULL, an empty spec, an explicit
+ * "unix:" prefix or a bare path without any scheme keep the legacy unix
+ * behavior; "tcp:<ipv4>:<port>" selects the network transport; any other
+ * explicit scheme is rejected. The classification matches the wire
+ * client's so a deployment's serve/connect specs always agree on the
+ * transport.
+ */
+static int mem_service_daemon_listen_is_tcp(const char *listen_spec, bool *is_tcp)
+{
+    if (is_tcp == NULL) {
+        return -1;
+    }
+    *is_tcp = false;
+    if (listen_spec == NULL || listen_spec[0] == '\0' ||
+        strncmp(listen_spec,
+                MEM_SERVICE_UNIX_SPEC_PREFIX,
+                strlen(MEM_SERVICE_UNIX_SPEC_PREFIX)) == 0) {
+        return 0;
+    }
+    if (strncmp(listen_spec,
+                MEM_SERVICE_TCP_SPEC_PREFIX,
+                strlen(MEM_SERVICE_TCP_SPEC_PREFIX)) == 0) {
+        *is_tcp = true;
+        return 0;
+    }
+    if (strchr(listen_spec, ':') == NULL) {
+        return 0;
+    }
+    return -1;
+}
+
+int mem_service_run_daemon_with_runtime(
+    const char *listen_spec,
+    const char *store_path,
+    const char *metrics_listen_spec,
+    const char *storage_root,
+    const struct mem_service_daemon_runtime *runtime)
+{
+    struct mem_service svc;
+    struct sockaddr_in addr;
+    const struct mem_service_daemon_limits *limits =
+        runtime != NULL ? runtime->limits : NULL;
+    const struct mem_service_provider_registry *providers =
+        runtime != NULL ? runtime->providers : NULL;
+    const struct mem_service_network_access *network =
+        runtime != NULL ? runtime->network : NULL;
+    bool is_tcp = false;
+    int server_fd;
+    int metrics_fd = -1;
+    int rc = 1;
+
+    if (mem_service_daemon_listen_is_tcp(listen_spec, &is_tcp) != 0) {
+        fprintf(stderr, "mem_service serve: unknown listen endpoint scheme\n");
+        return 2;
+    }
+    if (!is_tcp) {
+        return mem_service_run_unix_daemon_with_runtime(listen_spec,
+                                                        store_path,
+                                                        metrics_listen_spec,
+                                                        storage_root,
+                                                        runtime);
+    }
+    /*
+     * A network endpoint is only served with an explicit
+     * trusted-guest-network access policy: an exact bind address, a
+     * configured node identity and a non-empty peer allowlist. Missing
+     * pieces fail startup instead of falling back to an implicit policy.
+     */
+    if (network == NULL || !network->enabled ||
+        network->peer_count == 0 ||
+        network->peer_count > MEM_SERVICE_NETWORK_MAX_PEERS ||
+        network->node_id[0] == '\0') {
+        fprintf(stderr,
+                "mem_service serve: tcp listen requires a trusted-guest-network "
+                "access policy with node identity and peer allowlist\n");
+        return 2;
+    }
+    if (mem_service_parse_tcp_bind_spec(listen_spec, &addr) != 0) {
+        fprintf(stderr, "mem_service serve: invalid tcp listen endpoint\n");
+        return 2;
+    }
+    if (mem_service_daemon_bootstrap(&svc,
+                                     store_path,
+                                     storage_root,
+                                     limits,
+                                     providers) != 0) {
+        return 1;
+    }
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("mem_service serve: socket");
+        return 1;
+    }
+    {
+        int reuse = 1;
+
+        (void)setsockopt(server_fd,
+                         SOL_SOCKET,
+                         SO_REUSEADDR,
+                         &reuse,
+                         sizeof(reuse));
+    }
+    if (bind(server_fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        perror("mem_service serve: bind");
+        close(server_fd);
+        return 1;
+    }
+    if (listen(server_fd, 16) != 0) {
+        perror("mem_service serve: listen");
+        close(server_fd);
+        return 1;
+    }
+    if (metrics_listen_spec != NULL && metrics_listen_spec[0] != '\0') {
+        metrics_fd = mem_service_open_metrics_listener(metrics_listen_spec);
+        if (metrics_fd < 0) {
+            close(server_fd);
+            return 1;
+        }
+    }
+    mem_service_daemon_stop = 0;
+    if (mem_service_install_signal_handlers() != 0) {
+        perror("mem_service serve: signal");
+        close(server_fd);
+        if (metrics_fd >= 0) {
+            close(metrics_fd);
+        }
+        return 1;
+    }
+    if (store_path != NULL && store_path[0] != '\0') {
+        printf("mem_service serve: status=ready listen=%s store=%s records=%zu",
+               listen_spec,
+               store_path,
+               svc.record_count);
+    } else {
+        printf("mem_service serve: status=ready listen=%s records=%zu",
+               listen_spec,
+               svc.record_count);
+    }
+    if (metrics_fd >= 0) {
+        printf(" metrics_listen=%s", metrics_listen_spec);
+    }
+    if (storage_root != NULL && storage_root[0] != '\0') {
+        printf(" storage_root=%s", storage_root);
+    }
+    if (limits != NULL && limits->max_records > 0) {
+        printf(" max_records=%" PRIu64, limits->max_records);
+    }
+    if (limits != NULL && limits->max_payload_bytes > 0) {
+        printf(" max_payload_bytes=%" PRIu64, limits->max_payload_bytes);
+    }
+    if (limits != NULL && limits->max_audit_events > 0) {
+        printf(" max_audit_events=%" PRIu64, limits->max_audit_events);
+    }
+    if (limits != NULL && limits->max_checkpoint_records > 0) {
+        printf(" max_checkpoint_records=%" PRIu64, limits->max_checkpoint_records);
+    }
+    printf(" provider_count=%zu provider_ready_count=%zu data_plane_ready=%u",
+           svc.providers.count,
+           mem_service_provider_registry_ready_count(&svc.providers),
+           mem_service_provider_registry_data_plane_ready(&svc.providers)
+               ? 1U
+               : 0U);
+    printf(" auth_mode=trusted-guest-network node_id=%s peer_count=%zu",
+           network->node_id,
+           network->peer_count);
+    printf("\n");
+    fflush(stdout);
+    while (!mem_service_daemon_stop) {
+        fd_set readfds;
+        int max_fd = server_fd;
+        int select_rc;
+
+        FD_ZERO(&readfds);
+        FD_SET(server_fd, &readfds);
+        if (metrics_fd >= 0) {
+            FD_SET(metrics_fd, &readfds);
+            if (metrics_fd > max_fd) {
+                max_fd = metrics_fd;
+            }
+        }
+        select_rc = select(max_fd + 1, &readfds, NULL, NULL, NULL);
+        if (select_rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("mem_service serve: select");
+            break;
+        }
+        if (FD_ISSET(server_fd, &readfds)) {
+            struct sockaddr_storage peer_addr;
+            socklen_t peer_len = (socklen_t)sizeof(peer_addr);
+            int client_fd = accept(server_fd,
+                                   (struct sockaddr *)&peer_addr,
+                                   &peer_len);
+
+            if (client_fd < 0) {
+                if (errno != EINTR) {
+                    perror("mem_service serve: accept");
+                    break;
+                }
+            } else {
+                struct mem_service_connection_context connection;
+
+                /*
+                 * Source-IP allowlist validation happens before any wire
+                 * bytes are consumed; rejected peers are closed without a
+                 * response.
+                 */
+                if (mem_service_prepare_network_connection(client_fd,
+                                                           &peer_addr,
+                                                           network,
+                                                           &connection) != 0) {
+                    close(client_fd);
+                } else {
+                    if (mem_service_handle_client(client_fd,
+                                                  &svc,
+                                                  store_path,
+                                                  storage_root,
+                                                  limits,
+                                                  &connection) != 0) {
+                        fprintf(stderr,
+                                "mem_service serve: client request failed\n");
+                    }
+                    close(client_fd);
+                }
+            }
+        }
+        if (metrics_fd >= 0 && FD_ISSET(metrics_fd, &readfds)) {
+            int client_fd = accept(metrics_fd, NULL, NULL);
+
+            if (client_fd < 0) {
+                if (errno != EINTR) {
+                    perror("mem_service serve: metrics accept");
+                    break;
+                }
+            } else {
+                if (mem_service_handle_metrics_http_client(client_fd, &svc) != 0) {
+                    fprintf(stderr, "mem_service serve: metrics request failed\n");
+                }
+                close(client_fd);
+            }
+        }
+    }
+    rc = 0;
+    close(server_fd);
+    if (metrics_fd >= 0) {
+        close(metrics_fd);
+    }
     printf("mem_service serve: status=stopped\n");
     return rc;
 }

@@ -2,6 +2,7 @@
 #define MEM_SERVICE_DAEMON_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct mem_service_remote_transport_probe_result {
@@ -24,11 +25,38 @@ struct mem_service_daemon_limits {
     uint32_t max_retained_record_tenant;
 };
 
+#define MEM_SERVICE_NETWORK_NODE_ID_LEN 64U
+#define MEM_SERVICE_NETWORK_IPV4_LEN 16U
+#define MEM_SERVICE_NETWORK_MAX_PEERS 32U
+#define MEM_SERVICE_NETWORK_DEFAULT_IO_TIMEOUT_MS 3000U
+
+/*
+ * Trusted-guest-network access policy for serving the wire protocol over
+ * TCP. The allowlist maps stable node IDs to exact guest IPv4 addresses
+ * one-to-one; wildcards, CIDR ranges and duplicate identities are rejected
+ * by the configuration layer. This mode has no TLS or cryptographic peer
+ * authentication: it is only valid on an isolated guest network where all
+ * listed nodes form one trust domain.
+ */
+struct mem_service_network_peer {
+    char node_id[MEM_SERVICE_NETWORK_NODE_ID_LEN];
+    char ipv4[MEM_SERVICE_NETWORK_IPV4_LEN];
+};
+
+struct mem_service_network_access {
+    bool enabled;
+    char node_id[MEM_SERVICE_NETWORK_NODE_ID_LEN];
+    struct mem_service_network_peer peers[MEM_SERVICE_NETWORK_MAX_PEERS];
+    size_t peer_count;
+    uint64_t io_timeout_ms;
+};
+
 struct mem_service_provider_registry;
 
 struct mem_service_daemon_runtime {
     const struct mem_service_daemon_limits *limits;
     const struct mem_service_provider_registry *providers;
+    const struct mem_service_network_access *network;
 };
 
 int mem_service_run_unix_daemon(const char *listen_spec);
@@ -48,6 +76,19 @@ int mem_service_run_unix_daemon_with_store_metrics_catalog_and_limits(
     const char *storage_root,
     const struct mem_service_daemon_limits *limits);
 int mem_service_run_unix_daemon_with_runtime(
+    const char *listen_spec,
+    const char *store_path,
+    const char *metrics_listen_spec,
+    const char *storage_root,
+    const struct mem_service_daemon_runtime *runtime);
+/*
+ * Transport-neutral serve entry. A "tcp:<ipv4>:<port>" listen spec requires
+ * runtime->network to describe an enabled trusted-guest-network access
+ * policy; without one the daemon refuses to expose the wire protocol on a
+ * network endpoint. Unix listen specs keep the existing local behavior and
+ * ignore the network policy.
+ */
+int mem_service_run_daemon_with_runtime(
     const char *listen_spec,
     const char *store_path,
     const char *metrics_listen_spec,
@@ -76,6 +117,7 @@ int mem_service_probe_transport_tcp_payload_block(
 int mem_service_run_serving_fail_closed_fixture_check(void);
 int mem_service_run_pretraining_fail_closed_fixture_check(void);
 int mem_service_run_typed_payload_fixture_check(void);
+int mem_service_run_allocation_fixture_check(void);
 int mem_service_run_restore_policy_fixture_check(void);
 int mem_service_run_upgrade_rollback_runtime_fixture_check(void);
 int mem_service_run_compat_runtime_fixture_check(void);

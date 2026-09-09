@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -25,10 +27,10 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 12788U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xb1f00fc6U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 24U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 168U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 14314U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x45d9849bU
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 30U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 186U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
@@ -38,7 +40,7 @@
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x74c57a78U
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xfb0fba5dU
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -51,7 +53,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xc8513ae1U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xd54f66dfU
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -62,12 +64,12 @@
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x71077a46U
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0xeec3c3e1U
 #define MEM_SERVICE_COMPAT_MATRIX_STATUS_COUNT 11U
 #define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_LEN 1252U
-#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x30539fd6U
+#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x2ec93e38U
 #define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_LEN 1734U
-#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x2bcca939U
+#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0xbb9552b1U
 #define MEM_SERVICE_CLI_STORE_MAGIC "mem_service_store_v1"
 
 static void usage(const char *argv0)
@@ -114,10 +116,11 @@ static void usage(const char *argv0)
     printf(" [pretraining-fail-closed-fixtures]");
     printf(" [typed-payload-fixtures]");
     printf(" [release-manifest] [release-fixtures]");
-    printf(" [serve [--config <path>] [--listen unix:%s] [--store <path>]"
+    printf(" [serve [--config <path>] [--listen unix:%s|tcp:<ipv4>:<port>] [--store <path>]"
            " [--metrics-listen tcp:127.0.0.1:9900]]",
            MEM_SERVICE_DEFAULT_UNIX_SOCKET);
-    printf(" [health|ready|status|list-records|metrics|metrics-export|audit-log|export-snapshot|export-snapshot-page|export-snapshot-to|restore-snapshot [--connect unix:%s] [--timeout-ms <ms>] [--max-attempts <n>] [--retry-backoff-ms <ms>] [--retry-timeouts]]",
+    printf(" [tcp listen requires auth_mode=trusted-guest-network with node_id and network_peer allowlist]");
+    printf(" [health|ready|status|list-records|metrics|metrics-export|audit-log|export-snapshot|export-snapshot-page|export-snapshot-to|restore-snapshot [--connect unix:%s|tcp:<ipv4>:<port>] [--timeout-ms <ms>] [--max-attempts <n>] [--retry-backoff-ms <ms>] [--retry-timeouts]]",
            MEM_SERVICE_DEFAULT_UNIX_SOCKET);
     printf(" [metrics-export accepts --format prometheus-text]");
     printf(" [put-object|get-object|inspect-object|materialize-object|register-prefix|lookup-prefix|publish-kv|resolve-kv]");
@@ -130,6 +133,10 @@ static void usage(const char *argv0)
     printf(" [put-object accepts --backend ub-ssd-gsva-v1 --backend-write 1 --backend-buffer-gsva-base <u64> --backend-buffer-key-segment-id <u64>]");
     printf(" [get-object accepts --backend-read 1 with the same --backend-buffer-* GSVA descriptor fields]");
     printf(" [materialize-object --key <key> --to <new-path> [--expected-version <u64>] [--expected-checksum <u64>]]");
+    printf(" [allocate-object --key <key> --idempotency-key <key> --size-bytes <u64> --capabilities <u64> [--session-id <id>] [--alignment-bytes <u64>]]");
+    printf(" [acquire-object|release-object --key <key> --idempotency-key <key> --session-id <id> [--expected-generation <u64>]]");
+    printf(" [retire-object --key <key> --idempotency-key <key> [--expected-generation <u64>]]");
+    printf(" [inspect-allocation --key <key>] [allocation-stats] [allocation-fixtures]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -2384,7 +2391,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "service_version=" MEM_SERVICE_RELEASE_VERSION "\n") == NULL ||
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
-        strstr(manifest, "wire_schema_manifest_checksum=0xb1f00fc6\n") == NULL ||
+        strstr(manifest, "wire_schema_manifest_checksum=0x45d9849b\n") == NULL ||
         strstr(manifest, "api_abi_policy_checksum=0x5e460a87\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
@@ -5629,7 +5636,7 @@ static int run_release_fixture_check(void)
            "metrics_scrape_paths=1 "
            "client_retry_policies=1 "
            "client_api_profiles=2 compat_artifacts=3 "
-           "operations=24 statuses=11 "
+           "operations=30 statuses=11 "
            "schema_manifest_len=%u schema_manifest_checksum=0x%08x "
            "api_abi_policy_len=%u api_abi_policy_checksum=0x%08x "
            "admin_output_schema_len=%u "
@@ -6018,15 +6025,20 @@ struct mem_service_cli_config {
     bool has_record_retention;
     bool has_max_retained_records;
     bool has_encryption;
+    bool has_auth_mode;
+    bool has_node_id;
+    bool has_network_io_timeout_ms;
     uint64_t max_records;
     uint64_t max_payload_bytes;
     uint64_t max_audit_events;
     uint64_t max_checkpoint_records;
     uint64_t max_retained_records;
     uint64_t max_retained_record_age_ms;
+    uint64_t network_io_timeout_ms;
     uint32_t max_retained_record_kind;
     bool max_retained_record_tenant_enabled;
     uint32_t max_retained_record_tenant;
+    size_t network_peer_count;
     char listen[160];
     char store[512];
     char storage_root[512];
@@ -6035,6 +6047,9 @@ struct mem_service_cli_config {
     char checkpoint_retention[80];
     char record_retention[80];
     char encryption[40];
+    char auth_mode[40];
+    char node_id[MEM_SERVICE_NETWORK_NODE_ID_LEN];
+    struct mem_service_network_peer network_peers[MEM_SERVICE_NETWORK_MAX_PEERS];
 };
 
 static void trim_ascii(char *value)
@@ -6335,12 +6350,84 @@ static bool is_loopback_metrics_listen_spec(const char *value)
            port > 0UL && port <= 65535UL;
 }
 
+/*
+ * Validate one allowlist IPv4 literal for the trusted-guest-network mode.
+ * Only exact numeric dotted-quad addresses are accepted; wildcard
+ * (0.0.0.0), limited broadcast (255.255.255.255) and multicast (224/4)
+ * identities are rejected, matching the bind-side rules.
+ */
+static bool is_valid_network_peer_ipv4(const char *value)
+{
+    struct in_addr addr;
+    uint32_t host_order;
+
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    if (inet_pton(AF_INET, value, &addr) != 1) {
+        return false;
+    }
+    host_order = ntohl(addr.s_addr);
+    return host_order != 0U && host_order != 0xFFFFFFFFU &&
+           (host_order & 0xF0000000U) != 0xE0000000U;
+}
+
+/*
+ * Parse one repeatable "network_peer=<node_id>@<ipv4>" allowlist entry.
+ * Node IDs and addresses must each be unique across the allowlist; the
+ * one-to-one mapping never collapses multiple nodes into one source
+ * identity.
+ */
+static int append_network_peer(struct mem_service_cli_config *config,
+                               const char *value)
+{
+    const char *at;
+    size_t node_len;
+    size_t ipv4_len;
+    size_t i;
+    struct mem_service_network_peer *peer;
+
+    if (config == NULL || value == NULL) {
+        return -1;
+    }
+    at = strchr(value, '@');
+    if (at == NULL || at == value || strchr(at + 1, '@') != NULL) {
+        return -1;
+    }
+    node_len = (size_t)(at - value);
+    ipv4_len = strlen(at + 1);
+    if (node_len == 0 || node_len >= MEM_SERVICE_NETWORK_NODE_ID_LEN ||
+        ipv4_len == 0 || ipv4_len >= MEM_SERVICE_NETWORK_IPV4_LEN ||
+        !is_valid_network_peer_ipv4(at + 1)) {
+        return -1;
+    }
+    if (config->network_peer_count >= MEM_SERVICE_NETWORK_MAX_PEERS) {
+        return -1;
+    }
+    for (i = 0; i < config->network_peer_count; ++i) {
+        if (strncmp(config->network_peers[i].node_id, value, node_len) == 0 &&
+            config->network_peers[i].node_id[node_len] == '\0') {
+            return -1;
+        }
+        if (strcmp(config->network_peers[i].ipv4, at + 1) == 0) {
+            return -1;
+        }
+    }
+    peer = &config->network_peers[config->network_peer_count];
+    memcpy(peer->node_id, value, node_len);
+    peer->node_id[node_len] = '\0';
+    memcpy(peer->ipv4, at + 1, ipv4_len + 1U);
+    config->network_peer_count += 1U;
+    return 0;
+}
+
 static int apply_config_field(struct mem_service_cli_config *config,
                               const char *name,
                               const char *value)
 {
     if (strcmp(name, "listen") == 0) {
-        if (strncmp(value, "unix:", 5) != 0 ||
+        if ((strncmp(value, "unix:", 5) != 0 &&
+             strncmp(value, "tcp:", 4) != 0) ||
             copy_config_value(config->listen, sizeof(config->listen), value) != 0) {
             return -1;
         }
@@ -6380,7 +6467,26 @@ static int apply_config_field(struct mem_service_cli_config *config,
                    : -1;
     }
     if (strcmp(name, "auth_mode") == 0) {
-        return strcmp(value, "none") == 0 ? 0 : -1;
+        if ((strcmp(value, "none") != 0 &&
+             strcmp(value, "trusted-guest-network") != 0) ||
+            copy_config_value(config->auth_mode,
+                              sizeof(config->auth_mode),
+                              value) != 0) {
+            return -1;
+        }
+        config->has_auth_mode = true;
+        return 0;
+    }
+    if (strcmp(name, "network_peer") == 0) {
+        return append_network_peer(config, value);
+    }
+    if (strcmp(name, "network_io_timeout_ms") == 0) {
+        if (!parse_config_u64_value(value, &config->network_io_timeout_ms) ||
+            config->network_io_timeout_ms == 0) {
+            return -1;
+        }
+        config->has_network_io_timeout_ms = true;
+        return 0;
     }
     if (strcmp(name, "metrics_mode") == 0) {
         return strcmp(value, "text-kv") == 0 ? 0 : -1;
@@ -6402,8 +6508,14 @@ static int apply_config_field(struct mem_service_cli_config *config,
         config->has_max_payload_bytes = true;
         return 0;
     }
-    if (strcmp(name, "node_id") == 0 ||
-        strcmp(name, "cluster_id") == 0) {
+    if (strcmp(name, "node_id") == 0) {
+        if (copy_config_value(config->node_id, sizeof(config->node_id), value) != 0) {
+            return -1;
+        }
+        config->has_node_id = true;
+        return 0;
+    }
+    if (strcmp(name, "cluster_id") == 0) {
         return value[0] != '\0' ? 0 : -1;
     }
     if (strcmp(name, "retention") == 0) {
@@ -7052,10 +7164,16 @@ static int run_serve(int argc, char **argv)
     char derived_store[512];
     struct mem_service_cli_config config;
     struct mem_service_daemon_limits limits;
+    struct mem_service_network_access network;
+    struct mem_service_daemon_runtime runtime;
     const struct mem_service_daemon_limits *limits_ptr = NULL;
+    bool trusted_guest_network = false;
+    bool listen_is_tcp;
 
     derived_store[0] = '\0';
     memset(&limits, 0, sizeof(limits));
+    memset(&network, 0, sizeof(network));
+    memset(&runtime, 0, sizeof(runtime));
     if ((config_path == NULL && option_present(argc, argv, "--config")) ||
         parse_socket_arg(argc, argv, "--listen", &listen_spec) != 0) {
         return 2;
@@ -7069,6 +7187,23 @@ static int run_serve(int argc, char **argv)
         storage_root = config.has_storage_root ? config.storage_root : NULL;
         metrics_listen_spec =
             config.has_metrics_listen ? config.metrics_listen : metrics_listen_spec;
+        if (config.has_auth_mode &&
+            strcmp(config.auth_mode, "trusted-guest-network") == 0) {
+            trusted_guest_network = true;
+        }
+        /*
+         * Network access fields are only meaningful together with the
+         * explicit trusted-guest-network mode; configuring them under the
+         * default local-only mode fails instead of being silently ignored.
+         */
+        if (!trusted_guest_network &&
+            (config.network_peer_count > 0 ||
+             config.has_network_io_timeout_ms)) {
+            fprintf(stderr,
+                    "mem_service: network access fields require "
+                    "auth_mode=trusted-guest-network\n");
+            return 2;
+        }
         if (config.has_max_records || config.has_max_payload_bytes ||
             config.has_max_audit_events ||
             config.has_max_checkpoint_records ||
@@ -7115,12 +7250,61 @@ static int run_serve(int argc, char **argv)
     if (metrics_listen_override != NULL) {
         metrics_listen_spec = metrics_listen_override;
     }
-    return mem_service_run_unix_daemon_with_store_metrics_catalog_and_limits(
-        listen_spec,
-        store_path,
-        metrics_listen_spec,
-        storage_root,
-        limits_ptr);
+    listen_is_tcp = strncmp(listen_spec, "tcp:", 4) == 0;
+    if (listen_is_tcp && !trusted_guest_network) {
+        fprintf(stderr,
+                "mem_service: tcp listen requires auth_mode=trusted-guest-network\n");
+        return 2;
+    }
+    if (!trusted_guest_network) {
+        return mem_service_run_unix_daemon_with_store_metrics_catalog_and_limits(
+            listen_spec,
+            store_path,
+            metrics_listen_spec,
+            storage_root,
+            limits_ptr);
+    }
+    /*
+     * Trusted-guest-network mode requires the explicit tcp main listen
+     * endpoint, this node's stable identity and a non-empty peer allowlist;
+     * missing pieces fail startup. The daemon re-validates the exact bind
+     * address and rejects wildcard/broadcast/multicast binds.
+     */
+    if (!listen_is_tcp) {
+        fprintf(stderr,
+                "mem_service: auth_mode=trusted-guest-network requires a "
+                "tcp:<ipv4>:<port> listen endpoint\n");
+        return 2;
+    }
+    if (!config.has_node_id) {
+        fprintf(stderr,
+                "mem_service: auth_mode=trusted-guest-network requires node_id\n");
+        return 2;
+    }
+    if (config.network_peer_count == 0) {
+        fprintf(stderr,
+                "mem_service: auth_mode=trusted-guest-network requires a "
+                "non-empty network_peer allowlist\n");
+        return 2;
+    }
+    network.enabled = true;
+    memcpy(network.node_id,
+           config.node_id,
+           strlen(config.node_id) + 1U);
+    memcpy(network.peers,
+           config.network_peers,
+           config.network_peer_count * sizeof(config.network_peers[0]));
+    network.peer_count = config.network_peer_count;
+    network.io_timeout_ms =
+        config.has_network_io_timeout_ms ? config.network_io_timeout_ms : 0U;
+    runtime.limits = limits_ptr;
+    runtime.providers = NULL;
+    runtime.network = &network;
+    return mem_service_run_daemon_with_runtime(listen_spec,
+                                               store_path,
+                                               metrics_listen_spec,
+                                               storage_root,
+                                               &runtime);
 }
 
 static int run_client_status(int argc,
@@ -7139,13 +7323,13 @@ static int run_client_status(int argc,
         parse_client_options(argc, argv, &options) != 0) {
         return 2;
     }
-    rc = mem_service_send_unix_request_with_options(connect_spec,
-                                                    &options,
-                                                    operation,
-                                                    NULL,
-                                                    payload,
-                                                    sizeof(payload),
-                                                    &status);
+    rc = mem_service_send_request_with_options(connect_spec,
+                                               &options,
+                                               operation,
+                                               NULL,
+                                               payload,
+                                               sizeof(payload),
+                                               &status);
     printf("mem_service %s: status=%s", label, mem_service_wire_status_name(status));
     if (payload[0] != '\0') {
         printf(" payload=%s", payload);
@@ -7171,13 +7355,13 @@ static int run_client_payload_command(int argc,
         parse_client_options(argc, argv, &options) != 0) {
         return 2;
     }
-    rc = mem_service_send_unix_request_with_options(connect_spec,
-                                                    &options,
-                                                    operation,
-                                                    payload,
-                                                    response,
-                                                    sizeof(response),
-                                                    &status);
+    rc = mem_service_send_request_with_options(connect_spec,
+                                               &options,
+                                               operation,
+                                               payload,
+                                               response,
+                                               sizeof(response),
+                                               &status);
     printf("mem_service %s: status=%s", label, mem_service_wire_status_name(status));
     if (response[0] != '\0') {
         printf("\n%s", response);
@@ -7208,13 +7392,13 @@ static int send_client_payload_request(int argc,
     if (response != NULL && response_len > 0) {
         response[0] = '\0';
     }
-    return mem_service_send_unix_request_with_options(connect_spec,
-                                                      &options,
-                                                      operation,
-                                                      payload,
-                                                      response,
-                                                      response_len,
-                                                      status_out);
+    return mem_service_send_request_with_options(connect_spec,
+                                                 &options,
+                                                 operation,
+                                                 payload,
+                                                 response,
+                                                 response_len,
+                                                 status_out);
 }
 
 static bool metrics_export_key_is_safe(const char *key, size_t key_len)
@@ -8830,6 +9014,98 @@ static int run_materialize_object(int argc, char **argv)
                                       payload);
 }
 
+/*
+ * Managed allocation control commands (M1.1, wire ops 0x70-0x75). These
+ * are thin pass-throughs: no allocation semantics are re-implemented in
+ * the CLI, the daemon owns the state machine.
+ */
+static int run_allocate_object(int argc, char **argv)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--idempotency-key", "idempotency_key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--size-bytes", "size_bytes") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--capabilities", "capabilities") != 0 ||
+        append_optional_payload_field(payload, sizeof(payload), argc, argv, "--session-id", "session_id") != 0 ||
+        append_optional_payload_field(payload, sizeof(payload), argc, argv, "--alignment-bytes", "alignment_bytes") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT,
+                                      "allocate-object",
+                                      payload);
+}
+
+static int run_holder_object_command(int argc,
+                                     char **argv,
+                                     enum mem_service_wire_operation operation,
+                                     const char *label,
+                                     bool session_required)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--idempotency-key", "idempotency_key") != 0 ||
+        (session_required &&
+         append_required_payload_field(payload, sizeof(payload), argc, argv, "--session-id", "session_id") != 0) ||
+        append_optional_payload_field(payload, sizeof(payload), argc, argv, "--expected-generation", "expected_generation") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc, argv, operation, label, payload);
+}
+
+static int run_acquire_object(int argc, char **argv)
+{
+    return run_holder_object_command(argc,
+                                     argv,
+                                     MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT,
+                                     "acquire-object",
+                                     true);
+}
+
+static int run_release_object(int argc, char **argv)
+{
+    return run_holder_object_command(argc,
+                                     argv,
+                                     MEM_SERVICE_WIRE_OP_RELEASE_OBJECT,
+                                     "release-object",
+                                     true);
+}
+
+static int run_retire_object(int argc, char **argv)
+{
+    return run_holder_object_command(argc,
+                                     argv,
+                                     MEM_SERVICE_WIRE_OP_RETIRE_OBJECT,
+                                     "retire-object",
+                                     false);
+}
+
+static int run_inspect_allocation(int argc, char **argv)
+{
+    char payload[160] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--key", "key") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION,
+                                      "inspect-allocation",
+                                      payload);
+}
+
+static int run_allocation_stats(int argc, char **argv)
+{
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_ALLOCATION_STATS,
+                                      "allocation-stats",
+                                      NULL);
+}
+
 static int run_export_snapshot_page(int argc, char **argv)
 {
     char payload[160] = "";
@@ -10042,6 +10318,27 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "materialize-object") == 0) {
         return run_materialize_object(argc, argv);
+    }
+    if (strcmp(argv[1], "allocate-object") == 0) {
+        return run_allocate_object(argc, argv);
+    }
+    if (strcmp(argv[1], "acquire-object") == 0) {
+        return run_acquire_object(argc, argv);
+    }
+    if (strcmp(argv[1], "release-object") == 0) {
+        return run_release_object(argc, argv);
+    }
+    if (strcmp(argv[1], "retire-object") == 0) {
+        return run_retire_object(argc, argv);
+    }
+    if (strcmp(argv[1], "inspect-allocation") == 0) {
+        return run_inspect_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "allocation-stats") == 0) {
+        return run_allocation_stats(argc, argv);
+    }
+    if (strcmp(argv[1], "allocation-fixtures") == 0) {
+        return mem_service_run_allocation_fixture_check();
     }
     if (strcmp(argv[1], "register-prefix") == 0) {
         return run_register_prefix(argc, argv);

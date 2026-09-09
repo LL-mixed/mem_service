@@ -314,6 +314,7 @@ int mem_service_init(struct mem_service *svc,
     svc->durable_ready = durable_ready;
     svc->enforce_expected_context = true;
     svc->audit_next_sequence = 1U;
+    mem_service_managed_table_init(&svc->managed);
     if (!svc->control_plane_ready || !svc->provider_registry_ready ||
         !svc->durable_ready ||
         mem_service_provider_registry_init(&svc->providers) != 0) {

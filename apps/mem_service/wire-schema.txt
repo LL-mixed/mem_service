@@ -1,8 +1,8 @@
 mem_service_wire_schema_manifest_version=1
 wire_schema_version=1
 wire_payload_format=text-kv
-operation_count=24
-field_count=168
+operation_count=30
+field_count=186
 oneof_count=1
 oneof_field_count=2
 operation=health:1 schema_version=1 payload_format=text-kv fields=0 oneofs=0
@@ -200,3 +200,27 @@ field=query_training_artifact.expected_artifact_id type=string required=0
 field=query_training_artifact.expected_owner type=u32 required=0
 field=query_training_artifact.expected_version type=u64 required=0
 field=query_training_artifact.expected_checksum type=u64 required=0
+operation=allocate_object:112 schema_version=1 payload_format=text-kv fields=6 oneofs=0
+field=allocate_object.key type=string required=1
+field=allocate_object.idempotency_key type=string required=1
+field=allocate_object.session_id type=string required=0
+field=allocate_object.size_bytes type=u64 required=1
+field=allocate_object.alignment_bytes type=u64 required=0
+field=allocate_object.capabilities type=u64 required=1
+operation=acquire_object:113 schema_version=1 payload_format=text-kv fields=4 oneofs=0
+field=acquire_object.key type=string required=1
+field=acquire_object.idempotency_key type=string required=1
+field=acquire_object.session_id type=string required=1
+field=acquire_object.expected_generation type=u64 required=0
+operation=release_object:114 schema_version=1 payload_format=text-kv fields=4 oneofs=0
+field=release_object.key type=string required=1
+field=release_object.idempotency_key type=string required=1
+field=release_object.session_id type=string required=1
+field=release_object.expected_generation type=u64 required=0
+operation=retire_object:115 schema_version=1 payload_format=text-kv fields=3 oneofs=0
+field=retire_object.key type=string required=1
+field=retire_object.idempotency_key type=string required=1
+field=retire_object.expected_generation type=u64 required=0
+operation=inspect_allocation:116 schema_version=1 payload_format=text-kv fields=1 oneofs=0
+field=inspect_allocation.key type=string required=1
+operation=allocation_stats:117 schema_version=1 payload_format=text-kv fields=0 oneofs=0

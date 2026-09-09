@@ -38,4 +38,28 @@ int mem_service_send_unix_request(const char *connect_spec,
                                   size_t payload_out_len,
                                   enum mem_service_wire_status *status_out);
 
+/*
+ * Transport-neutral entry points. The connect spec selects the transport:
+ * NULL or "unix:<path>" (a bare path is treated as a legacy unix path)
+ * keeps the existing local behavior, "tcp:<ipv4>:<port>" connects to a
+ * daemon serving the wire protocol over TCP. Any other explicit scheme is
+ * rejected with a usage error; endpoints never fall back to another
+ * transport on failure.
+ */
+int mem_service_send_request_with_options(
+    const char *connect_spec,
+    const struct mem_service_wire_client_options *options,
+    enum mem_service_wire_operation operation,
+    const char *payload_in,
+    char *payload_out,
+    size_t payload_out_len,
+    enum mem_service_wire_status *status_out);
+
+int mem_service_send_request(const char *connect_spec,
+                             enum mem_service_wire_operation operation,
+                             const char *payload_in,
+                             char *payload_out,
+                             size_t payload_out_len,
+                             enum mem_service_wire_status *status_out);
+
 #endif

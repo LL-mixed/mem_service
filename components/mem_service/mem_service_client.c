@@ -208,7 +208,7 @@ static int mem_service_client_send(
     enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
     const struct mem_service_wire_client_options *options =
         client != NULL ? &client->wire_options : NULL;
-    int rc = mem_service_send_unix_request_with_options(
+    int rc = mem_service_send_request_with_options(
         mem_service_client_connect_spec(client),
         options,
         operation,
@@ -1228,4 +1228,338 @@ int mem_service_client_resolve_training_step(
         query,
         record_out,
         status_out);
+}
+
+/*
+ * Managed object allocation control (M1.1). The allocation view is parsed
+ * into its own struct; the 808-byte record layout above is untouched.
+ */
+
+static int mem_service_client_parse_allocation(
+    const char *payload,
+    struct mem_service_client_allocation *allocation_out)
+{
+    struct mem_service_wire_payload_view view;
+    uint32_t i;
+    uint32_t holder_count = 0;
+
+    if (allocation_out == NULL) {
+        return 0;
+    }
+    if (payload == NULL || payload[0] == '\0') {
+        return -1;
+    }
+    memset(allocation_out, 0, sizeof(*allocation_out));
+    view = mem_service_wire_payload_view_from_cstr(payload);
+    mem_service_client_payload_copy(&view,
+                                    "key",
+                                    allocation_out->key,
+                                    sizeof(allocation_out->key));
+    mem_service_client_payload_copy(&view,
+                                    "state",
+                                    allocation_out->state,
+                                    sizeof(allocation_out->state));
+    mem_service_client_payload_copy(&view,
+                                    "owner_session",
+                                    allocation_out->owner_session,
+                                    sizeof(allocation_out->owner_session));
+    allocation_out->generation =
+        mem_service_wire_payload_get_u64(&view, "generation", 0);
+    allocation_out->version =
+        mem_service_wire_payload_get_u64(&view, "version", 0);
+    allocation_out->size_bytes =
+        mem_service_wire_payload_get_u64(&view, "size_bytes", 0);
+    allocation_out->alignment_bytes =
+        mem_service_wire_payload_get_u64(&view, "alignment_bytes", 0);
+    allocation_out->capabilities =
+        mem_service_wire_payload_get_u64(&view, "capabilities", 0);
+    allocation_out->live_refs =
+        mem_service_wire_payload_get_u32(&view, "live_refs", 0);
+    allocation_out->provider_incarnation =
+        mem_service_wire_payload_get_u64(&view, "provider_incarnation", 0);
+    allocation_out->descriptor_len =
+        mem_service_wire_payload_get_u32(&view, "descriptor_len", 0);
+    for (i = 0; i < MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS; ++i) {
+        char field[48];
+
+        snprintf(field, sizeof(field), "holder.%u.session_id", i);
+        if (!mem_service_wire_payload_get_string(
+                &view,
+                field,
+                allocation_out->holders[holder_count].session_id,
+                sizeof(allocation_out->holders[holder_count].session_id))) {
+            break;
+        }
+        snprintf(field, sizeof(field), "holder.%u.generation", i);
+        allocation_out->holders[holder_count].generation =
+            mem_service_wire_payload_get_u64(&view, field, 0);
+        holder_count += 1U;
+    }
+    allocation_out->holder_count = holder_count;
+    return allocation_out->key[0] == '\0' ? -1 : 0;
+}
+
+static int mem_service_client_send_allocation(
+    const struct mem_service_client *client,
+    enum mem_service_wire_operation operation,
+    const char *payload,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN];
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    int rc;
+
+    memset(response, 0, sizeof(response));
+    rc = mem_service_client_send(client,
+                                 operation,
+                                 payload,
+                                 response,
+                                 sizeof(response),
+                                 &status);
+    if (status_out != NULL) {
+        *status_out = status;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    if (mem_service_client_parse_allocation(response, allocation_out) != 0) {
+        mem_service_client_set_status(status_out,
+                                      MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        return 1;
+    }
+    return 0;
+}
+
+static int mem_service_client_send_holder_op(
+    const struct mem_service_client *client,
+    enum mem_service_wire_operation operation,
+    const char *key,
+    const char *idempotency_key,
+    const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[512] = "";
+
+    if (mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "key",
+                                                  key) != 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "idempotency_key",
+                                                  idempotency_key) != 0 ||
+        (session_id != NULL &&
+         mem_service_client_append_required_string(payload,
+                                                   sizeof(payload),
+                                                   "session_id",
+                                                   session_id) != 0) ||
+        mem_service_client_append_optional_u64(payload,
+                                               sizeof(payload),
+                                               "expected_generation",
+                                               has_expected_generation,
+                                               expected_generation) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(client,
+                                              operation,
+                                              payload,
+                                              allocation_out,
+                                              status_out);
+}
+
+int mem_service_client_allocate_object(
+    const struct mem_service_client *client,
+    const struct mem_service_client_allocate *request,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[512] = "";
+
+    if (request == NULL || request->size_bytes == 0 ||
+        request->capabilities == 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "key",
+                                                  request->key) != 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "idempotency_key",
+                                                  request->idempotency_key) != 0 ||
+        mem_service_client_append_optional_string(payload,
+                                                  sizeof(payload),
+                                                  "session_id",
+                                                  request->session_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "size_bytes",
+                                            request->size_bytes) != 0 ||
+        mem_service_client_append_optional_u64(payload,
+                                               sizeof(payload),
+                                               "alignment_bytes",
+                                               request->alignment_bytes != 0,
+                                               request->alignment_bytes) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "capabilities",
+                                            request->capabilities) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(client,
+                                              MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT,
+                                              payload,
+                                              allocation_out,
+                                              status_out);
+}
+
+int mem_service_client_acquire_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    return mem_service_client_send_holder_op(client,
+                                             MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT,
+                                             key,
+                                             idempotency_key,
+                                             session_id,
+                                             has_expected_generation,
+                                             expected_generation,
+                                             allocation_out,
+                                             status_out);
+}
+
+int mem_service_client_release_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    return mem_service_client_send_holder_op(client,
+                                             MEM_SERVICE_WIRE_OP_RELEASE_OBJECT,
+                                             key,
+                                             idempotency_key,
+                                             session_id,
+                                             has_expected_generation,
+                                             expected_generation,
+                                             allocation_out,
+                                             status_out);
+}
+
+int mem_service_client_retire_object(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    return mem_service_client_send_holder_op(client,
+                                             MEM_SERVICE_WIRE_OP_RETIRE_OBJECT,
+                                             key,
+                                             idempotency_key,
+                                             NULL,
+                                             has_expected_generation,
+                                             expected_generation,
+                                             allocation_out,
+                                             status_out);
+}
+
+int mem_service_client_inspect_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[160] = "";
+
+    if (mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "key",
+                                                  key) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(client,
+                                              MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION,
+                                              payload,
+                                              allocation_out,
+                                              status_out);
+}
+
+int mem_service_client_allocation_stats(
+    const struct mem_service_client *client,
+    struct mem_service_client_allocation_stats *stats_out,
+    enum mem_service_wire_status *status_out)
+{
+    char response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN];
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    struct mem_service_wire_payload_view view;
+    int rc;
+
+    memset(response, 0, sizeof(response));
+    rc = mem_service_client_send(client,
+                                 MEM_SERVICE_WIRE_OP_ALLOCATION_STATS,
+                                 "",
+                                 response,
+                                 sizeof(response),
+                                 &status);
+    if (status_out != NULL) {
+        *status_out = status;
+    }
+    if (rc != 0 || stats_out == NULL) {
+        return rc;
+    }
+    view = mem_service_wire_payload_view_from_cstr(response);
+    memset(stats_out, 0, sizeof(*stats_out));
+    stats_out->backing_registered =
+        mem_service_wire_payload_get_u64(&view, "backing_registered", 0);
+    stats_out->live_objects =
+        mem_service_wire_payload_get_u64(&view, "live_objects", 0);
+    stats_out->backing_allocated_bytes =
+        mem_service_wire_payload_get_u64(&view, "backing_allocated_bytes", 0);
+    stats_out->address_reserved_bytes =
+        mem_service_wire_payload_get_u64(&view, "address_reserved_bytes", 0);
+    stats_out->export_mappings =
+        mem_service_wire_payload_get_u64(&view, "export_mappings", 0);
+    stats_out->import_mappings =
+        mem_service_wire_payload_get_u64(&view, "import_mappings", 0);
+    stats_out->live_refs =
+        mem_service_wire_payload_get_u64(&view, "live_refs", 0);
+    stats_out->in_flight =
+        mem_service_wire_payload_get_u64(&view, "in_flight", 0);
+    stats_out->quarantined_objects =
+        mem_service_wire_payload_get_u64(&view, "quarantined_objects", 0);
+    stats_out->quarantined_bytes =
+        mem_service_wire_payload_get_u64(&view, "quarantined_bytes", 0);
+    stats_out->allocate_ok_count =
+        mem_service_wire_payload_get_u64(&view, "allocate_ok_count", 0);
+    stats_out->acquire_ok_count =
+        mem_service_wire_payload_get_u64(&view, "acquire_ok_count", 0);
+    stats_out->release_ok_count =
+        mem_service_wire_payload_get_u64(&view, "release_ok_count", 0);
+    stats_out->retire_ok_count =
+        mem_service_wire_payload_get_u64(&view, "retire_ok_count", 0);
+    stats_out->allocate_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "allocate_rejected_count", 0);
+    stats_out->acquire_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "acquire_rejected_count", 0);
+    stats_out->release_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "release_rejected_count", 0);
+    stats_out->retire_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "retire_rejected_count", 0);
+    stats_out->quarantine_events =
+        mem_service_wire_payload_get_u64(&view, "quarantine_events", 0);
+    return 0;
 }
