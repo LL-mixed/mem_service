@@ -6918,13 +6918,18 @@ static int mem_service_allocation_stub_release(void *context,
 }
 
 /*
- * Managed allocation state machine fixture (M1.1). Exercises the core
- * against a stub backing: fail-closed allocate with zero backing,
+ * Managed allocation state machine fixture (M1.1+M1.2). Exercises the
+ * core against a stub backing: fail-closed allocate with zero backing,
  * idempotent replay, key conflict, holder lifecycle, stale generation,
  * retire transitions, re-allocation with a fresh generation, quarantine
- * on unconfirmed release and the stats shape. The stub is the only
- * place a backing is faked; production daemons register no backing in
- * M1.1 and stay fail-closed.
+ * on unconfirmed release and the stats shape. The M1.2 section drives
+ * the provider-backed lifecycle with no in-process backing registered:
+ * a home-bound allocate parks in ALLOCATING, the bound provider's
+ * publish activates it, the drained release waits in RETIRING for the
+ * provider's reclaim confirmation, and confirmed/unconfirmed reclaims
+ * retire or quarantine the identity. The stub is the only place a
+ * backing is faked; production daemons register no backing in M1.1 and
+ * stay fail-closed.
  */
 int mem_service_run_allocation_fixture_check(void)
 {
@@ -6932,6 +6937,8 @@ int mem_service_run_allocation_fixture_check(void)
         mem_service_allocation_stub_reserve,
         mem_service_allocation_stub_release,
     };
+    static const uint8_t pb_descriptor[] = {0xdeU, 0xadU, 0xbeU, 0xefU};
+    static const uint8_t pb_descriptor_conflict[] = {0xcaU, 0xfeU, 0xbaU, 0xbeU};
     struct mem_service_managed_table table;
     struct mem_service_allocation_stub_backing stub;
     struct mem_service_managed_request request;
@@ -7127,13 +7134,319 @@ int mem_service_run_allocation_fixture_check(void)
                 "mem_service allocation-fixtures: quarantined key reused\n");
         failures -= 1;
     }
+
+    /* 15. An in-process object has no provider binding: a publish names
+     * a provider the object was never bound to and is rejected. */
+    if (mem_service_managed_publish(&table,
+                                    "obj-q",
+                                    "node-a",
+                                    7U,
+                                    1U,
+                                    pb_descriptor,
+                                    sizeof(pb_descriptor),
+                                    0x1000U,
+                                    0x2000U,
+                                    &view) !=
+        MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "in-process object accepted provider publish\n");
+        failures -= 1;
+    }
+
+    /*
+     * 16-26. Provider-backed lifecycle (M1.2): no in-process backing is
+     * registered on this table; the home-bound allocate parks in
+     * ALLOCATING, the bound provider's publish activates the object,
+     * and the drained release waits in RETIRING for the provider's
+     * reclaim confirmation.
+     */
+    mem_service_managed_table_init(&table);
+    memset(&request, 0, sizeof(request));
+    request.key = "obj-pb";
+    request.idempotency_key = "alloc-pb";
+    request.session_id = "session-a";
+    request.size_bytes = 4096U;
+    request.capabilities = MEM_SERVICE_MANAGED_CAP_MAP;
+    request.home_node_id = "node-a";
+    request.home_incarnation = 7U;
+    /* 16. Bound allocate parks in ALLOCATING with the binding recorded;
+     * zero in-process backing stays usable for the provider path. */
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_ALLOCATING ||
+        strcmp(view.home_node_id, "node-a") != 0 ||
+        view.provider_incarnation != 7U || view.generation != 1U ||
+        view.provider_backed || view.descriptor_len != 0U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "bound allocate view mismatch\n");
+        failures -= 1;
+    }
+    mem_service_managed_stats_snapshot(&table, &stats);
+    if (stats.backing_registered != 0U || stats.in_flight != 1U ||
+        stats.live_objects != 1U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "allocating stats mismatch\n");
+        failures -= 1;
+    }
+    /* 17. Publish validation: malformed request, unknown key, stale
+     * generation and foreign provider identities are all rejected. */
+    if (mem_service_managed_publish(&table, "obj-pb", "node-a", 0U, 1U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "malformed publish accepted\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_publish(&table, "obj-missing", "node-a", 7U, 1U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_NOT_FOUND) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "publish on unknown key not not_found\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_publish(&table, "obj-pb", "node-a", 7U, 99U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "publish with stale generation accepted\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_publish(&table, "obj-pb", "node-b", 7U, 1U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "publish from foreign node accepted\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_publish(&table, "obj-pb", "node-a", 8U, 1U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "publish from stale incarnation accepted\n");
+        failures -= 1;
+    }
+    /* 18. The bound provider's publish activates the object; the
+     * descriptor and address range are stored verbatim. */
+    if (mem_service_managed_publish(&table, "obj-pb", "node-a", 7U, 1U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_ACTIVE ||
+        !view.provider_backed ||
+        view.descriptor_len != sizeof(pb_descriptor) ||
+        memcmp(view.descriptor, pb_descriptor, sizeof(pb_descriptor)) != 0 ||
+        view.address != 0x1000U || view.address_len != 0x2000U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "publish activation mismatch\n");
+        failures -= 1;
+    }
+    /* 19. Replaying the identical publish is idempotent; conflicting
+     * content on the ACTIVE object is a state conflict. */
+    if (mem_service_managed_publish(&table, "obj-pb", "node-a", 7U, 1U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_OK) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "publish replay not idempotent\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_publish(&table, "obj-pb", "node-a", 7U, 1U,
+                                    pb_descriptor_conflict,
+                                    sizeof(pb_descriptor_conflict),
+                                    0x1000U, 0x2000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "conflicting publish accepted\n");
+        failures -= 1;
+    }
+    /* 20. Reclaim before the drain is a state conflict: on the ACTIVE
+     * object, and again in RETIRING while a holder is live. */
+    if (mem_service_managed_reclaim(&table, "obj-pb", "node-a", 7U, 1U,
+                                    true, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "reclaim on active accepted\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_acquire(&table, "obj-pb", "session-h", false, 0,
+                                    &view) != MEM_SERVICE_MANAGED_RESULT_OK ||
+        mem_service_managed_retire(&table, "obj-pb", true, 1U, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRING) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "provider-backed retire transition mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_reclaim(&table, "obj-pb", "node-a", 7U, 1U,
+                                    true, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "reclaim with live holder accepted\n");
+        failures -= 1;
+    }
+    /* 21. Reclaim validation: unknown key, stale generation and foreign
+     * provider identities are all rejected. */
+    if (mem_service_managed_reclaim(&table, "obj-missing", "node-a", 7U, 1U,
+                                    true, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_NOT_FOUND) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "reclaim on unknown key not not_found\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_reclaim(&table, "obj-pb", "node-a", 7U, 99U,
+                                    true, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "reclaim with stale generation accepted\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_reclaim(&table, "obj-pb", "node-b", 7U, 1U,
+                                    true, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "reclaim from foreign node accepted\n");
+        failures -= 1;
+    }
+    /* 22. The last release of a provider-backed object stays in
+     * RETIRING: no in-process release is attempted while the provider's
+     * reclaim confirmation is outstanding. */
+    if (mem_service_managed_release(&table, "obj-pb", "session-h", false, 0,
+                                    &view) != MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRING) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "provider-backed release completed in-process\n");
+        failures -= 1;
+    }
+    /* 23. A confirmed reclaim retires the identity and clears the
+     * provider-published fields; replaying against the terminal state
+     * is idempotent. */
+    if (mem_service_managed_reclaim(&table, "obj-pb", "node-a", 7U, 1U,
+                                    true, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED ||
+        view.provider_backed || view.descriptor_len != 0U ||
+        view.address != 0U || view.address_len != 0U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "confirmed reclaim mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_reclaim(&table, "obj-pb", "node-a", 7U, 1U,
+                                    true, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "terminal reclaim replay not idempotent\n");
+        failures -= 1;
+    }
+    /* 24. An unconfirmed reclaim quarantines the identity; replaying
+     * against QUARANTINED is idempotent. */
+    request.key = "obj-pb2";
+    request.idempotency_key = "alloc-pb2";
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        mem_service_managed_publish(&table, "obj-pb2", "node-a", 7U, 2U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x4000U, 0x1000U, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        mem_service_managed_retire(&table, "obj-pb2", false, 0, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRING ||
+        mem_service_managed_reclaim(&table, "obj-pb2", "node-a", 7U, 2U,
+                                    false, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "unconfirmed reclaim quarantine mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_reclaim(&table, "obj-pb2", "node-a", 7U, 2U,
+                                    false, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "quarantined reclaim replay not idempotent\n");
+        failures -= 1;
+    }
+    /* 25. Retire of a still-ALLOCATING intent abandons it directly; a
+     * late publish for the abandoned identity is a state conflict. */
+    request.key = "obj-pb3";
+    request.idempotency_key = "alloc-pb3";
+    if (mem_service_managed_allocate(&table, &request, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_ALLOCATING ||
+        mem_service_managed_retire(&table, "obj-pb3", false, 0, &view) !=
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "allocating abandon mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_managed_publish(&table, "obj-pb3", "node-a", 7U, 3U,
+                                    pb_descriptor, sizeof(pb_descriptor),
+                                    0x8000U, 0x1000U, &view) !=
+        MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: "
+                "late publish on abandoned identity accepted\n");
+        failures -= 1;
+    }
+    /* 26. Stats shape after the provider-backed lifecycle. */
+    mem_service_managed_stats_snapshot(&table, &stats);
+    if (stats.allocate_ok_count != 3U || stats.allocate_rejected_count != 0U ||
+        stats.acquire_ok_count != 1U || stats.release_ok_count != 1U ||
+        stats.retire_ok_count != 3U || stats.retire_rejected_count != 0U ||
+        stats.publish_ok_count != 3U || stats.publish_rejected_count != 7U ||
+        stats.reclaim_ok_count != 4U || stats.reclaim_rejected_count != 5U ||
+        stats.quarantine_events != 1U || stats.quarantined_objects != 1U ||
+        stats.quarantined_bytes != 4096U || stats.live_objects != 0U) {
+        fprintf(stderr,
+                "mem_service allocation-fixtures: provider-backed stats "
+                "mismatch pub_ok=%llu pub_rej=%llu rec_ok=%llu rec_rej=%llu "
+                "quar=%llu quar_obj=%llu\n",
+                (unsigned long long)stats.publish_ok_count,
+                (unsigned long long)stats.publish_rejected_count,
+                (unsigned long long)stats.reclaim_ok_count,
+                (unsigned long long)stats.reclaim_rejected_count,
+                (unsigned long long)stats.quarantine_events,
+                (unsigned long long)stats.quarantined_objects);
+        failures -= 1;
+    }
     if (failures != 0) {
         return 1;
     }
     printf("mem_service allocation-fixtures: status=ok "
            "states=allocating,active,retiring,retired,quarantined "
            "idempotent_replay=ok key_conflict=ok stale_generation=ok "
-           "quarantine=ok backing=stub checks=14\n");
+           "quarantine=ok backing=stub "
+           "provider_publish=ok provider_reclaim=ok checks=26\n");
     return 0;
 }
 
