@@ -10449,6 +10449,8 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              "provider_refresh_count=%" PRIu64 "\n"
              "provider_status_count=%" PRIu64 "\n"
              "provider_deregister_count=%" PRIu64 "\n"
+             "publish_allocation_count=%" PRIu64 "\n"
+             "reclaim_allocation_count=%" PRIu64 "\n"
              "artifact_query_hit_count=%" PRIu64 "\n"
              "artifact_query_miss_count=%" PRIu64 "\n"
              "idempotency_replay_count=%" PRIu64 "\n"
@@ -10515,6 +10517,8 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              m->provider_refresh_count,
              m->provider_status_count,
              m->provider_deregister_count,
+             m->publish_allocation_count,
+             m->reclaim_allocation_count,
              m->artifact_query_hit_count,
              m->artifact_query_miss_count,
              m->idempotency_replay_count,
@@ -10971,6 +10975,7 @@ static enum mem_service_wire_status mem_service_managed_result_to_wire(
     case MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER:
         return MEM_SERVICE_WIRE_STATUS_NOT_FOUND;
     case MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT:
+    case MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH:
         return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
     case MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION:
     case MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT:
@@ -10979,9 +10984,28 @@ static enum mem_service_wire_status mem_service_managed_result_to_wire(
         return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
     case MEM_SERVICE_MANAGED_RESULT_BACKING_UNAVAILABLE:
     case MEM_SERVICE_MANAGED_RESULT_BACKING_ERROR:
+    case MEM_SERVICE_MANAGED_RESULT_PROVIDER_UNAVAILABLE:
     default:
         return MEM_SERVICE_WIRE_STATUS_INTERNAL;
     }
+}
+
+static void mem_service_managed_hex_encode(const uint8_t *data,
+                                           uint32_t len,
+                                           char *out,
+                                           size_t out_len)
+{
+    static const char digits[] = "0123456789abcdef";
+    uint32_t i;
+
+    if (out_len == 0) {
+        return;
+    }
+    for (i = 0; i < len && (size_t)(2U * i + 2U) < out_len; ++i) {
+        out[2U * i] = digits[(data[i] >> 4U) & 0xfU];
+        out[2U * i + 1U] = digits[data[i] & 0xfU];
+    }
+    out[(size_t)(2U * i) < out_len ? (size_t)(2U * i) : out_len - 1U] = '\0';
 }
 
 static void mem_service_managed_render_view(
@@ -10989,6 +11013,12 @@ static void mem_service_managed_render_view(
     char *response,
     size_t response_len)
 {
+    char descriptor_hex[2U * MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN + 1U];
+
+    mem_service_managed_hex_encode(view->descriptor,
+                                   view->descriptor_len,
+                                   descriptor_hex,
+                                   sizeof(descriptor_hex));
     snprintf(response,
              response_len,
              "status=ok\n"
@@ -11000,8 +11030,13 @@ static void mem_service_managed_render_view(
              "alignment_bytes=%" PRIu64 "\n"
              "capabilities=%" PRIu64 "\n"
              "live_refs=%u\n"
+             "home_node=%s\n"
              "provider_incarnation=%" PRIu64 "\n"
-             "descriptor_len=%u\n",
+             "provider_backed=%u\n"
+             "address=%" PRIu64 "\n"
+             "address_len=%" PRIu64 "\n"
+             "descriptor_len=%u\n"
+             "descriptor_hex=%s\n",
              view->key,
              mem_service_managed_state_name(view->state),
              view->generation,
@@ -11010,8 +11045,13 @@ static void mem_service_managed_render_view(
              view->alignment_bytes,
              view->capabilities,
              view->holder_count,
+             view->home_node_id[0] != '\0' ? view->home_node_id : "-",
              view->provider_incarnation,
-             view->descriptor_len);
+             view->provider_backed ? 1U : 0U,
+             view->address,
+             view->address_len,
+             view->descriptor_len,
+             descriptor_hex);
 }
 
 static enum mem_service_wire_status mem_service_managed_finish(
@@ -11120,6 +11160,39 @@ static enum mem_service_wire_status mem_service_allocate_object(
     request.alignment_bytes =
         mem_service_payload_get_u64(payload, "alignment_bytes", 0);
     request.capabilities = mem_service_payload_get_u64(payload, "capabilities", 0);
+    if (!svc->managed.backing_registered &&
+        svc->allocation_home_node_id[0] != '\0') {
+        /*
+         * Provider-backed path: bind the allocation to the configured
+         * home provider's active registration. An idempotent replay of
+         * an existing live allocation bypasses the directory lookup so
+         * a transient provider loss does not rewrite history.
+         */
+        struct mem_service_managed_view existing;
+        uint64_t home_incarnation = 0;
+        bool replay =
+            mem_service_managed_inspect(&svc->managed, key, &existing) ==
+                MEM_SERVICE_MANAGED_RESULT_OK &&
+            existing.state != MEM_SERVICE_MANAGED_STATE_RETIRED &&
+            strcmp(existing.key, key) == 0;
+
+        if (!replay) {
+            if (!mem_service_provider_directory_lookup_active(
+                    &svc->provider_directory,
+                    svc->allocation_home_node_id,
+                    mem_service_monotonic_ms(),
+                    &home_incarnation)) {
+                return mem_service_managed_finish(
+                    MEM_SERVICE_MANAGED_RESULT_PROVIDER_UNAVAILABLE,
+                    NULL,
+                    key,
+                    response,
+                    response_len);
+            }
+            request.home_node_id = svc->allocation_home_node_id;
+            request.home_incarnation = home_incarnation;
+        }
+    }
     result = mem_service_managed_allocate(&svc->managed, &request, &view);
     return mem_service_managed_finish(result, &view, key, response, response_len);
 }
@@ -11318,6 +11391,10 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              "acquire_rejected_count=%" PRIu64 "\n"
              "release_rejected_count=%" PRIu64 "\n"
              "retire_rejected_count=%" PRIu64 "\n"
+             "publish_ok_count=%" PRIu64 "\n"
+             "publish_rejected_count=%" PRIu64 "\n"
+             "reclaim_ok_count=%" PRIu64 "\n"
+             "reclaim_rejected_count=%" PRIu64 "\n"
              "quarantine_events=%" PRIu64 "\n",
              stats.backing_registered,
              stats.live_objects,
@@ -11337,6 +11414,10 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              stats.acquire_rejected_count,
              stats.release_rejected_count,
              stats.retire_rejected_count,
+             stats.publish_ok_count,
+             stats.publish_rejected_count,
+             stats.reclaim_ok_count,
+             stats.reclaim_rejected_count,
              stats.quarantine_events);
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
@@ -11654,6 +11735,206 @@ static enum mem_service_wire_status mem_service_provider_status(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+/*
+ * Provider-backed allocation lifecycle (0x7a segment). The publishing
+ * or reclaiming (node_id, incarnation) must hold an active directory
+ * registration whose incarnation matches the caller; the managed core
+ * additionally checks the per-allocation binding recorded at allocate
+ * time. Payloads carry control metadata only: descriptor bytes are
+ * opaque and payload never crosses these operations.
+ */
+static enum mem_service_wire_status mem_service_provider_caller_check(
+    struct mem_service *svc,
+    const char *node_id,
+    uint64_t incarnation,
+    char *response,
+    size_t response_len)
+{
+    uint64_t active_incarnation = 0;
+
+    if (!mem_service_provider_directory_lookup_active(
+            &svc->provider_directory,
+            node_id,
+            mem_service_monotonic_ms(),
+            &active_incarnation)) {
+        snprintf(response,
+                 response_len,
+                 "status=internal\nreason=provider_unavailable\nnode_id=%s\n",
+                 node_id);
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    if (active_incarnation != incarnation) {
+        snprintf(response,
+                 response_len,
+                 "status=version_conflict\nreason=provider_mismatch\nnode_id=%s\n",
+                 node_id);
+        return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+    }
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static int mem_service_managed_hex_value(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static int mem_service_managed_hex_decode(const char *hex,
+                                          uint8_t *out,
+                                          uint32_t out_capacity,
+                                          uint32_t *out_len)
+{
+    uint32_t len = 0;
+
+    if (hex == NULL || out == NULL || out_len == NULL) {
+        return -1;
+    }
+    while (hex[2U * len] != '\0') {
+        int hi;
+        int lo;
+
+        if (hex[2U * len + 1U] == '\0') {
+            return -1;
+        }
+        hi = mem_service_managed_hex_value(hex[2U * len]);
+        lo = mem_service_managed_hex_value(hex[2U * len + 1U]);
+        if (hi < 0 || lo < 0 || len >= out_capacity) {
+            return -1;
+        }
+        out[len] = (uint8_t)((hi << 4) | lo);
+        len += 1U;
+    }
+    if (len == 0) {
+        return -1;
+    }
+    *out_len = len;
+    return 0;
+}
+
+static enum mem_service_wire_status mem_service_publish_allocation(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    char descriptor_hex[2U * MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN + 1U];
+    uint8_t descriptor[MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN];
+    uint32_t descriptor_len = 0;
+    uint64_t incarnation;
+    uint64_t generation;
+    uint64_t address;
+    uint64_t address_len;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+    enum mem_service_wire_status caller_status;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload,
+                                         "node_id",
+                                         node_id,
+                                         sizeof(node_id));
+    incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
+    generation = mem_service_payload_get_u64(payload, "generation", 0);
+    address = mem_service_payload_get_u64(payload, "address", 0);
+    address_len = mem_service_payload_get_u64(payload, "address_len", 0);
+    (void)mem_service_payload_get_string(payload,
+                                         "descriptor_hex",
+                                         descriptor_hex,
+                                         sizeof(descriptor_hex));
+    if (mem_service_managed_hex_decode(descriptor_hex,
+                                       descriptor,
+                                       sizeof(descriptor),
+                                       &descriptor_len) != 0) {
+        snprintf(response,
+                 response_len,
+                 "status=invalid_session\nreason=invalid_request\n"
+                 "operation=publish_allocation\nfield=descriptor_hex\n");
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    caller_status = mem_service_provider_caller_check(svc,
+                                                      node_id,
+                                                      incarnation,
+                                                      response,
+                                                      response_len);
+    if (caller_status != MEM_SERVICE_WIRE_STATUS_OK) {
+        return caller_status;
+    }
+    result = mem_service_managed_publish(&svc->managed,
+                                         key,
+                                         node_id,
+                                         incarnation,
+                                         generation,
+                                         descriptor,
+                                         descriptor_len,
+                                         address,
+                                         address_len,
+                                         &view);
+    return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
+static enum mem_service_wire_status mem_service_reclaim_allocation(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    uint64_t incarnation;
+    uint64_t generation;
+    uint64_t confirmed;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+    enum mem_service_wire_status caller_status;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload,
+                                         "node_id",
+                                         node_id,
+                                         sizeof(node_id));
+    incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
+    generation = mem_service_payload_get_u64(payload, "generation", 0);
+    confirmed = mem_service_payload_get_u64(payload, "confirmed", 0);
+    caller_status = mem_service_provider_caller_check(svc,
+                                                      node_id,
+                                                      incarnation,
+                                                      response,
+                                                      response_len);
+    if (caller_status != MEM_SERVICE_WIRE_STATUS_OK) {
+        return caller_status;
+    }
+    result = mem_service_managed_reclaim(&svc->managed,
+                                         key,
+                                         node_id,
+                                         incarnation,
+                                         generation,
+                                         confirmed != 0,
+                                         &view);
+    return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
 static enum mem_service_wire_status mem_service_dispatch_operation(
     struct mem_service *svc,
     enum mem_service_wire_operation operation,
@@ -11784,6 +12065,10 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
         return mem_service_provider_status(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
         return mem_service_provider_deregister(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION:
+        return mem_service_publish_allocation(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
+        return mem_service_reclaim_allocation(svc, payload, response, response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -12013,6 +12298,12 @@ static void mem_service_record_operation_metrics(
         break;
     case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
         metrics->provider_deregister_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION:
+        metrics->publish_allocation_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
+        metrics->reclaim_allocation_count += 1U;
         break;
     default:
         break;
@@ -13903,6 +14194,8 @@ static bool mem_service_network_operation_allowed(
     case MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH:
     case MEM_SERVICE_WIRE_OP_PROVIDER_STATUS:
     case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
+    case MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION:
+    case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
         return true;
     default:
         return false;
@@ -14516,7 +14809,8 @@ static int mem_service_daemon_bootstrap(
     const char *storage_root,
     const struct mem_service_daemon_limits *limits,
     const struct mem_service_provider_registry *providers,
-    const struct mem_service_provider_directory_config *provider_directory)
+    const struct mem_service_provider_directory_config *provider_directory,
+    const char *allocation_home_provider)
 {
     if (mem_service_init(svc, true, true, true) != 0) {
         fprintf(stderr, "mem_service serve: init failed\n");
@@ -14528,6 +14822,19 @@ static int mem_service_daemon_bootstrap(
         fprintf(stderr,
                 "mem_service serve: invalid provider directory config\n");
         return 1;
+    }
+    if (allocation_home_provider != NULL &&
+        allocation_home_provider[0] != '\0') {
+        if (strlen(allocation_home_provider) >=
+            sizeof(svc->allocation_home_node_id)) {
+            fprintf(stderr,
+                    "mem_service serve: invalid home provider node id\n");
+            return 1;
+        }
+        snprintf(svc->allocation_home_node_id,
+                 sizeof(svc->allocation_home_node_id),
+                 "%s",
+                 allocation_home_provider);
     }
     if (providers != NULL) {
         if (!providers->initialized ||
@@ -14658,6 +14965,8 @@ int mem_service_run_unix_daemon_with_runtime(
         runtime != NULL ? runtime->providers : NULL;
     const struct mem_service_provider_directory_config *provider_directory =
         runtime != NULL ? runtime->provider_directory : NULL;
+    const char *allocation_home_provider =
+        runtime != NULL ? runtime->allocation_home_provider : NULL;
     int server_fd;
     int metrics_fd = -1;
     int rc = 1;
@@ -14674,7 +14983,8 @@ int mem_service_run_unix_daemon_with_runtime(
                                      storage_root,
                                      limits,
                                      providers,
-                                     provider_directory) != 0) {
+                                     provider_directory,
+                                     allocation_home_provider) != 0) {
         return 1;
     }
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -14904,7 +15214,8 @@ int mem_service_run_daemon_with_runtime(
                                      storage_root,
                                      limits,
                                      providers,
-                                     provider_directory) != 0) {
+                                     provider_directory,
+                                     runtime->allocation_home_provider) != 0) {
         return 1;
     }
     server_fd = socket(AF_INET, SOCK_STREAM, 0);

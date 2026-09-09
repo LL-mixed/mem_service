@@ -114,6 +114,13 @@ static void mem_service_managed_fill_view(
     view_out->holder_count = entry->holder_count;
     memcpy(view_out->holders, entry->holders, sizeof(view_out->holders));
     view_out->provider_incarnation = entry->provider_incarnation;
+    snprintf(view_out->home_node_id,
+             sizeof(view_out->home_node_id),
+             "%s",
+             entry->home_node_id);
+    view_out->provider_backed = entry->provider_backed;
+    view_out->address = entry->address;
+    view_out->address_len = entry->address_len;
     view_out->descriptor_len = entry->descriptor_len;
     memcpy(view_out->descriptor, entry->descriptor, sizeof(view_out->descriptor));
 }
@@ -136,12 +143,17 @@ static int mem_service_managed_find_holder(
  * Drive the backing release for a draining object whose last reference is
  * gone. A confirmed release retires the identity; an unconfirmed release
  * quarantines the object so its resources are isolated and counted instead
- * of being silently reused.
+ * of being silently reused. Provider-backed objects have no in-process
+ * release path: they wait in RETIRING for the bound home provider's
+ * reclaim confirmation (mem_service_managed_reclaim).
  */
 static enum mem_service_managed_state mem_service_managed_complete_retire(
     struct mem_service_managed_table *table,
     struct mem_service_managed_allocation *entry)
 {
+    if (entry->provider_backed) {
+        return entry->state;
+    }
     if (!table->backing_registered || table->backing_ops == NULL ||
         table->backing_ops->release == NULL ||
         table->backing_ops->release(table->backing_context,
@@ -198,6 +210,10 @@ const char *mem_service_managed_result_name(enum mem_service_managed_result resu
         return "not_holder";
     case MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT:
         return "state_conflict";
+    case MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH:
+        return "provider_mismatch";
+    case MEM_SERVICE_MANAGED_RESULT_PROVIDER_UNAVAILABLE:
+        return "provider_unavailable";
     default:
         return "unknown";
     }
@@ -257,6 +273,11 @@ enum mem_service_managed_result mem_service_managed_allocate(
          !mem_service_managed_string_valid(
              request->session_id,
              MEM_SERVICE_MANAGED_SESSION_ID_LEN)) ||
+        (request->home_node_id != NULL &&
+         (!mem_service_managed_string_valid(
+              request->home_node_id,
+              MEM_SERVICE_MANAGED_NODE_ID_LEN) ||
+          request->home_incarnation == 0)) ||
         request->size_bytes == 0 ||
         !mem_service_managed_alignment_valid(request->alignment_bytes) ||
         !mem_service_managed_capabilities_valid(request->capabilities)) {
@@ -282,7 +303,7 @@ enum mem_service_managed_result mem_service_managed_allocate(
         return MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT;
     }
 
-    if (!table->backing_registered) {
+    if (request->home_node_id == NULL && !table->backing_registered) {
         table->allocate_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_BACKING_UNAVAILABLE;
     }
@@ -313,6 +334,25 @@ enum mem_service_managed_result mem_service_managed_allocate(
     entry->size_bytes = request->size_bytes;
     entry->alignment_bytes = request->alignment_bytes;
     entry->capabilities = request->capabilities;
+
+    if (request->home_node_id != NULL) {
+        /*
+         * Provider-backed path: bind the intent to the home provider
+         * boot and wait in ALLOCATING for its publish; the provider
+         * reserves backing and address out of band.
+         */
+        snprintf(entry->home_node_id,
+                 sizeof(entry->home_node_id),
+                 "%s",
+                 request->home_node_id);
+        entry->provider_incarnation = request->home_incarnation;
+        entry->generation = table->next_generation;
+        table->next_generation += 1U;
+        entry->version = 1U;
+        table->allocate_ok_count += 1U;
+        mem_service_managed_fill_view(entry, view_out);
+        return MEM_SERVICE_MANAGED_RESULT_OK;
+    }
 
     memset(descriptor, 0, sizeof(descriptor));
     if (table->backing_ops->reserve(table->backing_context,
@@ -484,12 +524,156 @@ enum mem_service_managed_result mem_service_managed_retire(
         mem_service_managed_fill_view(entry, view_out);
         return MEM_SERVICE_MANAGED_RESULT_OK;
     case MEM_SERVICE_MANAGED_STATE_ALLOCATING:
+        /*
+         * Abandon a provider-bound intent whose publish never arrived:
+         * no backing was reserved, so the identity retires directly.
+         */
+        entry->state = MEM_SERVICE_MANAGED_STATE_RETIRED;
+        table->retire_ok_count += 1U;
+        mem_service_managed_fill_view(entry, view_out);
+        return MEM_SERVICE_MANAGED_RESULT_OK;
     case MEM_SERVICE_MANAGED_STATE_RETIRED:
     case MEM_SERVICE_MANAGED_STATE_QUARANTINED:
     default:
         table->retire_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
+}
+
+enum mem_service_managed_result mem_service_managed_publish(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    const uint8_t *descriptor,
+    uint32_t descriptor_len,
+    uint64_t address,
+    uint64_t address_len,
+    struct mem_service_managed_view *view_out)
+{
+    struct mem_service_managed_allocation *entry;
+
+    if (table == NULL ||
+        !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN) ||
+        !mem_service_managed_string_valid(node_id,
+                                          MEM_SERVICE_MANAGED_NODE_ID_LEN) ||
+        incarnation == 0 || descriptor == NULL || descriptor_len == 0 ||
+        descriptor_len > MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN ||
+        address_len == 0) {
+        if (table != NULL) {
+            table->publish_rejected_count += 1U;
+        }
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    entry = mem_service_managed_find(table, key);
+    if (entry == NULL) {
+        table->publish_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    }
+    if (generation != entry->generation) {
+        table->publish_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    }
+    if (entry->home_node_id[0] == '\0' ||
+        strcmp(entry->home_node_id, node_id) != 0 ||
+        entry->provider_incarnation != incarnation) {
+        table->publish_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
+    }
+    if (entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE) {
+        /* Idempotent replay of an identical publish. */
+        if (entry->provider_backed &&
+            entry->descriptor_len == descriptor_len &&
+            memcmp(entry->descriptor, descriptor, descriptor_len) == 0 &&
+            entry->address == address &&
+            entry->address_len == address_len) {
+            table->publish_ok_count += 1U;
+            mem_service_managed_fill_view(entry, view_out);
+            return MEM_SERVICE_MANAGED_RESULT_OK;
+        }
+        table->publish_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    }
+    if (entry->state != MEM_SERVICE_MANAGED_STATE_ALLOCATING) {
+        table->publish_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    }
+    memcpy(entry->descriptor, descriptor, descriptor_len);
+    entry->descriptor_len = descriptor_len;
+    entry->address = address;
+    entry->address_len = address_len;
+    entry->provider_backed = true;
+    entry->state = MEM_SERVICE_MANAGED_STATE_ACTIVE;
+    table->publish_ok_count += 1U;
+    mem_service_managed_fill_view(entry, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_reclaim(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    bool confirmed,
+    struct mem_service_managed_view *view_out)
+{
+    struct mem_service_managed_allocation *entry;
+
+    if (table == NULL ||
+        !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN) ||
+        !mem_service_managed_string_valid(node_id,
+                                          MEM_SERVICE_MANAGED_NODE_ID_LEN) ||
+        incarnation == 0) {
+        if (table != NULL) {
+            table->reclaim_rejected_count += 1U;
+        }
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    entry = mem_service_managed_find(table, key);
+    if (entry == NULL) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    }
+    if (generation != entry->generation) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    }
+    if (entry->home_node_id[0] == '\0' ||
+        strcmp(entry->home_node_id, node_id) != 0 ||
+        entry->provider_incarnation != incarnation) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
+    }
+    if (entry->state == MEM_SERVICE_MANAGED_STATE_RETIRED ||
+        entry->state == MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+        /* Idempotent replay against the terminal state. */
+        table->reclaim_ok_count += 1U;
+        mem_service_managed_fill_view(entry, view_out);
+        return MEM_SERVICE_MANAGED_RESULT_OK;
+    }
+    if (entry->state != MEM_SERVICE_MANAGED_STATE_RETIRING ||
+        entry->holder_count != 0 || !entry->provider_backed) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    }
+    if (!confirmed) {
+        table->quarantine_events += 1U;
+        entry->state = MEM_SERVICE_MANAGED_STATE_QUARANTINED;
+        table->reclaim_ok_count += 1U;
+        mem_service_managed_fill_view(entry, view_out);
+        return MEM_SERVICE_MANAGED_RESULT_OK;
+    }
+    entry->descriptor_len = 0;
+    memset(entry->descriptor, 0, sizeof(entry->descriptor));
+    entry->address = 0;
+    entry->address_len = 0;
+    entry->provider_backed = false;
+    entry->state = MEM_SERVICE_MANAGED_STATE_RETIRED;
+    table->reclaim_ok_count += 1U;
+    mem_service_managed_fill_view(entry, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
 }
 
 enum mem_service_managed_result mem_service_managed_inspect(
@@ -539,14 +723,24 @@ void mem_service_managed_stats_snapshot(
         case MEM_SERVICE_MANAGED_STATE_ACTIVE:
             stats_out->live_objects += 1U;
             stats_out->backing_allocated_bytes += entry->size_bytes;
-            stats_out->address_reserved_bytes += entry->size_bytes;
+            stats_out->address_reserved_bytes +=
+                entry->provider_backed ? entry->address_len
+                                       : entry->size_bytes;
+            if (entry->provider_backed) {
+                stats_out->export_mappings += 1U;
+            }
             stats_out->live_refs += entry->holder_count;
             break;
         case MEM_SERVICE_MANAGED_STATE_RETIRING:
             stats_out->live_objects += 1U;
             stats_out->in_flight += 1U;
             stats_out->backing_allocated_bytes += entry->size_bytes;
-            stats_out->address_reserved_bytes += entry->size_bytes;
+            stats_out->address_reserved_bytes +=
+                entry->provider_backed ? entry->address_len
+                                       : entry->size_bytes;
+            if (entry->provider_backed) {
+                stats_out->export_mappings += 1U;
+            }
             stats_out->live_refs += entry->holder_count;
             break;
         case MEM_SERVICE_MANAGED_STATE_QUARANTINED:
@@ -566,5 +760,9 @@ void mem_service_managed_stats_snapshot(
     stats_out->acquire_rejected_count = table->acquire_rejected_count;
     stats_out->release_rejected_count = table->release_rejected_count;
     stats_out->retire_rejected_count = table->retire_rejected_count;
+    stats_out->publish_ok_count = table->publish_ok_count;
+    stats_out->publish_rejected_count = table->publish_rejected_count;
+    stats_out->reclaim_ok_count = table->reclaim_ok_count;
+    stats_out->reclaim_rejected_count = table->reclaim_rejected_count;
     stats_out->quarantine_events = table->quarantine_events;
 }

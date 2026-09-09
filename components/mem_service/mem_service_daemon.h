@@ -66,6 +66,14 @@ struct mem_service_daemon_runtime {
      * (data operations allowed, readiness not gated).
      */
     const struct mem_service_provider_directory_config *provider_directory;
+    /*
+     * Optional single home provider node (the M1 address-allocation
+     * owner). When set, managed allocate binds the allocation to this
+     * node's active registration and waits in ALLOCATING for the
+     * provider's publish; when NULL the managed table keeps its legacy
+     * behavior (in-process backing or fail-closed).
+     */
+    const char *allocation_home_provider;
 };
 
 int mem_service_run_unix_daemon(const char *listen_spec);

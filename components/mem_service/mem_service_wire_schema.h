@@ -258,6 +258,26 @@ static const struct mem_service_wire_payload_field
         {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
 };
 
+static const struct mem_service_wire_payload_field
+    mem_service_wire_publish_allocation_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"descriptor_hex", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"address", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"address_len", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_reclaim_allocation_fields[] = {
+        {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"confirmed", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
 static const struct mem_service_wire_operation_schema
     mem_service_wire_operation_schemas[] = {
         {MEM_SERVICE_WIRE_OP_HEALTH,
@@ -556,6 +576,24 @@ static const struct mem_service_wire_operation_schema
          mem_service_wire_provider_deregister_fields,
          sizeof(mem_service_wire_provider_deregister_fields) /
              sizeof(mem_service_wire_provider_deregister_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION,
+         "publish_allocation",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_publish_allocation_fields,
+         sizeof(mem_service_wire_publish_allocation_fields) /
+             sizeof(mem_service_wire_publish_allocation_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
+         "reclaim_allocation",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_reclaim_allocation_fields,
+         sizeof(mem_service_wire_reclaim_allocation_fields) /
+             sizeof(mem_service_wire_reclaim_allocation_fields[0]),
          NULL,
          0},
 };

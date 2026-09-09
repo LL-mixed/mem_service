@@ -54,6 +54,14 @@ enum mem_service_wire_operation {
     MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH = 0x77,
     MEM_SERVICE_WIRE_OP_PROVIDER_STATUS = 0x78,
     MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER = 0x79,
+    /* 0x7a segment: provider-backed allocation lifecycle confirmations.
+     * The bound home provider publishes the reserved opaque descriptor
+     * plus address range (ALLOCATING --> ACTIVE) and later confirms the
+     * reclaim outcome for a drained object (RETIRING --> RETIRED or
+     * QUARANTINED). Descriptors are opaque bytes to the control plane;
+     * payload never crosses these operations. */
+    MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION = 0x7a,
+    MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION = 0x7b,
 };
 
 enum mem_service_wire_status {

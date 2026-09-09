@@ -147,6 +147,8 @@ struct mem_service_metrics {
     uint64_t provider_refresh_count;
     uint64_t provider_status_count;
     uint64_t provider_deregister_count;
+    uint64_t publish_allocation_count;
+    uint64_t reclaim_allocation_count;
     uint64_t artifact_query_hit_count;
     uint64_t artifact_query_miss_count;
     uint64_t idempotency_replay_count;
@@ -201,6 +203,10 @@ struct mem_service {
     struct mem_service_audit_event audit_events[MEM_SERVICE_MAX_AUDIT_EVENTS];
     struct mem_service_managed_table managed;
     struct mem_service_provider_directory provider_directory;
+    /* Configured single home provider (address-allocation owner) for
+     * provider-backed managed allocations; empty when unset (legacy
+     * fail-closed in-process-backing behavior). */
+    char allocation_home_node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN];
 };
 
 struct mem_service_object_payload_view {

@@ -135,6 +135,28 @@ mem_service_provider_directory_find(
     return NULL;
 }
 
+bool mem_service_provider_directory_lookup_active(
+    const struct mem_service_provider_directory *directory,
+    const char *node_id,
+    uint64_t now_ms,
+    uint64_t *incarnation_out)
+{
+    const struct mem_service_provider_directory_entry *entry =
+        mem_service_provider_directory_find(directory, node_id);
+
+    if (incarnation_out != NULL) {
+        *incarnation_out = 0;
+    }
+    if (entry == NULL ||
+        !mem_service_provider_entry_fresh(directory, entry, now_ms)) {
+        return false;
+    }
+    if (incarnation_out != NULL) {
+        *incarnation_out = entry->incarnation;
+    }
+    return true;
+}
+
 enum mem_service_provider_directory_result
 mem_service_provider_directory_register(
     struct mem_service_provider_directory *directory,

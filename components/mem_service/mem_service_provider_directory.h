@@ -180,4 +180,15 @@ mem_service_provider_directory_find(
     const struct mem_service_provider_directory *directory,
     const char *node_id);
 
+/* Read-only active lookup: true when node_id holds a registered entry
+ * whose lease is still fresh at now_ms; the active incarnation is
+ * returned through incarnation_out when non-NULL. Used to authorize
+ * provider-originated publish/reclaim calls without mutating the
+ * directory (lease expiry remains poll's job). */
+bool mem_service_provider_directory_lookup_active(
+    const struct mem_service_provider_directory *directory,
+    const char *node_id,
+    uint64_t now_ms,
+    uint64_t *incarnation_out);
+
 #endif

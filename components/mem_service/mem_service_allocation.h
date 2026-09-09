@@ -22,17 +22,25 @@
  *   (none) --allocate--> ALLOCATING --backing reserved--> ACTIVE
  *      |                     |
  *      |                     +-- reserve failed --> (slot rolled back)
+ *      |                     |
+ *      |                     +-- retire (abandon) --> RETIRED
  *      |
  *   ACTIVE --retire--> RETIRING --last holder released + backing released-->
  *   RETIRED
  *      |
  *      +-- backing release outcome unconfirmed --> QUARANTINED
  *
- * - ALLOCATING records the operation intent before resources are reserved;
- *   it never persists across a request (reserve is synchronous in M1.1).
+ * - ALLOCATING records the operation intent before resources are reserved.
+ *   With an in-process backing (fixtures) the reserve is synchronous and
+ *   ALLOCATING never persists across a request. With a provider-bound
+ *   allocation (M1.2) ALLOCATING persists until the bound home provider
+ *   publishes the reserved descriptor; retire on ALLOCATING abandons the
+ *   intent (no resource was reserved) and retires the identity.
  * - ACTIVE accepts new holder references.
  * - RETIRING blocks new references; the last release drives backing
- *   release and the transition to RETIRED.
+ *   release and the transition to RETIRED. Provider-backed objects wait
+ *   in RETIRING for the home provider's reclaim confirmation instead of
+ *   an in-process release.
  * - RETIRED is terminal. Allocating the same key again creates a fresh
  *   identity with a new generation (address/backing reuse always produces
  *   a new generation).
@@ -44,11 +52,15 @@
  * M1.2; a daemon restart therefore starts with an empty managed table and
  * zero backing (fail-closed for data operations).
  *
- * Backing: reserve/release are delegated to a backing provider interface.
- * The shipped daemon registers no backing in M1.1, so allocate is
- * fail-closed; test fixtures register stub backings to exercise the state
- * machine. Stats export/import mapping counts stay 0 until provider
- * channels report them in M1.2.
+ * Backing: reserve/release are delegated either to an in-process backing
+ * provider interface (test fixtures) or to the bound home provider
+ * process (M1.2): the control plane binds the allocation to
+ * (home_node_id, provider_incarnation) at allocate time, the provider
+ * reserves backing plus address and publishes the opaque descriptor and
+ * address range, and later confirms the reclaim. The control plane never
+ * parses descriptor contents and never moves payload bytes. Stats
+ * export mapping counts reflect provider-published ACTIVE objects;
+ * import mapping counts stay 0 until provider channels report them.
  */
 
 #define MEM_SERVICE_MANAGED_MAX_ALLOCATIONS 128U
@@ -56,6 +68,7 @@
 #define MEM_SERVICE_MANAGED_KEY_LEN 96U
 #define MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN 96U
 #define MEM_SERVICE_MANAGED_SESSION_ID_LEN 64U
+#define MEM_SERVICE_MANAGED_NODE_ID_LEN 64U
 #define MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN 128U
 
 enum mem_service_managed_state {
@@ -100,6 +113,12 @@ enum mem_service_managed_result {
      * example acquire on a retiring object or retire of an already
      * retired identity). */
     MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT = 9,
+    /* Publish/reclaim named a (node_id, incarnation) other than the
+     * provider binding recorded at allocate time. */
+    MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH = 10,
+    /* The configured home provider holds no active registration in the
+     * provider directory; the allocation was not attempted. */
+    MEM_SERVICE_MANAGED_RESULT_PROVIDER_UNAVAILABLE = 11,
 };
 
 struct mem_service_managed_holder {
@@ -121,6 +140,15 @@ struct mem_service_managed_allocation {
     uint32_t holder_count;
     struct mem_service_managed_holder holders[MEM_SERVICE_MANAGED_MAX_HOLDERS];
     uint64_t provider_incarnation;
+    /* Home provider binding recorded at allocate time (provider-backed
+     * objects only; empty for in-process stub backings). */
+    char home_node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN];
+    /* True when the descriptor/address range came from the bound home
+     * provider's publish; reclaim then waits for provider confirmation
+     * instead of an in-process release. */
+    bool provider_backed;
+    uint64_t address;
+    uint64_t address_len;
     uint8_t descriptor[MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN];
     uint32_t descriptor_len;
 };
@@ -162,6 +190,10 @@ struct mem_service_managed_table {
     uint64_t acquire_rejected_count;
     uint64_t release_rejected_count;
     uint64_t retire_rejected_count;
+    uint64_t publish_ok_count;
+    uint64_t publish_rejected_count;
+    uint64_t reclaim_ok_count;
+    uint64_t reclaim_rejected_count;
     uint64_t quarantine_events;
     struct mem_service_managed_allocation
         entries[MEM_SERVICE_MANAGED_MAX_ALLOCATIONS];
@@ -186,6 +218,10 @@ struct mem_service_managed_stats {
     uint64_t acquire_rejected_count;
     uint64_t release_rejected_count;
     uint64_t retire_rejected_count;
+    uint64_t publish_ok_count;
+    uint64_t publish_rejected_count;
+    uint64_t reclaim_ok_count;
+    uint64_t reclaim_rejected_count;
     uint64_t quarantine_events;
 };
 
@@ -196,6 +232,13 @@ struct mem_service_managed_request {
     uint64_t size_bytes;
     uint64_t alignment_bytes;
     uint64_t capabilities;
+    /* Provider binding for the M1.2 provider-backed path: when
+     * home_node_id is non-NULL the allocation is bound to that home
+     * provider boot and persists in ALLOCATING until the provider
+     * publishes; when NULL the in-process backing is reserved
+     * synchronously. */
+    const char *home_node_id;
+    uint64_t home_incarnation;
 };
 
 struct mem_service_managed_view {
@@ -210,6 +253,10 @@ struct mem_service_managed_view {
     uint32_t holder_count;
     struct mem_service_managed_holder holders[MEM_SERVICE_MANAGED_MAX_HOLDERS];
     uint64_t provider_incarnation;
+    char home_node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN];
+    bool provider_backed;
+    uint64_t address;
+    uint64_t address_len;
     uint8_t descriptor[MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN];
     uint32_t descriptor_len;
 };
@@ -252,6 +299,43 @@ enum mem_service_managed_result mem_service_managed_retire(
 enum mem_service_managed_result mem_service_managed_inspect(
     const struct mem_service_managed_table *table,
     const char *key,
+    struct mem_service_managed_view *view_out);
+/*
+ * Provider-backed reserve confirmation (M1.2): the bound home provider
+ * reserved backing plus address and publishes the opaque descriptor and
+ * address range. The control plane stores them verbatim and drives
+ * ALLOCATING --> ACTIVE. (key, generation) names the allocation
+ * identity; (node_id, incarnation) must equal the binding recorded at
+ * allocate time. A replayed publish with identical content on an ACTIVE
+ * object is idempotent; conflicting content or a stale provider boot is
+ * rejected. Payload bytes never cross this interface.
+ */
+enum mem_service_managed_result mem_service_managed_publish(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    const uint8_t *descriptor,
+    uint32_t descriptor_len,
+    uint64_t address,
+    uint64_t address_len,
+    struct mem_service_managed_view *view_out);
+/*
+ * Provider-backed release confirmation (M1.2): the bound home provider
+ * reports the outcome of the backing release for a drained (RETIRING,
+ * zero holders) object. confirmed=true retires the identity;
+ * confirmed=false quarantines it (resources isolated, counted
+ * separately, never reused). Replays against the terminal state with a
+ * matching identity are idempotent.
+ */
+enum mem_service_managed_result mem_service_managed_reclaim(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    bool confirmed,
     struct mem_service_managed_view *view_out);
 void mem_service_managed_stats_snapshot(
     const struct mem_service_managed_table *table,

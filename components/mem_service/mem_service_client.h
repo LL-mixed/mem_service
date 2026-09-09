@@ -406,6 +406,8 @@ int mem_service_client_resolve_training_step(
 #define MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN 64U
 #define MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN 32U
 #define MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS 8U
+#define MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN 128U
+#define MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN 64U
 
 #define MEM_SERVICE_CLIENT_MANAGED_CAP_MAP (1ULL << 0)
 #define MEM_SERVICE_CLIENT_MANAGED_CAP_BLOCK_IO (1ULL << 1)
@@ -434,8 +436,13 @@ struct mem_service_client_allocation {
     uint64_t alignment_bytes;
     uint64_t capabilities;
     uint32_t live_refs;
+    char home_node[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
     uint64_t provider_incarnation;
+    bool provider_backed;
+    uint64_t address;
+    uint64_t address_len;
     uint32_t descriptor_len;
+    uint8_t descriptor[MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN];
     uint32_t holder_count;
     struct mem_service_client_allocation_holder
         holders[MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS];
@@ -460,6 +467,10 @@ struct mem_service_client_allocation_stats {
     uint64_t acquire_rejected_count;
     uint64_t release_rejected_count;
     uint64_t retire_rejected_count;
+    uint64_t publish_ok_count;
+    uint64_t publish_rejected_count;
+    uint64_t reclaim_ok_count;
+    uint64_t reclaim_rejected_count;
     uint64_t quarantine_events;
 };
 
@@ -510,8 +521,9 @@ int mem_service_client_allocation_stats(
  * canary, refreshes within the lease and deregisters on shutdown. The
  * returned view mirrors the control-plane directory summary; mapping
  * handles and payload bytes never cross these operations.
+ * MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN is defined with the allocation
+ * constants above.
  */
-#define MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN 64U
 
 struct mem_service_client_provider_directory {
     uint64_t directory_epoch;
