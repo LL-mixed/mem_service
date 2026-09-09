@@ -1235,6 +1235,66 @@ int mem_service_client_resolve_training_step(
  * into its own struct; the 808-byte record layout above is untouched.
  */
 
+static int mem_service_client_hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static void mem_service_client_hex_encode(const uint8_t *data,
+                                          size_t len,
+                                          char *out,
+                                          size_t out_len)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t i = 0;
+
+    if (out_len == 0) {
+        return;
+    }
+    for (i = 0; i < len && (size_t)(2U * i + 2U) < out_len; ++i) {
+        out[2U * i] = digits[(data[i] >> 4U) & 0xfU];
+        out[2U * i + 1U] = digits[data[i] & 0xfU];
+    }
+    out[(size_t)(2U * i) < out_len ? (size_t)(2U * i) : out_len - 1U] = '\0';
+}
+
+static int mem_service_client_hex_decode(const char *hex,
+                                         uint8_t *out,
+                                         size_t out_cap,
+                                         uint32_t *out_len)
+{
+    size_t len;
+    size_t i;
+
+    if (hex == NULL || out == NULL || out_len == NULL) {
+        return -1;
+    }
+    len = strlen(hex);
+    if ((len % 2U) != 0 || len / 2U > out_cap) {
+        return -1;
+    }
+    for (i = 0; i < len / 2U; ++i) {
+        int hi = mem_service_client_hex_nibble(hex[2U * i]);
+        int lo = mem_service_client_hex_nibble(hex[2U * i + 1U]);
+
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    *out_len = (uint32_t)(len / 2U);
+    return 0;
+}
+
 static int mem_service_client_parse_allocation(
     const char *payload,
     struct mem_service_client_allocation *allocation_out)
@@ -1279,6 +1339,38 @@ static int mem_service_client_parse_allocation(
         mem_service_wire_payload_get_u64(&view, "provider_incarnation", 0);
     allocation_out->descriptor_len =
         mem_service_wire_payload_get_u32(&view, "descriptor_len", 0);
+    mem_service_client_payload_copy(&view,
+                                    "home_node",
+                                    allocation_out->home_node,
+                                    sizeof(allocation_out->home_node));
+    if (strcmp(allocation_out->home_node, "-") == 0) {
+        allocation_out->home_node[0] = '\0';
+    }
+    allocation_out->provider_backed =
+        mem_service_wire_payload_get_u32(&view, "provider_backed", 0) != 0;
+    allocation_out->address =
+        mem_service_wire_payload_get_u64(&view, "address", 0);
+    allocation_out->address_len =
+        mem_service_wire_payload_get_u64(&view, "address_len", 0);
+    {
+        char descriptor_hex[2U * MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN + 1U];
+        uint32_t decoded_len = 0;
+
+        memset(descriptor_hex, 0, sizeof(descriptor_hex));
+        if (mem_service_wire_payload_get_string(&view,
+                                                "descriptor_hex",
+                                                descriptor_hex,
+                                                sizeof(descriptor_hex)) &&
+            descriptor_hex[0] != '\0') {
+            if (mem_service_client_hex_decode(descriptor_hex,
+                                              allocation_out->descriptor,
+                                              sizeof(allocation_out->descriptor),
+                                              &decoded_len) != 0) {
+                return -1;
+            }
+            allocation_out->descriptor_len = decoded_len;
+        }
+    }
     for (i = 0; i < MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS; ++i) {
         char field[48];
 
@@ -1559,9 +1651,121 @@ int mem_service_client_allocation_stats(
         mem_service_wire_payload_get_u64(&view, "release_rejected_count", 0);
     stats_out->retire_rejected_count =
         mem_service_wire_payload_get_u64(&view, "retire_rejected_count", 0);
+    stats_out->publish_ok_count =
+        mem_service_wire_payload_get_u64(&view, "publish_ok_count", 0);
+    stats_out->publish_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "publish_rejected_count", 0);
+    stats_out->reclaim_ok_count =
+        mem_service_wire_payload_get_u64(&view, "reclaim_ok_count", 0);
+    stats_out->reclaim_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "reclaim_rejected_count", 0);
     stats_out->quarantine_events =
         mem_service_wire_payload_get_u64(&view, "quarantine_events", 0);
     return 0;
+}
+
+int mem_service_client_publish_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    const uint8_t *descriptor,
+    uint32_t descriptor_len,
+    uint64_t address,
+    uint64_t address_len,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
+    char descriptor_hex[2U * MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN + 1U];
+
+    if (descriptor == NULL || descriptor_len == 0 ||
+        descriptor_len > MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN ||
+        incarnation == 0 || address_len == 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    mem_service_client_hex_encode(descriptor,
+                                  descriptor_len,
+                                  descriptor_hex,
+                                  sizeof(descriptor_hex));
+    if (mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "key",
+                                                  key) != 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "node_id",
+                                                  node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "incarnation",
+                                            incarnation) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "generation",
+                                            generation) != 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "descriptor_hex",
+                                                  descriptor_hex) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "address",
+                                            address) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "address_len",
+                                            address_len) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(client,
+                                              MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION,
+                                              payload,
+                                              allocation_out,
+                                              status_out);
+}
+
+int mem_service_client_reclaim_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    bool confirmed,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[512] = "";
+
+    if (incarnation == 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "key",
+                                                  key) != 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "node_id",
+                                                  node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "incarnation",
+                                            incarnation) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "generation",
+                                            generation) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "confirmed",
+                                            confirmed ? 1U : 0U) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(client,
+                                              MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
+                                              payload,
+                                              allocation_out,
+                                              status_out);
 }
 
 static void mem_service_client_parse_provider_directory(

@@ -516,6 +516,37 @@ int mem_service_client_allocation_stats(
     enum mem_service_wire_status *status_out);
 
 /*
+ * Provider-backed allocation lifecycle confirmations (wire 0x7a segment).
+ * Only the bound home provider process calls these operations: publish
+ * commits the reserved opaque descriptor plus address range (ALLOCATING
+ * --> ACTIVE); reclaim confirms the release outcome for a drained object
+ * (RETIRING --> RETIRED, or QUARANTINED when unconfirmed). The descriptor
+ * is opaque to the control plane and payload bytes never cross these
+ * operations.
+ */
+int mem_service_client_publish_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    const uint8_t *descriptor,
+    uint32_t descriptor_len,
+    uint64_t address,
+    uint64_t address_len,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_reclaim_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t generation,
+    bool confirmed,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+
+/*
  * Provider directory client (0x76 segment). A per-node provider process
  * registers its (node_id, incarnation) readiness after its bootstrap
  * canary, refreshes within the lease and deregisters on shutdown. The

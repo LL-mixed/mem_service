@@ -141,6 +141,8 @@ static void usage(const char *argv0)
     printf(" [provider-register --node-id <id> --incarnation <u64> --readiness-generation <u64> --capabilities <u64>]");
     printf(" [provider-refresh --node-id <id> --incarnation <u64> --readiness-generation <u64>]");
     printf(" [provider-deregister --node-id <id> --incarnation <u64>] [provider-directory-status]");
+    printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
+    printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -6033,6 +6035,7 @@ struct mem_service_cli_config {
     bool has_node_id;
     bool has_network_io_timeout_ms;
     bool has_provider_lease_ms;
+    bool has_allocation_home_provider;
     uint64_t max_records;
     uint64_t max_payload_bytes;
     uint64_t max_audit_events;
@@ -6059,6 +6062,7 @@ struct mem_service_cli_config {
     struct mem_service_network_peer network_peers[MEM_SERVICE_NETWORK_MAX_PEERS];
     char required_providers[MEM_SERVICE_PROVIDER_DIRECTORY_MAX_PROVIDERS]
                            [MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    char allocation_home_provider[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
 };
 
 static void trim_ascii(char *value)
@@ -6541,6 +6545,21 @@ static int apply_config_field(struct mem_service_cli_config *config,
             return -1;
         }
         config->has_provider_lease_ms = true;
+        return 0;
+    }
+    /*
+     * allocation_home_provider=<node_id> names the single home provider
+     * (address-allocation owner) that managed allocate binds to. The node
+     * must hold an active directory registration for allocate to leave
+     * ALLOCATING; the descriptor publish then comes from this node.
+     */
+    if (strcmp(name, "allocation_home_provider") == 0) {
+        if (value[0] == '\0' ||
+            strlen(value) >= MEM_SERVICE_PROVIDER_NODE_ID_LEN) {
+            return -1;
+        }
+        memcpy(config->allocation_home_provider, value, strlen(value) + 1U);
+        config->has_allocation_home_provider = true;
         return 0;
     }
     if (strcmp(name, "metrics_mode") == 0) {
@@ -7302,6 +7321,9 @@ static int run_serve(int argc, char **argv)
                 config.has_provider_lease_ms ? config.provider_lease_ms : 0U;
             provider_directory_ptr = &provider_directory;
         }
+        if (config.has_allocation_home_provider) {
+            runtime.allocation_home_provider = config.allocation_home_provider;
+        }
         if (store_path == NULL && storage_root != NULL &&
             derive_store_from_storage_root(derived_store,
                                            sizeof(derived_store),
@@ -7331,7 +7353,8 @@ static int run_serve(int argc, char **argv)
         return 2;
     }
     if (!trusted_guest_network) {
-        if (provider_directory_ptr != NULL) {
+        if (provider_directory_ptr != NULL ||
+            runtime.allocation_home_provider != NULL) {
             runtime.limits = limits_ptr;
             runtime.provider_directory = provider_directory_ptr;
             return mem_service_run_unix_daemon_with_runtime(listen_spec,
@@ -9251,6 +9274,49 @@ static int run_provider_directory_status(int argc, char **argv)
                                       NULL);
 }
 
+/*
+ * Provider-backed allocation lifecycle commands (M1.2, wire ops
+ * 0x7a-0x7b). Only the bound home provider process invokes these; the
+ * descriptor crosses as opaque hex and payload bytes never move.
+ */
+static int run_publish_allocation(int argc, char **argv)
+{
+    char payload[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--generation", "generation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--descriptor-hex", "descriptor_hex") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--address", "address") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--address-len", "address_len") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION,
+                                      "publish-allocation",
+                                      payload);
+}
+
+static int run_reclaim_allocation(int argc, char **argv)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--generation", "generation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--confirmed", "confirmed") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
+                                      "reclaim-allocation",
+                                      payload);
+}
+
 static int run_export_snapshot_page(int argc, char **argv)
 {
     char payload[160] = "";
@@ -10499,6 +10565,12 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "provider-directory-status") == 0) {
         return run_provider_directory_status(argc, argv);
+    }
+    if (strcmp(argv[1], "publish-allocation") == 0) {
+        return run_publish_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "reclaim-allocation") == 0) {
+        return run_reclaim_allocation(argc, argv);
     }
     if (strcmp(argv[1], "register-prefix") == 0) {
         return run_register_prefix(argc, argv);

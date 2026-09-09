@@ -102,6 +102,8 @@ static void mem_service_record_operation_metrics(
 static bool mem_service_status_is_fail_closed(enum mem_service_wire_status status);
 static bool mem_service_operation_mutates(enum mem_service_wire_operation operation,
                                           const char *payload);
+static bool mem_service_operation_gated_managed_data_op(
+    enum mem_service_wire_operation operation);
 static uint64_t mem_service_estimate_new_record_count(
     struct mem_service *svc,
     enum mem_service_wire_operation operation,
@@ -12632,14 +12634,35 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
     bool audit_retention_pruned = false;
     bool checkpoint_retention_pruned = false;
     bool record_retention_pruned = false;
-    enum mem_service_wire_status status =
-        mem_service_try_idempotency_replay(svc,
-                                           operation,
-                                           payload,
-                                           response,
-                                           response_len,
-                                           &pending_idempotency,
-                                           &idempotency_handled);
+    enum mem_service_wire_status status;
+
+    /*
+     * The fail-closed data-plane gate for managed data operations runs
+     * before idempotency processing: data_plane_not_ready is transient
+     * provider-readiness state, not an operation outcome, so it must
+     * neither allocate an idempotency record nor replay one. Retrying
+     * the same idempotency key after the gate opens executes fresh.
+     * Setting idempotency_handled skips dispatch below while leaving
+     * pending_idempotency NULL so no outcome is recorded.
+     */
+    if (mem_service_operation_gated_managed_data_op(operation) &&
+        !mem_service_provider_directory_data_ops_allowed(
+            &svc->provider_directory,
+            mem_service_monotonic_ms())) {
+        snprintf(response,
+                 response_len,
+                 "status=internal\nreason=data_plane_not_ready\n");
+        status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        idempotency_handled = true;
+    } else {
+        status = mem_service_try_idempotency_replay(svc,
+                                                    operation,
+                                                    payload,
+                                                    response,
+                                                    response_len,
+                                                    &pending_idempotency,
+                                                    &idempotency_handled);
+    }
 
     if (!idempotency_handled) {
         uint64_t new_records =
@@ -12692,11 +12715,22 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                         NULL);
             }
         }
-        mem_service_complete_idempotency_record(pending_idempotency,
-                                                operation,
-                                                payload,
-                                                status,
-                                                response);
+        /*
+         * Never record a transient data_plane_not_ready failure as the
+         * idempotent outcome. The top-level gate runs before idempotency
+         * processing; this covers the residual race where a provider
+         * lease expires between that check and the in-handler gate.
+         */
+        if (pending_idempotency != NULL &&
+            !(status == MEM_SERVICE_WIRE_STATUS_INTERNAL &&
+              response != NULL &&
+              strstr(response, "reason=data_plane_not_ready") != NULL)) {
+            mem_service_complete_idempotency_record(pending_idempotency,
+                                                    operation,
+                                                    payload,
+                                                    status,
+                                                    response);
+        }
     }
 
     audit_appended = mem_service_append_audit_event(svc,
@@ -12811,6 +12845,28 @@ static bool mem_service_operation_mutates(enum mem_service_wire_operation operat
     case MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF:
     case MEM_SERVICE_WIRE_OP_REGISTER_EXECUTION_ARTIFACT:
     case MEM_SERVICE_WIRE_OP_REGISTER_TRAINING_ARTIFACT:
+    case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Managed data operations stay fail-closed until the configured set of
+ * required providers holds fresh registrations. The gate for this family
+ * is evaluated before idempotency processing (see
+ * mem_service_handle_operation_with_limits) so a transient
+ * data_plane_not_ready failure is never recorded as the idempotent
+ * outcome of an operation that never executed.
+ */
+static bool mem_service_operation_gated_managed_data_op(
+    enum mem_service_wire_operation operation)
+{
+    switch (operation) {
     case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
     case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
     case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
