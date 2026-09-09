@@ -22,6 +22,8 @@
 #define MEM_SERVICE_OBMM_DESCRIPTOR_MAGIC 0x4d534f42U
 #define MEM_SERVICE_OBMM_DESCRIPTOR_VERSION 1U
 #define MEM_SERVICE_OBMM_DESCRIPTOR_BYTES 48U
+#define MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_VERSION 2U
+#define MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES 96U
 #define MEM_SERVICE_OBMM_DEFAULT_DEVICE "/dev/obmm"
 #define MEM_SERVICE_OBMM_DEFAULT_CNA_PATH \
     "/sys/bus/ub/devices/00001/primary_cna"
@@ -32,6 +34,17 @@ struct mem_service_obmm_descriptor_v1 {
     uint64_t size;
     uint32_t token_id;
     uint32_t export_cna;
+    bool strict_gsva;
+    uint64_t segment_id;
+    uint64_t epoch;
+    uint32_t segment_flags;
+    uint32_t owner_node;
+    uint32_t node_count;
+    uint32_t cache_policy;
+    uint32_t p_tag;
+    uint32_t access_flags;
+    uint32_t gsva_token_id;
+    uint32_t gsva_token_value;
 };
 
 #ifdef __linux__
@@ -62,6 +75,7 @@ struct mem_service_obmm_context {
     uint32_t verified_peer_count;
     uint64_t next_region_handle;
     uint64_t next_mapping_handle;
+    uint64_t import_region_bytes;
     char instance[MEM_SERVICE_PROVIDER_INSTANCE_LEN];
     uint64_t import_pas[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
     bool import_osync[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
@@ -102,6 +116,19 @@ static uint64_t mem_service_obmm_get_u64(const uint8_t *bytes)
            mem_service_obmm_get_u32(bytes + 4);
 }
 
+static bool mem_service_obmm_gsva_valid(
+    const struct mem_service_obmm_descriptor_v1 *d)
+{
+    /* GSVA v1 requires strict identity, token value and ACTIVE, not RETIRED. */
+    return d->segment_id && d->epoch && d->segment_flags == 7U &&
+           d->node_count && d->owner_node < d->node_count &&
+           d->gsva_token_id && d->gsva_token_value &&
+           d->cache_policy <= 4U &&
+           d->access_flags && !(d->access_flags & ~3U) &&
+           d->remote_uba && !(d->remote_uba & 4095U) && !(d->size & 4095U) &&
+           d->size <= UINT64_MAX - d->remote_uba;
+}
+
 static int mem_service_obmm_descriptor_encode(
     const struct mem_service_obmm_descriptor_v1 *descriptor,
     struct mem_service_provider_descriptor *opaque_out)
@@ -110,21 +137,36 @@ static int mem_service_obmm_descriptor_encode(
 
     if (descriptor == NULL || opaque_out == NULL ||
         descriptor->export_mem_id == 0 || descriptor->size == 0 ||
-        descriptor->token_id == 0 || descriptor->export_cna == 0) {
+        descriptor->token_id == 0 || descriptor->export_cna == 0 ||
+        (descriptor->strict_gsva && !mem_service_obmm_gsva_valid(descriptor))) {
         return -1;
     }
     memset(opaque_out, 0, sizeof(*opaque_out));
-    opaque_out->len = MEM_SERVICE_OBMM_DESCRIPTOR_BYTES;
+    opaque_out->len = descriptor->strict_gsva ? MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES :
+                                               MEM_SERVICE_OBMM_DESCRIPTOR_BYTES;
     bytes = opaque_out->bytes;
     mem_service_obmm_put_u32(bytes, MEM_SERVICE_OBMM_DESCRIPTOR_MAGIC);
-    mem_service_obmm_put_u32(bytes + 4, MEM_SERVICE_OBMM_DESCRIPTOR_VERSION);
-    mem_service_obmm_put_u32(bytes + 8, MEM_SERVICE_OBMM_DESCRIPTOR_BYTES);
+    mem_service_obmm_put_u32(bytes + 4, descriptor->strict_gsva ?
+        MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_VERSION : MEM_SERVICE_OBMM_DESCRIPTOR_VERSION);
+    mem_service_obmm_put_u32(bytes + 8, opaque_out->len);
     mem_service_obmm_put_u32(bytes + 12, 0);
     mem_service_obmm_put_u64(bytes + 16, descriptor->export_mem_id);
     mem_service_obmm_put_u64(bytes + 24, descriptor->remote_uba);
     mem_service_obmm_put_u64(bytes + 32, descriptor->size);
     mem_service_obmm_put_u32(bytes + 40, descriptor->token_id);
     mem_service_obmm_put_u32(bytes + 44, descriptor->export_cna);
+    if (descriptor->strict_gsva) {
+        mem_service_obmm_put_u64(bytes + 48, descriptor->segment_id);
+        mem_service_obmm_put_u64(bytes + 56, descriptor->epoch);
+        mem_service_obmm_put_u32(bytes + 64, descriptor->segment_flags);
+        mem_service_obmm_put_u32(bytes + 68, descriptor->owner_node);
+        mem_service_obmm_put_u32(bytes + 72, descriptor->node_count);
+        mem_service_obmm_put_u32(bytes + 76, descriptor->cache_policy);
+        mem_service_obmm_put_u32(bytes + 80, descriptor->p_tag);
+        mem_service_obmm_put_u32(bytes + 84, descriptor->access_flags);
+        mem_service_obmm_put_u32(bytes + 88, descriptor->gsva_token_id);
+        mem_service_obmm_put_u32(bytes + 92, descriptor->gsva_token_value);
+    }
     return 0;
 }
 
@@ -136,16 +178,17 @@ static int mem_service_obmm_descriptor_decode(
     const uint8_t *bytes;
 
     if (opaque == NULL || descriptor_out == NULL ||
-        opaque->len != MEM_SERVICE_OBMM_DESCRIPTOR_BYTES) {
+        (opaque->len != MEM_SERVICE_OBMM_DESCRIPTOR_BYTES &&
+         opaque->len != MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES)) {
         return -1;
     }
     bytes = opaque->bytes;
     if (mem_service_obmm_get_u32(bytes) !=
             MEM_SERVICE_OBMM_DESCRIPTOR_MAGIC ||
         mem_service_obmm_get_u32(bytes + 4) !=
-            MEM_SERVICE_OBMM_DESCRIPTOR_VERSION ||
-        mem_service_obmm_get_u32(bytes + 8) !=
-            MEM_SERVICE_OBMM_DESCRIPTOR_BYTES ||
+            (opaque->len == MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES ?
+             MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_VERSION : MEM_SERVICE_OBMM_DESCRIPTOR_VERSION) ||
+        mem_service_obmm_get_u32(bytes + 8) != opaque->len ||
         mem_service_obmm_get_u32(bytes + 12) != 0) {
         return -1;
     }
@@ -155,6 +198,20 @@ static int mem_service_obmm_descriptor_decode(
     descriptor.size = mem_service_obmm_get_u64(bytes + 32);
     descriptor.token_id = mem_service_obmm_get_u32(bytes + 40);
     descriptor.export_cna = mem_service_obmm_get_u32(bytes + 44);
+    descriptor.strict_gsva = opaque->len == MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES;
+    if (descriptor.strict_gsva) {
+        descriptor.segment_id = mem_service_obmm_get_u64(bytes + 48);
+        descriptor.epoch = mem_service_obmm_get_u64(bytes + 56);
+        descriptor.segment_flags = mem_service_obmm_get_u32(bytes + 64);
+        descriptor.owner_node = mem_service_obmm_get_u32(bytes + 68);
+        descriptor.node_count = mem_service_obmm_get_u32(bytes + 72);
+        descriptor.cache_policy = mem_service_obmm_get_u32(bytes + 76);
+        descriptor.p_tag = mem_service_obmm_get_u32(bytes + 80);
+        descriptor.access_flags = mem_service_obmm_get_u32(bytes + 84);
+        descriptor.gsva_token_id = mem_service_obmm_get_u32(bytes + 88);
+        descriptor.gsva_token_value = mem_service_obmm_get_u32(bytes + 92);
+        if (!mem_service_obmm_gsva_valid(&descriptor)) return -1;
+    }
     if (descriptor.export_mem_id == 0 || descriptor.size == 0 ||
         descriptor.token_id == 0 || descriptor.export_cna == 0) {
         return -1;
@@ -171,7 +228,16 @@ static bool mem_service_obmm_descriptor_equal(
            left->export_mem_id == right->export_mem_id &&
            left->remote_uba == right->remote_uba &&
            left->size == right->size && left->token_id == right->token_id &&
-           left->export_cna == right->export_cna;
+           left->export_cna == right->export_cna &&
+           left->strict_gsva == right->strict_gsva &&
+           (!left->strict_gsva ||
+            (left->segment_id == right->segment_id && left->epoch == right->epoch &&
+             left->segment_flags == right->segment_flags &&
+             left->owner_node == right->owner_node && left->node_count == right->node_count &&
+             left->cache_policy == right->cache_policy && left->p_tag == right->p_tag &&
+             left->access_flags == right->access_flags &&
+             left->gsva_token_id == right->gsva_token_id &&
+             left->gsva_token_value == right->gsva_token_value));
 }
 
 #ifdef __linux__
@@ -200,6 +266,45 @@ static bool mem_service_obmm_parse_u32_file(const char *path,
     return true;
 }
 #endif
+
+int mem_service_provider_obmm_encode_gsva(
+    const struct obmm_gsva_segment_desc_v1 *segment,
+    const struct obmm_cmd_export *exported,
+    struct mem_service_provider_descriptor *descriptor_out)
+{
+#ifdef __linux__
+    struct mem_service_obmm_descriptor_v1 d = {0};
+
+    if (!segment || !exported || !descriptor_out ||
+        segment->version != OBMM_GSVA_ABI_VERSION ||
+        exported->length != 1 || exported->uba != segment->home_va ||
+        exported->size[0] != segment->size ||
+        !(exported->flags & OBMM_EXPORT_FLAG_GSVA_FIXED_UBA)) return -1;
+    d.export_mem_id = exported->mem_id;
+    d.remote_uba = segment->home_va;
+    d.size = segment->size;
+    d.token_id = exported->tokenid;
+    d.export_cna = segment->home_cna;
+    d.strict_gsva = true;
+    d.segment_id = segment->segment_id;
+    d.epoch = segment->epoch;
+    d.segment_flags = segment->flags;
+    d.owner_node = segment->owner_node_id;
+    d.node_count = segment->node_count;
+    d.cache_policy = segment->cache_policy;
+    d.p_tag = segment->p_tag;
+    d.access_flags = segment->access_flags;
+    d.gsva_token_id = segment->token_id;
+    d.gsva_token_value = segment->token_value;
+    return mem_service_obmm_descriptor_encode(&d, descriptor_out);
+#else
+    (void)segment;
+    (void)exported;
+    (void)descriptor_out;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
 
 int mem_service_provider_obmm_probe_device(const char *device_path,
                                            const char *primary_cna_path,
@@ -407,6 +512,63 @@ static bool mem_service_obmm_descriptor_is_local(
     return false;
 }
 
+static int mem_service_obmm_import_gsva(
+    struct mem_service_obmm_context *context,
+    const struct mem_service_obmm_descriptor_v1 *d,
+    uint64_t local_pa, uint64_t *mem_id)
+{
+    struct obmm_gsva_segment_desc_v1 segment = {0};
+
+    segment.version = OBMM_GSVA_ABI_VERSION;
+    segment.flags = d->segment_flags;
+    segment.segment_id = d->segment_id;
+    segment.home_va = d->remote_uba;
+    segment.size = d->size;
+    segment.epoch = d->epoch;
+    segment.home_cna = d->export_cna;
+    segment.owner_node_id = d->owner_node;
+    segment.node_count = d->node_count;
+    segment.cache_policy = d->cache_policy;
+    segment.p_tag = d->p_tag;
+    segment.access_flags = d->access_flags;
+    segment.token_id = d->gsva_token_id;
+    segment.token_value = d->gsva_token_value;
+    return obmm_do_import_gsva_desc_v1(context->obmm_fd, &segment,
+                                       context->local_cna, local_pa,
+                                       d->remote_uba, mem_id);
+}
+
+static int mem_service_obmm_map_strict(uint64_t mem_id,
+    const struct mem_service_obmm_descriptor_v1 *d, uint32_t access,
+    bool osync, struct obmm_helpers_region *region)
+{
+    char path[128];
+    int prot = 0;
+
+    if (access & MEM_SERVICE_MAPPING_FLAG_READ) prot |= PROT_READ;
+    if (access & MEM_SERVICE_MAPPING_FLAG_WRITE) prot |= PROT_WRITE;
+    snprintf(path, sizeof(path), "/dev/obmm_shmdev%" PRIu64, mem_id);
+    region->mem_id = mem_id;
+    region->len = d->size;
+    region->fd = open(path, ((prot & PROT_WRITE) ? O_RDWR : O_RDONLY) |
+                            (osync ? O_SYNC : 0));
+    if (region->fd < 0) return -1;
+    region->addr = mmap((void *)(uintptr_t)d->remote_uba, d->size, prot,
+                        MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_GSVA,
+                        region->fd, 0);
+    if (region->addr == MAP_FAILED) {
+        close(region->fd);
+        region->fd = -1;
+        region->addr = NULL;
+        return -1;
+    }
+    if ((uintptr_t)region->addr != d->remote_uba) {
+        obmm_unmap_region(region);
+        return -1;
+    }
+    return 0;
+}
+
 static int mem_service_obmm_provider_map_remote_region(
     void *opaque,
     const struct mem_service_mapping_request *request,
@@ -438,6 +600,16 @@ static int mem_service_obmm_provider_map_remote_region(
         descriptor.size != request->remote_region_len) {
         return -1;
     }
+    if (descriptor.strict_gsva &&
+        ((request->requested_address != NULL &&
+          (uintptr_t)request->requested_address != descriptor.remote_uba) ||
+         ((request->flags & MEM_SERVICE_MAPPING_FLAG_READ) &&
+          !(descriptor.access_flags & OBMM_GSVA_ACCESS_READ)) ||
+         ((request->flags & MEM_SERVICE_MAPPING_FLAG_WRITE) &&
+          !(descriptor.access_flags & OBMM_GSVA_ACCESS_WRITE)) ||
+         descriptor.size > context->import_region_bytes)) {
+        return -1;
+    }
     for (i = 0; i < context->max_remote_mappings; ++i) {
         if (!context->mappings[i].active) {
             slot = &context->mappings[i];
@@ -448,11 +620,16 @@ static int mem_service_obmm_provider_map_remote_region(
     if (slot == NULL) {
         return -1;
     }
-    local = mem_service_obmm_descriptor_is_local(context, &descriptor);
+    local = descriptor.strict_gsva ? descriptor.export_cna == context->local_cna :
+                                    mem_service_obmm_descriptor_is_local(context, &descriptor);
     map_osync = context->force_osync ||
                 (!local && context->import_osync[slot_index]);
     if (local) {
         import_mem_id = descriptor.export_mem_id;
+    } else if (descriptor.strict_gsva) {
+        if (mem_service_obmm_import_gsva(context, &descriptor,
+                                         context->import_pas[slot_index],
+                                         &import_mem_id) != 0) return -1;
     } else {
         memset(&meta, 0, sizeof(meta));
         meta.export_mem_id = descriptor.export_mem_id;
@@ -471,11 +648,14 @@ static int mem_service_obmm_provider_map_remote_region(
     }
     memset(slot, 0, sizeof(*slot));
     slot->region.fd = -1;
-    if (obmm_map_region_at(import_mem_id,
+    if ((descriptor.strict_gsva ?
+         mem_service_obmm_map_strict(import_mem_id, &descriptor, request->flags,
+                                     map_osync, &slot->region) :
+         obmm_map_region_at(import_mem_id,
                            request->requested_address,
                            descriptor.size,
                            map_osync,
-                           &slot->region) != 0) {
+                           &slot->region)) != 0) {
         if (!local) {
             (void)obmm_do_unimport(context->obmm_fd, import_mem_id);
         }
@@ -793,6 +973,7 @@ int mem_service_provider_obmm_endpoint_open(
         context->import_pas[i] += config->import_pa_bias;
     }
     context->max_remote_mappings = config->max_remote_mappings;
+    context->import_region_bytes = config->import_region_bytes;
     context->required_peer_mappings = config->required_peer_mappings;
     context->force_osync = config->force_osync;
     snprintf(context->instance,
@@ -987,7 +1168,7 @@ int mem_service_provider_obmm_endpoint_exchange_remote_regions(
         local->memory_kind != MEM_SERVICE_MEMORY_HOST || local->len == 0 ||
         mem_service_obmm_descriptor_decode(
             &local->descriptor, &local_descriptor) != 0 ||
-        local_descriptor.size != local->len) {
+        local_descriptor.size != local->len || local_descriptor.strict_gsva) {
         return -1;
     }
     context = endpoint->implementation;
@@ -1263,8 +1444,69 @@ int mem_service_provider_obmm_run_protocol_fixture(void)
     if (mem_service_obmm_descriptor_decode(&opaque, &decoded) == 0) {
         return 1;
     }
+    source.strict_gsva = true;
+    source.remote_uba = 0x700000000000ULL;
+    source.segment_id = 73;
+    source.epoch = 19;
+    source.segment_flags = 7;
+    source.owner_node = 1;
+    source.node_count = 3;
+    source.cache_policy = 4;
+    source.access_flags = 3;
+    source.gsva_token_id = 11;
+    source.gsva_token_value = 53;
+    if (mem_service_obmm_descriptor_encode(&source, &opaque) != 0 ||
+        opaque.len != MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES ||
+        mem_service_obmm_descriptor_decode(&opaque, &decoded) != 0 ||
+        !mem_service_obmm_descriptor_equal(&source, &decoded) ||
+        decoded.token_id == decoded.gsva_token_id) return 1;
+    colliding_peer = source;
+    colliding_peer.epoch++;
+    if (mem_service_obmm_descriptor_equal(&source, &colliding_peer)) return 1;
+    colliding_peer = source;
+    colliding_peer.gsva_token_value++;
+    if (mem_service_obmm_descriptor_equal(&source, &colliding_peer)) return 1;
+#ifdef __linux__
+    {
+        struct obmm_gsva_segment_desc_v1 segment = {
+            .version = OBMM_GSVA_ABI_VERSION, .flags = source.segment_flags,
+            .segment_id = source.segment_id, .home_va = source.remote_uba,
+            .size = source.size, .epoch = source.epoch, .home_cna = source.export_cna,
+            .owner_node_id = source.owner_node, .node_count = source.node_count,
+            .cache_policy = source.cache_policy, .p_tag = source.p_tag,
+            .access_flags = source.access_flags, .token_id = source.gsva_token_id,
+            .token_value = source.gsva_token_value,
+        };
+        struct obmm_cmd_export exported = {0};
+        struct mem_service_provider_descriptor native;
+        exported.length = 1;
+        exported.size[0] = source.size;
+        exported.flags = OBMM_EXPORT_FLAG_GSVA_FIXED_UBA | OBMM_EXPORT_FLAG_ALLOW_MMAP;
+        exported.uba = source.remote_uba;
+        exported.mem_id = source.export_mem_id;
+        exported.tokenid = source.token_id;
+        if (mem_service_provider_obmm_encode_gsva(&segment, &exported, &native) != 0 ||
+            native.len != opaque.len || memcmp(native.bytes, opaque.bytes, native.len)) return 1;
+        exported.uba++;
+        if (mem_service_provider_obmm_encode_gsva(&segment, &exported, &native) == 0) return 1;
+    }
+#endif
+    opaque.len = MEM_SERVICE_OBMM_DESCRIPTOR_BYTES;
+    if (mem_service_obmm_descriptor_decode(&opaque, &decoded) == 0) return 1;
+    opaque.len = MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES;
+    mem_service_obmm_put_u32(opaque.bytes + 92, 0);
+    if (mem_service_obmm_descriptor_decode(&opaque, &decoded) == 0) return 1;
+    source.remote_uba = UINT64_MAX - 4095;
+    if (mem_service_obmm_descriptor_encode(&source, &opaque) == 0) return 1;
+    source.remote_uba = 0x700000000000ULL;
+    source.owner_node = source.node_count;
+    if (mem_service_obmm_descriptor_encode(&source, &opaque) == 0) return 1;
+    source.owner_node = 1;
+    source.segment_flags |= 8;
+    if (mem_service_obmm_descriptor_encode(&source, &opaque) == 0) return 1;
     printf("mem_service obmm-provider-fixtures: status=ok "
            "descriptor_version=1 corruption=fail-closed "
+           "gsva_descriptor_version=2 gsva_identity=checked "
            "node_local_id_collision=fail-closed "
            "mapping_path=sim-dec urma_dependency=none\n");
     return 0;

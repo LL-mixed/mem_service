@@ -24,6 +24,13 @@ struct mem_service_provider_obmm_endpoint {
     void *implementation;
 };
 
+struct obmm_gsva_segment_desc_v1;
+struct obmm_cmd_export;
+int mem_service_provider_obmm_encode_gsva(
+    const struct obmm_gsva_segment_desc_v1 *segment,
+    const struct obmm_cmd_export *exported,
+    struct mem_service_provider_descriptor *descriptor_out);
+
 int mem_service_provider_obmm_probe_device(const char *device_path,
                                            const char *primary_cna_path,
                                            char *detail,
@@ -64,5 +71,8 @@ int mem_service_provider_obmm_endpoint_verify_mapping(
 void mem_service_provider_obmm_endpoint_close(
     struct mem_service_provider_obmm_endpoint *endpoint);
 int mem_service_provider_obmm_run_protocol_fixture(void);
+#ifdef MEM_SERVICE_OBMM_MANAGED_WORKER
+int mem_service_provider_obmm_serve_allocations(const char *config_path);
+#endif
 
 #endif

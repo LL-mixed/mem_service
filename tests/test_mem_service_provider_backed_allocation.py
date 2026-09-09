@@ -231,6 +231,51 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
         self.assertEqual(view.get("provider_backed"), "0", result.stdout)
         return int(view["generation"])
 
+    def _poll(self, after=0, incarnation=HOME_INCARNATION, node=HOME_NODE):
+        return self._run_client(
+            "poll-allocation", "--node-id", node,
+            "--incarnation", str(incarnation),
+            "--after-generation", str(after), "--connect", self._connect,
+        )
+
+    def test_poll_enumerates_pending_without_consuming_work(self):
+        proc = self._start_home_daemon()
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            self.assertIn("status=not_found", self._poll().stdout)
+            first = self._allocate_bound("poll-a", "poll-idem-a")
+            second = self._allocate_bound("poll-b", "poll-idem-b")
+            for _ in range(2):
+                result = self._poll()
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                view = _parse_kv(result.stdout)
+                self.assertEqual(view["key"], "poll-a")
+                self.assertEqual(int(view["generation"]), first)
+                self.assertEqual(view["state"], "allocating")
+            self.assertEqual(_parse_kv(self._poll(first).stdout)["key"], "poll-b")
+            self.assertIn("status=not_found", self._poll(second).stdout)
+            self.assertEqual(self._publish("poll-a", first).returncode, 0)
+            self.assertEqual(_parse_kv(self._poll().stdout)["key"], "poll-b")
+        finally:
+            self._stop_server(proc)
+
+    def test_poll_rejects_stale_or_unregistered_provider(self):
+        proc = self._start_home_daemon()
+        try:
+            self.assertIn("reason=provider_unavailable", self._poll().stdout)
+            self.assertEqual(self._register_home().returncode, 0)
+            self._allocate_bound("poll-bound", "poll-bound-idem")
+            self.assertIn("reason=provider_mismatch",
+                          self._poll(incarnation=HOME_INCARNATION + 1).stdout)
+            self.assertIn("reason=provider_unavailable", self._poll(node="foreign").stdout)
+            self.assertIn("status=invalid_session", self._poll(node="n" * 256).stdout)
+            self.assertIn("status=invalid_session", self._poll(after=-1).stdout)
+            self.assertIn("status=invalid_session", self._poll(after=1 << 64).stdout)
+            self.assertIn("status=invalid_session", self._poll(incarnation=0).stdout)
+            self.assertEqual(self._inspect("poll-bound")["state"], "allocating")
+        finally:
+            self._stop_server(proc)
+
     # The bound home provider publishes the reserved descriptor; the
     # allocation stays ALLOCATING until then and the descriptor/address
     # round-trips through inspect.
@@ -332,6 +377,7 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
                 "--connect", self._connect,
             )
             self.assertIn("state=retiring", retired.stdout)
+            self.assertIn("status=not_found", self._poll().stdout)
 
             released = self._run_client(
                 "release-object", "--key", "obj-4", "--idempotency-key", "rel-4",
@@ -344,10 +390,15 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
                 "provider-backed object must wait for reclaim confirmation",
             )
 
+            work = _parse_kv(self._poll().stdout)
+            self.assertEqual(work["key"], "obj-4")
+            self.assertEqual(work["state"], "retiring")
+            self.assertEqual(work["live_refs"], "0")
             reclaim = self._reclaim("obj-4", generation, confirmed=1)
             self.assertEqual(reclaim.returncode, 0, reclaim.stderr + reclaim.stdout)
             self.assertIn("state=retired", reclaim.stdout)
             self.assertEqual(self._inspect("obj-4").get("state"), "retired")
+            self.assertIn("status=not_found", self._poll().stdout)
             stats = self._stats()
             self.assertEqual(stats.get("reclaim_ok_count"), "1")
             self.assertEqual(stats.get("quarantined_objects"), "0")

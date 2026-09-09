@@ -12088,6 +12088,57 @@ static enum mem_service_wire_status mem_service_provider_caller_check(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+static bool mem_service_poll_u64(const char *payload, const char *field,
+                                  uint64_t *value)
+{
+    char text[48];
+    char *end;
+
+    if (!mem_service_payload_get_string(payload, field, text, sizeof(text)) ||
+        strlen(text) >= sizeof(text) - 1 || text[0] < '0' || text[0] > '9') {
+        return false;
+    }
+    errno = 0;
+    *value = strtoull(text, &end, 0);
+    return errno == 0 && *end == '\0';
+}
+
+static enum mem_service_wire_status mem_service_poll_allocation(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN + 1];
+    uint64_t incarnation, after_generation;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+    enum mem_service_wire_status status;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_POLL_ALLOCATION,
+                                           response, response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    if (!mem_service_payload_get_string(payload, "node_id", node_id, sizeof(node_id)) ||
+        strlen(node_id) >= MEM_SERVICE_PROVIDER_NODE_ID_LEN ||
+        !mem_service_poll_u64(payload, "incarnation", &incarnation) ||
+        incarnation == 0 ||
+        !mem_service_poll_u64(payload, "after_generation", &after_generation)) {
+        snprintf(response, response_len,
+                 "status=invalid_session\nreason=invalid_request\n");
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    status = mem_service_provider_caller_check(svc, node_id, incarnation,
+                                              response, response_len);
+    if (status != MEM_SERVICE_WIRE_STATUS_OK) {
+        return status;
+    }
+    result = mem_service_managed_poll(&svc->managed, node_id, incarnation,
+                                      after_generation, &view);
+    return mem_service_managed_finish(result, &view, "", response, response_len);
+}
+
 static int mem_service_managed_hex_value(char c)
 {
     if (c >= '0' && c <= '9') {
@@ -12384,6 +12435,8 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
         return mem_service_publish_allocation(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
         return mem_service_reclaim_allocation(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_POLL_ALLOCATION:
+        return mem_service_poll_allocation(svc, payload, response, response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -14565,6 +14618,7 @@ static bool mem_service_network_operation_allowed(
     case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
     case MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION:
     case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
+    case MEM_SERVICE_WIRE_OP_POLL_ALLOCATION:
         return true;
     default:
         return false;

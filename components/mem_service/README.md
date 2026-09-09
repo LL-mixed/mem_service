@@ -1,5 +1,19 @@
 # Memory Service Component
 
+## Provider allocation work polling
+
+`poll-allocation` returns the lowest allocation generation greater than
+`after_generation` bound to the caller's active `node_id` and `incarnation`.
+Eligible states are ALLOCATING and RETIRING with zero holders. No work returns
+NOT_FOUND; a provider scans from zero again after reaching the end. Polling is
+read-only and does not claim, allocate, or reclaim resources. A single worker
+per provider incarnation must reconcile reservations by `(key, generation)`
+before retrying work and confirm results through publish/reclaim. A response
+is a snapshot: cancellation can race execution and must be reconciled before
+resource reuse. This API carries metadata only and does not prove backing or
+data-plane readiness. It uses the existing trusted-control-endpoint security
+boundary; a self-reported node identity is not authentication.
+
 `mem_service` owns the guest-side memory/object metadata service used by LLM
 inference guest harnesses and is being promoted into a standalone Memory
 Service process.

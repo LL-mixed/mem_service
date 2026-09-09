@@ -1,4 +1,5 @@
 import pathlib
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -27,7 +28,9 @@ LIBOBMM_SRCS = [
 
 
 class MemServiceObmmProviderTest(unittest.TestCase):
-    def _compile(self, compiler: str, output: pathlib.Path) -> None:
+    def _compile(self, compiler: str, output: pathlib.Path, linux_backend=None) -> None:
+        if linux_backend is None:
+            linux_backend = platform.system() == "Linux"
         subprocess.run(
             [
                 compiler,
@@ -40,11 +43,12 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 str(COMPONENT),
                 "-I",
                 str(PROVIDERS),
-                *LIBOBMM_INCLUDE_FLAGS,
+                *(LIBOBMM_INCLUDE_FLAGS if linux_backend else []),
                 str(PROVIDERS / "mem_service_provider_obmm_cli.c"),
                 str(PROVIDERS / "mem_service_provider_obmm.c"),
                 str(COMPONENT / "mem_service_provider.c"),
-                *LIBOBMM_SRCS,
+                *(LIBOBMM_SRCS if linux_backend else []),
+                "-pthread",
                 "-o",
                 str(output),
             ],
@@ -112,6 +116,8 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn("status=ok", fixture.stdout)
+            self.assertIn("gsva_descriptor_version=2", fixture.stdout)
+            self.assertIn("gsva_identity=checked", fixture.stdout)
             self.assertIn("node_local_id_collision=fail-closed", fixture.stdout)
             self.assertIn("mapping_path=sim-dec", fixture.stdout)
             self.assertIn("urma_dependency=none", fixture.stdout)
@@ -136,11 +142,13 @@ class MemServiceObmmProviderTest(unittest.TestCase):
 
     def test_linux_backend_cross_compiles_when_toolchain_is_available(self):
         compiler = shutil.which("aarch64-linux-gnu-gcc")
+        if compiler is None and platform.system() == "Linux" and platform.machine() == "aarch64":
+            compiler = shutil.which("cc")
         if compiler is None:
             self.skipTest("aarch64-linux-gnu-gcc is unavailable")
         with tempfile.TemporaryDirectory() as temp_dir:
             output = pathlib.Path(temp_dir) / "linqu_mem_service_provider_obmm"
-            self._compile(compiler, output)
+            self._compile(compiler, output, linux_backend=True)
             self.assertTrue(output.exists())
 
             conformance = pathlib.Path(temp_dir) / "obmm_conformance"
@@ -152,6 +160,7 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                     "-Wall",
                     "-Wextra",
                     "-Werror",
+                    "-pthread",
                     "-I",
                     str(ROOT),
                     "-I",

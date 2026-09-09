@@ -10,6 +10,9 @@ static void mem_service_obmm_cli_usage(const char *program)
             "       %s protocol-fixtures\n",
             program,
             program);
+#ifdef MEM_SERVICE_OBMM_MANAGED_WORKER
+    fprintf(stderr, "       %s serve-allocations --config <path>\n", program);
+#endif
 }
 
 static int mem_service_obmm_cli_status(int argc, char **argv)
@@ -59,6 +62,12 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "protocol-fixtures") == 0 && argc == 2) {
         return mem_service_provider_obmm_run_protocol_fixture();
     }
+#ifdef MEM_SERVICE_OBMM_MANAGED_WORKER
+    if (strcmp(argv[1], "serve-allocations") == 0 && argc == 4 &&
+        strcmp(argv[2], "--config") == 0) {
+        return mem_service_provider_obmm_serve_allocations(argv[3]);
+    }
+#endif
     mem_service_obmm_cli_usage(argv[0]);
     return 2;
 }

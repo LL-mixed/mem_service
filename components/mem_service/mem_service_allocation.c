@@ -676,6 +676,45 @@ enum mem_service_managed_result mem_service_managed_reclaim(
     return MEM_SERVICE_MANAGED_RESULT_OK;
 }
 
+enum mem_service_managed_result mem_service_managed_poll(
+    const struct mem_service_managed_table *table,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t after_generation,
+    struct mem_service_managed_view *view_out)
+{
+    const struct mem_service_managed_allocation *next = NULL;
+    size_t i;
+
+    if (view_out != NULL) {
+        memset(view_out, 0, sizeof(*view_out));
+    }
+    if (table == NULL || view_out == NULL || incarnation == 0 ||
+        !mem_service_managed_string_valid(node_id, MEM_SERVICE_MANAGED_NODE_ID_LEN)) {
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        const struct mem_service_managed_allocation *entry = &table->entries[i];
+
+        if (!entry->in_use || entry->generation <= after_generation ||
+            entry->provider_incarnation != incarnation ||
+            strcmp(entry->home_node_id, node_id) != 0 ||
+            (entry->state != MEM_SERVICE_MANAGED_STATE_ALLOCATING &&
+             !(entry->state == MEM_SERVICE_MANAGED_STATE_RETIRING &&
+               entry->holder_count == 0))) {
+            continue;
+        }
+        if (next == NULL || entry->generation < next->generation) {
+            next = entry;
+        }
+    }
+    if (next == NULL) {
+        return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    }
+    mem_service_managed_fill_view(next, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
 enum mem_service_managed_result mem_service_managed_inspect(
     const struct mem_service_managed_table *table,
     const char *key,

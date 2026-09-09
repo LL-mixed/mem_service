@@ -278,6 +278,13 @@ static const struct mem_service_wire_payload_field
         {"confirmed", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
 };
 
+static const struct mem_service_wire_payload_field
+    mem_service_wire_poll_allocation_fields[] = {
+        {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"after_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
 static const struct mem_service_wire_operation_schema
     mem_service_wire_operation_schemas[] = {
         {MEM_SERVICE_WIRE_OP_HEALTH,
@@ -585,6 +592,15 @@ static const struct mem_service_wire_operation_schema
          mem_service_wire_publish_allocation_fields,
          sizeof(mem_service_wire_publish_allocation_fields) /
              sizeof(mem_service_wire_publish_allocation_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_POLL_ALLOCATION,
+         "poll_allocation",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_poll_allocation_fields,
+         sizeof(mem_service_wire_poll_allocation_fields) /
+             sizeof(mem_service_wire_poll_allocation_fields[0]),
          NULL,
          0},
         {MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,

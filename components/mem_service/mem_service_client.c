@@ -1569,6 +1569,30 @@ int mem_service_client_retire_object(
                                              status_out);
 }
 
+int mem_service_client_poll_allocation(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t after_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[256] = "";
+
+    if (incarnation == 0 ||
+        mem_service_client_append_required_string(payload, sizeof(payload),
+                                                  "node_id", node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "incarnation", incarnation) != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "after_generation", after_generation) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(client,
+                                              MEM_SERVICE_WIRE_OP_POLL_ALLOCATION,
+                                              payload, allocation_out, status_out);
+}
+
 int mem_service_client_inspect_allocation(
     const struct mem_service_client *client,
     const char *key,

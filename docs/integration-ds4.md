@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+地址管理 SDK 新增 `mem_service_client_poll_allocation()`，供常驻 home provider
+查询绑定到自身 incarnation 的待分配/待回收对象。DS4 模型客户端不调用该接口，
+也不负责 backing 发布或地址 bootstrap。该接口不改变现有推理 API 或传输选择，
+详细扫描及重试语义见组件 README 的 Provider allocation work polling 小节。
+
 本文面向 `ds4`（3 节点 PP 推理，C/CUDA）的维护者：说明 ds4 如何消费
 `mem_service` **安装后的 SDK**，并明确区分进程内 activation payload provider
 与独立 prefix/KV/object daemon。ub_sim 的源码消费方式见

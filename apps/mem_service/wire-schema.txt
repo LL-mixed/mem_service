@@ -1,8 +1,8 @@
 mem_service_wire_schema_manifest_version=1
 wire_schema_version=1
 wire_payload_format=text-kv
-operation_count=36
-field_count=207
+operation_count=37
+field_count=210
 oneof_count=1
 oneof_field_count=2
 operation=health:1 schema_version=1 payload_format=text-kv fields=0 oneofs=0
@@ -245,6 +245,10 @@ field=publish_allocation.incarnation type=u64 required=1
 field=publish_allocation.descriptor_hex type=string required=1
 field=publish_allocation.address type=u64 required=1
 field=publish_allocation.address_len type=u64 required=1
+operation=poll_allocation:124 schema_version=1 payload_format=text-kv fields=3 oneofs=0
+field=poll_allocation.node_id type=string required=1
+field=poll_allocation.incarnation type=u64 required=1
+field=poll_allocation.after_generation type=u64 required=1
 operation=reclaim_allocation:123 schema_version=1 payload_format=text-kv fields=5 oneofs=0
 field=reclaim_allocation.key type=string required=1
 field=reclaim_allocation.generation type=u64 required=1

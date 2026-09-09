@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "components/mem_service/mem_service_core.h"
@@ -28,10 +29,10 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 16046U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xe23bc83aU
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 36U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 207U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 16300U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x5905d107U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 37U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 210U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
@@ -41,7 +42,7 @@
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x2956bdfdU
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xf4139152U
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -54,7 +55,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x1bb4128fU
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x0095ab54U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -65,12 +66,12 @@
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0xbcb85c0fU
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x5b574449U
 #define MEM_SERVICE_COMPAT_MATRIX_STATUS_COUNT 11U
 #define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_LEN 1252U
-#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0xf97cfd5fU
+#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0xe74ef98aU
 #define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_LEN 1734U
-#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x2277d04aU
+#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x38956796U
 #define MEM_SERVICE_CLI_STORE_MAGIC "mem_service_store_v1"
 
 static void usage(const char *argv0)
@@ -143,6 +144,8 @@ static void usage(const char *argv0)
     printf(" [provider-deregister --node-id <id> --incarnation <u64>] [provider-directory-status]");
     printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
+    printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
+    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats> field=value ...]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -2397,7 +2400,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "service_version=" MEM_SERVICE_RELEASE_VERSION "\n") == NULL ||
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
-        strstr(manifest, "wire_schema_manifest_checksum=0xe23bc83a\n") == NULL ||
+        strstr(manifest, "wire_schema_manifest_checksum=0x5905d107\n") == NULL ||
         strstr(manifest, "api_abi_policy_checksum=0x5e460a87\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
@@ -5642,7 +5645,7 @@ static int run_release_fixture_check(void)
            "metrics_scrape_paths=1 "
            "client_retry_policies=1 "
            "client_api_profiles=2 compat_artifacts=3 "
-           "operations=36 statuses=11 "
+           "operations=37 statuses=11 "
            "schema_manifest_len=%u schema_manifest_checksum=0x%08x "
            "api_abi_policy_len=%u api_abi_policy_checksum=0x%08x "
            "admin_output_schema_len=%u "
@@ -9279,6 +9282,20 @@ static int run_provider_directory_status(int argc, char **argv)
  * 0x7a-0x7b). Only the bound home provider process invokes these; the
  * descriptor crosses as opaque hex and payload bytes never move.
  */
+static int run_poll_allocation(int argc, char **argv)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--after-generation", "after_generation") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc, argv,
+                                      MEM_SERVICE_WIRE_OP_POLL_ALLOCATION,
+                                      "poll-allocation", payload);
+}
+
 static int run_publish_allocation(int argc, char **argv)
 {
     char payload[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
@@ -9315,6 +9332,1270 @@ static int run_reclaim_allocation(int argc, char **argv)
                                       MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
                                       "reclaim-allocation",
                                       payload);
+}
+
+/*
+ * object-session --config <path> (M1.2, plan §3.7). Runs a deterministic
+ * managed-allocation operation sequence through the client SDK and keeps
+ * the process alive until the configured sequence completes (release and
+ * retire are explicit ops). The config is text-kv: a session header
+ * (session_id, connect, optional request_timeout_ms) followed by ordered
+ * op= lines. Every op prints one machine-readable result line;
+ * expect_status turns negative paths into deterministic assertions;
+ * wait_state polls inspect-allocation inside a bounded timeout so
+ * producer/consumer coordination keys off object state, never fixed
+ * sleeps. The CLI holds no allocation semantics of its own: each op is
+ * exactly one SDK call. Payload (map/write/read) ops join when the
+ * provider data path lands; this slice covers the control-plane
+ * choreography shared by T-share-memory producer/consumer pairs.
+ */
+#define MEM_SERVICE_OBJECT_SESSION_MAX_OPS 64U
+#define MEM_SERVICE_OBJECT_SESSION_MAX_FIELDS 16U
+#define MEM_SERVICE_OBJECT_SESSION_LINE_LEN 768U
+#define MEM_SERVICE_OBJECT_SESSION_FIELD_NAME_LEN 32U
+#define MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN 288U
+#define MEM_SERVICE_OBJECT_SESSION_MAX_WAIT_MS 60000U
+#define MEM_SERVICE_OBJECT_SESSION_MAX_REQUEST_TIMEOUT_MS 60000U
+#define MEM_SERVICE_OBJECT_SESSION_DEFAULT_REQUEST_TIMEOUT_MS 5000U
+#define MEM_SERVICE_OBJECT_SESSION_DEFAULT_POLL_MS 100U
+#define MEM_SERVICE_OBJECT_SESSION_MAX_POLL_MS 5000U
+#define MEM_SERVICE_OBJECT_SESSION_MIN_POLL_MS 10U
+
+enum mem_service_object_session_action {
+    MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE = 1,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE = 2,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE = 3,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE = 4,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT = 5,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE = 6,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH = 7,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM = 8,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_STATS = 9,
+};
+
+struct mem_service_object_session_field {
+    char name[MEM_SERVICE_OBJECT_SESSION_FIELD_NAME_LEN];
+    char value[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
+};
+
+struct mem_service_object_session_op {
+    uint32_t action;
+    enum mem_service_wire_status expect_status;
+    char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    char idempotency_key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    uint64_t size_bytes;
+    uint64_t alignment_bytes;
+    uint64_t capabilities;
+    bool has_expected_generation;
+    uint64_t expected_generation;
+    bool has_expect_state;
+    char expect_state[MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN];
+    bool has_expect_holder_count;
+    uint64_t expect_holder_count;
+    char wait_state[MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN];
+    uint64_t wait_timeout_ms;
+    uint64_t wait_poll_ms;
+    char node_id[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
+    uint64_t incarnation;
+    uint64_t generation;
+    uint8_t descriptor[MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN];
+    uint32_t descriptor_len;
+    uint64_t address;
+    uint64_t address_len;
+    bool confirmed;
+};
+
+struct mem_service_object_session_config {
+    char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    char connect[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
+    uint64_t request_timeout_ms;
+    uint32_t op_count;
+    struct mem_service_object_session_op
+        ops[MEM_SERVICE_OBJECT_SESSION_MAX_OPS];
+};
+
+static const char *mem_service_object_session_action_name(uint32_t action)
+{
+    switch (action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE:
+        return "allocate";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
+        return "acquire";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+        return "release";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE:
+        return "retire";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT:
+        return "inspect";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE:
+        return "wait_state";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH:
+        return "publish";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM:
+        return "reclaim";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS:
+        return "stats";
+    default:
+        return "unknown";
+    }
+}
+
+static uint64_t mem_service_object_session_monotonic_ms(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
+}
+
+static void mem_service_object_session_sleep_ms(uint64_t ms)
+{
+    struct timespec ts;
+
+    ts.tv_sec = (time_t)(ms / 1000U);
+    ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
+    (void)nanosleep(&ts, NULL);
+}
+
+static bool mem_service_object_session_parse_u64(const char *value,
+                                                 uint64_t *out)
+{
+    char *end = NULL;
+    unsigned long long parsed;
+
+    /* strtoull accepts a leading '-'/'+' and wraps; config values are
+     * unsigned quantities, so a sign is a config error, not a value. */
+    if (value == NULL || !isdigit((unsigned char)value[0])) {
+        return false;
+    }
+    errno = 0;
+    parsed = strtoull(value, &end, 0);
+    if (errno != 0 || end == value || *end != '\0') {
+        return false;
+    }
+    *out = (uint64_t)parsed;
+    return true;
+}
+
+static bool mem_service_object_session_parse_capabilities(const char *value,
+                                                          uint64_t *out)
+{
+    uint64_t caps = 0;
+    char buf[64];
+    char *token;
+    char *save = NULL;
+
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    if (isdigit((unsigned char)value[0])) {
+        if (!mem_service_object_session_parse_u64(value, &caps)) {
+            return false;
+        }
+    } else {
+        if (strlen(value) >= sizeof(buf)) {
+            return false;
+        }
+        snprintf(buf, sizeof(buf), "%s", value);
+        for (token = strtok_r(buf, ",", &save);
+             token != NULL;
+             token = strtok_r(NULL, ",", &save)) {
+            if (strcmp(token, "map") == 0) {
+                caps |= MEM_SERVICE_CLIENT_MANAGED_CAP_MAP;
+            } else if (strcmp(token, "block_io") == 0) {
+                caps |= MEM_SERVICE_CLIENT_MANAGED_CAP_BLOCK_IO;
+            } else {
+                return false;
+            }
+        }
+    }
+    if (caps == 0 ||
+        (caps & ~(MEM_SERVICE_CLIENT_MANAGED_CAP_MAP |
+                  MEM_SERVICE_CLIENT_MANAGED_CAP_BLOCK_IO)) != 0) {
+        return false;
+    }
+    *out = caps;
+    return true;
+}
+
+static int mem_service_object_session_hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool mem_service_object_session_parse_hex(const char *value,
+                                                 uint8_t *out,
+                                                 uint32_t capacity,
+                                                 uint32_t *len_out)
+{
+    size_t len;
+    size_t i;
+
+    if (value == NULL) {
+        return false;
+    }
+    len = strlen(value);
+    if (len == 0 || (len & 1U) != 0 || len / 2U > capacity) {
+        return false;
+    }
+    for (i = 0; i < len; i += 2U) {
+        int hi = mem_service_object_session_hex_value(value[i]);
+        int lo = mem_service_object_session_hex_value(value[i + 1U]);
+
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        out[i / 2U] = (uint8_t)((hi << 4) | lo);
+    }
+    *len_out = (uint32_t)(len / 2U);
+    return true;
+}
+
+static bool mem_service_object_session_parse_status(
+    const char *value,
+    enum mem_service_wire_status *out)
+{
+    int candidate;
+
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    for (candidate = 0;
+         candidate <= (int)MEM_SERVICE_WIRE_STATUS_INTERNAL;
+         ++candidate) {
+        enum mem_service_wire_status status =
+            (enum mem_service_wire_status)candidate;
+
+        if (strcmp(value, mem_service_wire_status_name(status)) == 0) {
+            *out = status;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void mem_service_object_session_config_error(uint32_t line_no,
+                                                    const char *detail,
+                                                    const char *token)
+{
+    if (line_no != 0) {
+        fprintf(stderr,
+                "mem_service object-session: config error: line %u: %s%s%s\n",
+                line_no,
+                detail,
+                token != NULL ? ": " : "",
+                token != NULL ? token : "");
+    } else {
+        fprintf(stderr,
+                "mem_service object-session: config error: %s%s%s\n",
+                detail,
+                token != NULL ? ": " : "",
+                token != NULL ? token : "");
+    }
+}
+
+static bool mem_service_object_session_copy_field(char *dst,
+                                                  size_t dst_len,
+                                                  const char *value)
+{
+    size_t len;
+
+    if (value == NULL) {
+        return false;
+    }
+    len = strlen(value);
+    if (len == 0 || len >= dst_len) {
+        return false;
+    }
+    snprintf(dst, dst_len, "%s", value);
+    return true;
+}
+
+static const char *mem_service_object_session_find_field(
+    const struct mem_service_object_session_field *fields,
+    uint32_t field_count,
+    const char *name)
+{
+    uint32_t i;
+
+    for (i = 0; i < field_count; ++i) {
+        if (strcmp(fields[i].name, name) == 0) {
+            return fields[i].value;
+        }
+    }
+    return NULL;
+}
+
+static bool mem_service_object_session_field_allowed(uint32_t action,
+                                                     const char *name)
+{
+    static const char *const common[] = {"expect_status"};
+    static const char *const allocate[] = {
+        "key", "idempotency_key", "size_bytes", "capabilities",
+        "alignment_bytes", "session_id",
+    };
+    static const char *const holder[] = {
+        "key", "idempotency_key", "session_id", "expected_generation",
+    };
+    static const char *const retire[] = {
+        "key", "idempotency_key", "expected_generation",
+    };
+    static const char *const inspect[] = {
+        "key", "expect_state", "expect_generation", "expect_holder_count",
+    };
+    static const char *const wait_state[] = {
+        "key", "state", "timeout_ms", "poll_ms",
+    };
+    static const char *const publish[] = {
+        "key", "node_id", "incarnation", "generation",
+        "descriptor_hex", "address", "address_len",
+    };
+    static const char *const reclaim[] = {
+        "key", "node_id", "incarnation", "generation", "confirmed",
+    };
+    const char *const *table = NULL;
+    size_t count = 0;
+    size_t i;
+
+    for (i = 0; i < sizeof(common) / sizeof(common[0]); ++i) {
+        if (strcmp(name, common[i]) == 0) {
+            return true;
+        }
+    }
+    switch (action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE:
+        table = allocate;
+        count = sizeof(allocate) / sizeof(allocate[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+        table = holder;
+        count = sizeof(holder) / sizeof(holder[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE:
+        table = retire;
+        count = sizeof(retire) / sizeof(retire[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT:
+        table = inspect;
+        count = sizeof(inspect) / sizeof(inspect[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE:
+        table = wait_state;
+        count = sizeof(wait_state) / sizeof(wait_state[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH:
+        table = publish;
+        count = sizeof(publish) / sizeof(publish[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM:
+        table = reclaim;
+        count = sizeof(reclaim) / sizeof(reclaim[0]);
+        break;
+    default:
+        break;
+    }
+    for (i = 0; i < count; ++i) {
+        if (strcmp(name, table[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool mem_service_object_session_parse_action(const char *name,
+                                                    uint32_t *action_out)
+{
+    static const struct {
+        const char *name;
+        uint32_t action;
+    } actions[] = {
+        {"allocate", MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE},
+        {"acquire", MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE},
+        {"release", MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE},
+        {"retire", MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE},
+        {"inspect", MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT},
+        {"wait_state", MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE},
+        {"publish", MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH},
+        {"reclaim", MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM},
+        {"stats", MEM_SERVICE_OBJECT_SESSION_ACTION_STATS},
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(actions) / sizeof(actions[0]); ++i) {
+        if (strcmp(name, actions[i].name) == 0) {
+            *action_out = actions[i].action;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Parse one op= line: "op=<action> field=value ...". Fields are collected
+ * first so duplicates and unknown names fail before any value conversion;
+ * required-field checks then run per action.
+ */
+static int mem_service_object_session_parse_op(
+    char *body,
+    uint32_t line_no,
+    struct mem_service_object_session_op *op)
+{
+    struct mem_service_object_session_field
+        fields[MEM_SERVICE_OBJECT_SESSION_MAX_FIELDS];
+    uint32_t field_count = 0;
+    const char *value;
+    char *token;
+    char *save = NULL;
+
+    memset(op, 0, sizeof(*op));
+    op->expect_status = MEM_SERVICE_WIRE_STATUS_OK;
+    token = strtok_r(body, " \t", &save);
+    if (token == NULL) {
+        mem_service_object_session_config_error(line_no, "empty op", NULL);
+        return 2;
+    }
+    if (!mem_service_object_session_parse_action(token, &op->action)) {
+        mem_service_object_session_config_error(line_no,
+                                                "unknown op action",
+                                                token);
+        return 2;
+    }
+    for (token = strtok_r(NULL, " \t", &save);
+         token != NULL;
+         token = strtok_r(NULL, " \t", &save)) {
+        char *eq = strchr(token, '=');
+        uint32_t i;
+
+        if (eq == NULL || eq == token || eq[1] == '\0') {
+            mem_service_object_session_config_error(line_no,
+                                                    "op field is not name=value",
+                                                    token);
+            return 2;
+        }
+        *eq = '\0';
+        if (strlen(token) >= MEM_SERVICE_OBJECT_SESSION_FIELD_NAME_LEN ||
+            strlen(eq + 1) >= MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN) {
+            mem_service_object_session_config_error(line_no,
+                                                    "op field too long",
+                                                    token);
+            return 2;
+        }
+        for (i = 0; i < field_count; ++i) {
+            if (strcmp(fields[i].name, token) == 0) {
+                mem_service_object_session_config_error(line_no,
+                                                        "duplicate op field",
+                                                        token);
+                return 2;
+            }
+        }
+        if (field_count >= MEM_SERVICE_OBJECT_SESSION_MAX_FIELDS) {
+            mem_service_object_session_config_error(line_no,
+                                                    "too many op fields",
+                                                    NULL);
+            return 2;
+        }
+        if (!mem_service_object_session_field_allowed(op->action, token)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "op field not allowed for action",
+                                                    token);
+            return 2;
+        }
+        snprintf(fields[field_count].name,
+                 sizeof(fields[field_count].name),
+                 "%s",
+                 token);
+        snprintf(fields[field_count].value,
+                 sizeof(fields[field_count].value),
+                 "%s",
+                 eq + 1);
+        field_count += 1U;
+    }
+
+    value = mem_service_object_session_find_field(fields,
+                                                  field_count,
+                                                  "expect_status");
+    if (value != NULL &&
+        !mem_service_object_session_parse_status(value, &op->expect_status)) {
+        mem_service_object_session_config_error(line_no,
+                                                "invalid expect_status",
+                                                value);
+        return 2;
+    }
+    /* wait_state outcomes are state matches or bounded timeouts, never
+     * wire statuses; an expect_status field on it is dead config. */
+    if (value != NULL &&
+        op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE) {
+        mem_service_object_session_config_error(
+            line_no,
+            "expect_status is not allowed for wait_state",
+            NULL);
+        return 2;
+    }
+
+#define MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING(field_name, dst)        \
+    value = mem_service_object_session_find_field(fields,                  \
+                                                  field_count,             \
+                                                  field_name);             \
+    if (value == NULL) {                                                   \
+        mem_service_object_session_config_error(line_no,                   \
+                                                "missing required field",  \
+                                                field_name);               \
+        return 2;                                                          \
+    }                                                                      \
+    if (!mem_service_object_session_copy_field(dst, sizeof(dst), value)) { \
+        mem_service_object_session_config_error(line_no,                   \
+                                                "invalid field value",     \
+                                                field_name);               \
+        return 2;                                                          \
+    }
+
+#define MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64(field_name, dst)           \
+    value = mem_service_object_session_find_field(fields,                  \
+                                                  field_count,             \
+                                                  field_name);             \
+    if (value == NULL) {                                                   \
+        mem_service_object_session_config_error(line_no,                   \
+                                                "missing required field",  \
+                                                field_name);               \
+        return 2;                                                          \
+    }                                                                      \
+    if (!mem_service_object_session_parse_u64(value, &(dst))) {            \
+        mem_service_object_session_config_error(line_no,                   \
+                                                "invalid u64 field",       \
+                                                field_name);               \
+        return 2;                                                          \
+    }
+
+    switch (op->action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key",
+                                                   op->idempotency_key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("size_bytes",
+                                                op->size_bytes);
+        if (op->size_bytes == 0) {
+            mem_service_object_session_config_error(line_no,
+                                                    "size_bytes must be > 0",
+                                                    NULL);
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "capabilities");
+        if (value == NULL) {
+            mem_service_object_session_config_error(line_no,
+                                                    "missing required field",
+                                                    "capabilities");
+            return 2;
+        }
+        if (!mem_service_object_session_parse_capabilities(
+                value, &op->capabilities)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid capabilities",
+                                                    value);
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "alignment_bytes");
+        if (value != NULL &&
+            !mem_service_object_session_parse_u64(value,
+                                                  &op->alignment_bytes)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid u64 field",
+                                                    "alignment_bytes");
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "session_id");
+        if (value != NULL &&
+            !mem_service_object_session_copy_field(op->session_id,
+                                                   sizeof(op->session_id),
+                                                   value)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid field value",
+                                                    "session_id");
+            return 2;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key",
+                                                   op->idempotency_key);
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "session_id");
+        if (value != NULL &&
+            !mem_service_object_session_copy_field(op->session_id,
+                                                   sizeof(op->session_id),
+                                                   value)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid field value",
+                                                    "session_id");
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "expected_generation");
+        if (value != NULL) {
+            if (!mem_service_object_session_parse_u64(
+                    value, &op->expected_generation)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid u64 field",
+                                                        "expected_generation");
+                return 2;
+            }
+            op->has_expected_generation = true;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key",
+                                                   op->idempotency_key);
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "expected_generation");
+        if (value != NULL) {
+            if (!mem_service_object_session_parse_u64(
+                    value, &op->expected_generation)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid u64 field",
+                                                        "expected_generation");
+                return 2;
+            }
+            op->has_expected_generation = true;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "expect_state");
+        if (value != NULL) {
+            if (!mem_service_object_session_copy_field(
+                    op->expect_state, sizeof(op->expect_state), value)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid field value",
+                                                        "expect_state");
+                return 2;
+            }
+            op->has_expect_state = true;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "expect_generation");
+        if (value != NULL) {
+            if (!mem_service_object_session_parse_u64(
+                    value, &op->expected_generation)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid u64 field",
+                                                        "expect_generation");
+                return 2;
+            }
+            op->has_expected_generation = true;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "expect_holder_count");
+        if (value != NULL) {
+            if (!mem_service_object_session_parse_u64(
+                    value, &op->expect_holder_count)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid u64 field",
+                                                        "expect_holder_count");
+                return 2;
+            }
+            op->has_expect_holder_count = true;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("state", op->wait_state);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("timeout_ms",
+                                                op->wait_timeout_ms);
+        if (op->wait_timeout_ms == 0 ||
+            op->wait_timeout_ms > MEM_SERVICE_OBJECT_SESSION_MAX_WAIT_MS) {
+            mem_service_object_session_config_error(line_no,
+                                                    "timeout_ms out of bounds",
+                                                    NULL);
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "poll_ms");
+        if (value != NULL &&
+            !mem_service_object_session_parse_u64(value, &op->wait_poll_ms)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid u64 field",
+                                                    "poll_ms");
+            return 2;
+        }
+        if (op->wait_poll_ms == 0) {
+            op->wait_poll_ms = MEM_SERVICE_OBJECT_SESSION_DEFAULT_POLL_MS;
+        }
+        if (op->wait_poll_ms < MEM_SERVICE_OBJECT_SESSION_MIN_POLL_MS ||
+            op->wait_poll_ms > MEM_SERVICE_OBJECT_SESSION_MAX_POLL_MS) {
+            mem_service_object_session_config_error(line_no,
+                                                    "poll_ms out of bounds",
+                                                    NULL);
+            return 2;
+        }
+        if (op->expect_status != MEM_SERVICE_WIRE_STATUS_OK) {
+            mem_service_object_session_config_error(
+                line_no,
+                "expect_status not allowed for wait_state",
+                NULL);
+            return 2;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("node_id", op->node_id);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("incarnation",
+                                                op->incarnation);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("generation",
+                                                op->generation);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("address", op->address);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("address_len",
+                                                op->address_len);
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "descriptor_hex");
+        if (value == NULL) {
+            mem_service_object_session_config_error(line_no,
+                                                    "missing required field",
+                                                    "descriptor_hex");
+            return 2;
+        }
+        if (!mem_service_object_session_parse_hex(value,
+                                                  op->descriptor,
+                                                  sizeof(op->descriptor),
+                                                  &op->descriptor_len)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid descriptor_hex",
+                                                    NULL);
+            return 2;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM: {
+        uint64_t confirmed = 0;
+
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("node_id", op->node_id);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("incarnation",
+                                                op->incarnation);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("generation",
+                                                op->generation);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("confirmed", confirmed);
+        if (confirmed > 1U) {
+            mem_service_object_session_config_error(line_no,
+                                                    "confirmed must be 0 or 1",
+                                                    NULL);
+            return 2;
+        }
+        op->confirmed = confirmed != 0U;
+        break;
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS:
+        break;
+    default:
+        mem_service_object_session_config_error(line_no,
+                                                "unknown op action",
+                                                NULL);
+        return 2;
+    }
+
+#undef MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING
+#undef MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64
+    return 0;
+}
+
+static int mem_service_object_session_load_config(
+    const char *path,
+    struct mem_service_object_session_config *config)
+{
+    FILE *fp;
+    char line[MEM_SERVICE_OBJECT_SESSION_LINE_LEN];
+    uint32_t line_no = 0;
+    bool have_session_id = false;
+    bool have_connect = false;
+    bool have_request_timeout = false;
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        mem_service_object_session_config_error(0, "cannot open config", path);
+        return 2;
+    }
+    memset(config, 0, sizeof(*config));
+    config->request_timeout_ms =
+        MEM_SERVICE_OBJECT_SESSION_DEFAULT_REQUEST_TIMEOUT_MS;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *comment = strchr(line, '#');
+        char *start;
+        char *end;
+        size_t len;
+
+        line_no += 1U;
+        if (comment != NULL) {
+            *comment = '\0';
+        }
+        start = line;
+        while (*start != '\0' && isspace((unsigned char)*start)) {
+            start += 1;
+        }
+        end = start + strlen(start);
+        while (end > start && isspace((unsigned char)end[-1])) {
+            end -= 1;
+        }
+        *end = '\0';
+        if (*start == '\0') {
+            continue;
+        }
+        if (strchr(start, '\n') != NULL || strlen(start) >= sizeof(line) - 1U) {
+            mem_service_object_session_config_error(line_no,
+                                                    "line too long",
+                                                    NULL);
+            (void)fclose(fp);
+            return 2;
+        }
+        len = strlen(start);
+        if (strncmp(start, "session_id=", 11) == 0) {
+            if (have_session_id ||
+                !mem_service_object_session_copy_field(
+                    config->session_id,
+                    sizeof(config->session_id),
+                    start + 11)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad session_id",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            have_session_id = true;
+        } else if (strncmp(start, "connect=", 8) == 0) {
+            if (have_connect ||
+                !mem_service_object_session_copy_field(config->connect,
+                                                       sizeof(config->connect),
+                                                       start + 8)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad connect",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            have_connect = true;
+        } else if (strncmp(start, "request_timeout_ms=", 19) == 0) {
+            if (have_request_timeout ||
+                !mem_service_object_session_parse_u64(
+                    start + 19, &config->request_timeout_ms) ||
+                config->request_timeout_ms == 0 ||
+                config->request_timeout_ms >
+                    MEM_SERVICE_OBJECT_SESSION_MAX_REQUEST_TIMEOUT_MS) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad request_timeout_ms",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            have_request_timeout = true;
+        } else if (strncmp(start, "op=", 3) == 0) {
+            if (config->op_count >= MEM_SERVICE_OBJECT_SESSION_MAX_OPS) {
+                mem_service_object_session_config_error(line_no,
+                                                        "too many ops",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            if (mem_service_object_session_parse_op(
+                    start + 3,
+                    line_no,
+                    &config->ops[config->op_count]) != 0) {
+                (void)fclose(fp);
+                return 2;
+            }
+            config->op_count += 1U;
+        } else {
+            (void)len;
+            mem_service_object_session_config_error(line_no,
+                                                    "unknown config line",
+                                                    start);
+            (void)fclose(fp);
+            return 2;
+        }
+    }
+    (void)fclose(fp);
+    if (!have_session_id || !have_connect) {
+        mem_service_object_session_config_error(
+            0,
+            "session_id and connect are required",
+            NULL);
+        return 2;
+    }
+    if (config->op_count == 0) {
+        mem_service_object_session_config_error(0, "no op lines", NULL);
+        return 2;
+    }
+    return 0;
+}
+
+static void mem_service_object_session_print_op_line(
+    const struct mem_service_object_session_config *config,
+    uint32_t index,
+    const struct mem_service_object_session_op *op,
+    enum mem_service_wire_status status,
+    const struct mem_service_client_allocation *view,
+    const char *mismatch_field,
+    const char *mismatch_expected)
+{
+    printf("mem_service object-session: session=%s op=%u action=%s key=%s "
+           "status=%s state=%s generation=",
+           config->session_id,
+           index,
+           mem_service_object_session_action_name(op->action),
+           op->key[0] != '\0' ? op->key : "-",
+           mem_service_wire_status_name(status),
+           view != NULL && view->state[0] != '\0' ? view->state : "-");
+    if (view != NULL && view->state[0] != '\0') {
+        printf("%llu", (unsigned long long)view->generation);
+    } else {
+        printf("-");
+    }
+    if (mismatch_field != NULL) {
+        printf(" mismatch=%s expected_%s=%s",
+               mismatch_field,
+               mismatch_field,
+               mismatch_expected != NULL ? mismatch_expected : "-");
+    }
+    printf("\n");
+    (void)fflush(stdout);
+}
+
+/*
+ * One op: exactly one SDK call (wait_state loops inspect inside its
+ * bounded timeout). Returns 0 when the observed wire status and any
+ * expect_* assertions match; 1 on mismatch or transport failure.
+ */
+static int mem_service_object_session_run_op(
+    const struct mem_service_client *client,
+    const struct mem_service_object_session_config *config,
+    const struct mem_service_object_session_op *op,
+    uint32_t index)
+{
+    struct mem_service_client_allocation view;
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    const char *session_id = op->session_id[0] != '\0'
+                                 ? op->session_id
+                                 : config->session_id;
+    int rc = 0;
+
+    memset(&view, 0, sizeof(view));
+    switch (op->action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE: {
+        struct mem_service_client_allocate request;
+
+        memset(&request, 0, sizeof(request));
+        request.key = op->key;
+        request.idempotency_key = op->idempotency_key;
+        request.session_id = session_id;
+        request.size_bytes = op->size_bytes;
+        request.alignment_bytes = op->alignment_bytes;
+        request.capabilities = op->capabilities;
+        rc = mem_service_client_allocate_object(client,
+                                                &request,
+                                                &view,
+                                                &status);
+        break;
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
+        rc = mem_service_client_acquire_object(client,
+                                               op->key,
+                                               op->idempotency_key,
+                                               session_id,
+                                               op->has_expected_generation,
+                                               op->expected_generation,
+                                               &view,
+                                               &status);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+        rc = mem_service_client_release_object(client,
+                                               op->key,
+                                               op->idempotency_key,
+                                               session_id,
+                                               op->has_expected_generation,
+                                               op->expected_generation,
+                                               &view,
+                                               &status);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE:
+        rc = mem_service_client_retire_object(client,
+                                              op->key,
+                                              op->idempotency_key,
+                                              op->has_expected_generation,
+                                              op->expected_generation,
+                                              &view,
+                                              &status);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT:
+        rc = mem_service_client_inspect_allocation(client,
+                                                   op->key,
+                                                   &view,
+                                                   &status);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH:
+        rc = mem_service_client_publish_allocation(client,
+                                                   op->key,
+                                                   op->node_id,
+                                                   op->incarnation,
+                                                   op->generation,
+                                                   op->descriptor,
+                                                   op->descriptor_len,
+                                                   op->address,
+                                                   op->address_len,
+                                                   &view,
+                                                   &status);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM:
+        rc = mem_service_client_reclaim_allocation(client,
+                                                   op->key,
+                                                   op->node_id,
+                                                   op->incarnation,
+                                                   op->generation,
+                                                   op->confirmed,
+                                                   &view,
+                                                   &status);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS: {
+        struct mem_service_client_allocation_stats stats;
+
+        memset(&stats, 0, sizeof(stats));
+        rc = mem_service_client_allocation_stats(client, &stats, &status);
+        printf("mem_service object-session: session=%s op=%u action=stats "
+               "status=%s live_objects=%llu backing_allocated_bytes=%llu "
+               "address_reserved_bytes=%llu live_refs=%llu in_flight=%llu "
+               "quarantined_objects=%llu quarantined_bytes=%llu\n",
+               config->session_id,
+               index,
+               mem_service_wire_status_name(status),
+               (unsigned long long)stats.live_objects,
+               (unsigned long long)stats.backing_allocated_bytes,
+               (unsigned long long)stats.address_reserved_bytes,
+               (unsigned long long)stats.live_refs,
+               (unsigned long long)stats.in_flight,
+               (unsigned long long)stats.quarantined_objects,
+               (unsigned long long)stats.quarantined_bytes);
+        (void)fflush(stdout);
+        if (rc != 0 || status != op->expect_status) {
+            if (status == op->expect_status) {
+                return 1;
+            }
+            printf("mem_service object-session: session=%s op=%u "
+                   "action=stats mismatch=status expected_status=%s\n",
+                   config->session_id,
+                   index,
+                   mem_service_wire_status_name(op->expect_status));
+            (void)fflush(stdout);
+            return 1;
+        }
+        return 0;
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_STATE: {
+        uint64_t deadline = mem_service_object_session_monotonic_ms() +
+                            op->wait_timeout_ms;
+        char last_state[MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN] = "-";
+        uint64_t last_generation = 0;
+
+        for (;;) {
+            enum mem_service_wire_status poll_status =
+                MEM_SERVICE_WIRE_STATUS_INTERNAL;
+
+            memset(&view, 0, sizeof(view));
+            rc = mem_service_client_inspect_allocation(client,
+                                                       op->key,
+                                                       &view,
+                                                       &poll_status);
+            if (poll_status == MEM_SERVICE_WIRE_STATUS_OK &&
+                view.state[0] != '\0') {
+                snprintf(last_state,
+                         sizeof(last_state),
+                         "%s",
+                         view.state);
+                last_generation = view.generation;
+                if (strcmp(view.state, op->wait_state) == 0) {
+                    mem_service_object_session_print_op_line(config,
+                                                             index,
+                                                             op,
+                                                             poll_status,
+                                                             &view,
+                                                             NULL,
+                                                             NULL);
+                    return 0;
+                }
+            }
+            if (mem_service_object_session_monotonic_ms() >= deadline) {
+                char expected[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
+
+                snprintf(expected,
+                         sizeof(expected),
+                         "%s",
+                         op->wait_state);
+                memset(&view, 0, sizeof(view));
+                if (strcmp(last_state, "-") != 0) {
+                    snprintf(view.state,
+                             sizeof(view.state),
+                             "%s",
+                             last_state);
+                    view.generation = last_generation;
+                }
+                mem_service_object_session_print_op_line(config,
+                                                         index,
+                                                         op,
+                                                         MEM_SERVICE_WIRE_STATUS_TIMEOUT,
+                                                         &view,
+                                                         "state",
+                                                         expected);
+                return 1;
+            }
+            mem_service_object_session_sleep_ms(op->wait_poll_ms);
+        }
+    }
+    default:
+        return 1;
+    }
+
+    if (status != op->expect_status) {
+        mem_service_object_session_print_op_line(
+            config,
+            index,
+            op,
+            status,
+            view.state[0] != '\0' ? &view : NULL,
+            "status",
+            mem_service_wire_status_name(op->expect_status));
+        return 1;
+    }
+    if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT &&
+        status == MEM_SERVICE_WIRE_STATUS_OK) {
+        if (op->has_expect_state &&
+            strcmp(view.state, op->expect_state) != 0) {
+            mem_service_object_session_print_op_line(config,
+                                                     index,
+                                                     op,
+                                                     status,
+                                                     &view,
+                                                     "state",
+                                                     op->expect_state);
+            return 1;
+        }
+        if (op->has_expected_generation &&
+            view.generation != op->expected_generation) {
+            char expected[32];
+
+            snprintf(expected,
+                     sizeof(expected),
+                     "%llu",
+                     (unsigned long long)op->expected_generation);
+            mem_service_object_session_print_op_line(config,
+                                                     index,
+                                                     op,
+                                                     status,
+                                                     &view,
+                                                     "generation",
+                                                     expected);
+            return 1;
+        }
+        if (op->has_expect_holder_count &&
+            (uint64_t)view.holder_count != op->expect_holder_count) {
+            char expected[32];
+
+            snprintf(expected,
+                     sizeof(expected),
+                     "%llu",
+                     (unsigned long long)op->expect_holder_count);
+            mem_service_object_session_print_op_line(config,
+                                                     index,
+                                                     op,
+                                                     status,
+                                                     &view,
+                                                     "holder_count",
+                                                     expected);
+            return 1;
+        }
+    }
+    mem_service_object_session_print_op_line(
+        config,
+        index,
+        op,
+        status,
+        rc == 0 && view.state[0] != '\0' ? &view : NULL,
+        NULL,
+        NULL);
+    return 0;
+}
+
+static int run_object_session(int argc, char **argv)
+{
+    struct mem_service_object_session_config config;
+    struct mem_service_client client;
+    struct mem_service_wire_client_options options;
+    uint64_t started_ms;
+    uint32_t i;
+    const char *config_path = NULL;
+
+    if (argc == 4 && strcmp(argv[2], "--config") == 0) {
+        config_path = argv[3];
+    }
+    if (config_path == NULL) {
+        fprintf(stderr,
+                "usage: linqu_mem_service object-session --config <path>\n");
+        return 2;
+    }
+    if (mem_service_object_session_load_config(config_path, &config) != 0) {
+        return 2;
+    }
+    mem_service_wire_client_options_init(&options);
+    options.timeout_ms = config.request_timeout_ms;
+    mem_service_client_init_with_options(&client, config.connect, &options);
+
+    started_ms = mem_service_object_session_monotonic_ms();
+    for (i = 0; i < config.op_count; ++i) {
+        if (mem_service_object_session_run_op(&client,
+                                              &config,
+                                              &config.ops[i],
+                                              i + 1U) != 0) {
+            printf("mem_service object-session: session=%s result=failed "
+                   "op=%u elapsed_ms=%llu\n",
+                   config.session_id,
+                   i + 1U,
+                   (unsigned long long)(
+                       mem_service_object_session_monotonic_ms() -
+                       started_ms));
+            (void)fflush(stdout);
+            return 1;
+        }
+    }
+    printf("mem_service object-session: session=%s result=ok ops=%u "
+           "elapsed_ms=%llu\n",
+           config.session_id,
+           config.op_count,
+           (unsigned long long)(mem_service_object_session_monotonic_ms() -
+                                started_ms));
+    (void)fflush(stdout);
+    return 0;
 }
 
 static int run_export_snapshot_page(int argc, char **argv)
@@ -10571,6 +11852,12 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "reclaim-allocation") == 0) {
         return run_reclaim_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "poll-allocation") == 0) {
+        return run_poll_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "object-session") == 0) {
+        return run_object_session(argc, argv);
     }
     if (strcmp(argv[1], "register-prefix") == 0) {
         return run_register_prefix(argc, argv);

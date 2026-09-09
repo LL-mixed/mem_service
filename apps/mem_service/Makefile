@@ -34,6 +34,12 @@ MEM_SERVICE_RECORDS := $(ROOT)/components/mem_service/mem_service_records.c
 MEM_SERVICE_PROVIDER := $(ROOT)/components/mem_service/mem_service_provider.c
 MEM_SERVICE_PROVIDER_OBMM := $(ROOT)/components/mem_service/providers/mem_service_provider_obmm.c
 MEM_SERVICE_PROVIDER_OBMM_CLI := $(ROOT)/components/mem_service/providers/mem_service_provider_obmm_cli.c
+ifneq ($(strip $(GVA_MANAGER_ROOT)),)
+MEM_SERVICE_OBMM_WORKER_SRCS := $(ROOT)/components/mem_service/providers/mem_service_provider_obmm_worker.c $(GVA_MANAGER_ROOT)/gva_manager.c $(MEM_SERVICE_CLIENT) $(MEM_SERVICE_WIRE_CLIENT)
+MEM_SERVICE_OBMM_WORKER_FLAGS := -DMEM_SERVICE_OBMM_MANAGED_WORKER -I$(GVA_MANAGER_ROOT)
+MEM_SERVICE_OBMM_WORKER_HEADERS := $(GVA_MANAGER_ROOT)/gva_manager.h
+endif
+MEM_SERVICE_OBMM_BUILD_CONFIG := $(ROOT)/out/mem_service/obmm-provider.build-config
 MEM_SERVICE_PROVIDER_ROCE := $(ROOT)/components/mem_service/providers/mem_service_provider_roce.c
 MEM_SERVICE_PROVIDER_ROCE_CLI := $(ROOT)/components/mem_service/providers/mem_service_provider_roce_cli.c
 MEM_SERVICE_PROVIDER_TCP := $(ROOT)/components/mem_service/providers/mem_service_provider_tcp.c
@@ -259,11 +265,20 @@ linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_S
 linqu_mem_service_host: $(MEM_SERVICE_CORE_SRCS)
 	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) $^ -lm -o $@
 
-linqu_mem_service_provider_obmm: $(MEM_SERVICE_PROVIDER_OBMM_CLI) $(MEM_SERVICE_PROVIDER_OBMM) $(MEM_SERVICE_PROVIDER) $(LIBOBMM_SRCS)
-	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) \
+.PHONY: force-obmm-build-config
+force-obmm-build-config:
+
+$(MEM_SERVICE_OBMM_BUILD_CONFIG): force-obmm-build-config
+	mkdir -p $(dir $@)
+	printf '%s\n' '$(HOST_CC)' '$(HOST_CFLAGS)' '$(INCLUDES)' '$(MEM_SERVICE_OBMM_WORKER_FLAGS)' > $@.tmp
+	cmp -s $@.tmp $@ || mv $@.tmp $@
+	rm -f $@.tmp
+
+linqu_mem_service_provider_obmm: $(MEM_SERVICE_PROVIDER_OBMM_CLI) $(MEM_SERVICE_PROVIDER_OBMM) $(MEM_SERVICE_PROVIDER) $(LIBOBMM_SRCS) $(MEM_SERVICE_OBMM_WORKER_SRCS) $(MEM_SERVICE_OBMM_WORKER_HEADERS) $(MEM_SERVICE_OBMM_BUILD_CONFIG)
+	$(HOST_CC) $(HOST_CFLAGS) $(INCLUDES) $(MEM_SERVICE_OBMM_WORKER_FLAGS) \
 		-I$(ROOT)/components/mem_service \
 		-I$(ROOT)/components/mem_service/providers \
-		$^ $(LIBOBMM_LDLIBS) -o $@
+		$(filter %.c,$^) $(LIBOBMM_LDLIBS) -o $@
 
 obmm-provider-smoke: linqu_mem_service_provider_obmm
 	./linqu_mem_service_provider_obmm protocol-fixtures
@@ -900,7 +915,7 @@ install-smoke: install
 	grep -q '^package_format=installed-layout-v1$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^package_manifest=share/lingqu/mem_service/package-manifest.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^package_manifest_len=9703$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^package_manifest_checksum=0x1bb4128f$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^package_manifest_checksum=0x0095ab54$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^package_gate=package-fixtures$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^installed_sdk_preflight=scripts/verify_mem_service_installed_sdk.sh --preflight$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^installed_sdk_preflight_scope=pkg-config-cflags+sdk-sources+examples+host-binary-no-compile$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -937,7 +952,7 @@ install-smoke: install
 	grep -q '^release_readiness_gate=release-readiness-fixtures$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^host_daemon_artifact_smoke=host-artifact-smoke$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^wire_schema_manifest=share/lingqu/mem_service/wire-schema.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^wire_schema_manifest_checksum=0xe23bc83a$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^wire_schema_manifest_checksum=0x5905d107$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_output_schema=share/lingqu/mem_service/admin-output-schema.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_output_schema_len=7055$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_output_schema_checksum=0x4f63a749$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -945,7 +960,7 @@ install-smoke: install
 	grep -q '^admin_metric_prefix=lingqu_mem_service_$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^upgrade_rollback_policy=share/lingqu/mem_service/upgrade-rollback-policy.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^upgrade_rollback_policy_len=2144$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^upgrade_rollback_policy_checksum=0x2956bdfd$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^upgrade_rollback_policy_checksum=0xf4139152$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^upgrade_policy=current-version-only$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^rollback_policy=current-version-only$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^old_server_runtime_binary=certified$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -996,13 +1011,13 @@ install-smoke: install
 	grep -q '^pkgconfig_sdk_sources=$${sourcedir}/mem_service_client.c $${sourcedir}/mem_service_wire_client.c $${sourcedir}/mem_service_provider.c$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^compat_matrix=share/lingqu/mem_service/compat-matrix.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^compat_matrix_len=1979$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^compat_matrix_checksum=0xbcb85c0f$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^compat_matrix_checksum=0x5b574449$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^compat_baseline=share/lingqu/mem_service/compat-baseline-v1.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^compat_baseline_len=1252$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^compat_baseline_checksum=0xf97cfd5f$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^compat_baseline_checksum=0xe74ef98a$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^compat_old_new_matrix=share/lingqu/mem_service/compat-old-new-matrix.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^compat_old_new_matrix_len=1734$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^compat_old_new_matrix_checksum=0x2277d04a$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^compat_old_new_matrix_checksum=0x38956796$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^config_schema=share/lingqu/mem_service/config/mem_service.conf.schema$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^config_example=share/lingqu/mem_service/config/mem_service.example.conf$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^runtime_config=etc/lingqu/mem_service/mem_service.conf$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -1103,8 +1118,8 @@ install-smoke: install
 	grep -q '^example_source=share/lingqu/mem_service/examples/mem_service_serving_example.c$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^example_source=share/lingqu/mem_service/examples/mem_service_pretraining_example.c$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^mem_service_wire_schema_manifest_version=1$$' $(INSTALL_DATADIR)/wire-schema.txt
-	grep -q '^operation_count=36$$' $(INSTALL_DATADIR)/wire-schema.txt
-	grep -q '^field_count=207$$' $(INSTALL_DATADIR)/wire-schema.txt
+	grep -q '^operation_count=37$$' $(INSTALL_DATADIR)/wire-schema.txt
+	grep -q '^field_count=210$$' $(INSTALL_DATADIR)/wire-schema.txt
 	grep -q '^oneof_field=resolve_kv_segment.0.block_hash$$' $(INSTALL_DATADIR)/wire-schema.txt
 	grep -q '^mem_service_admin_output_schema_version=1$$' $(INSTALL_DATADIR)/admin-output-schema.txt
 	grep -q '^admin_command=metrics-export operation=metrics response=prometheus-text$$' $(INSTALL_DATADIR)/admin-output-schema.txt
@@ -1202,7 +1217,7 @@ install-smoke: install
 	grep -q '^encryption_policy_command=encryption-policy$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^encryption_policy_gate=encryption-fixtures$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^required_gate_count=34$$' $(INSTALL_DATADIR)/package-manifest.txt
-	grep -q '^contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0x2956bdfd$$' $(INSTALL_DATADIR)/package-manifest.txt
+	grep -q '^contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0xf4139152$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^contract=ops-certification-policy path=share/lingqu/mem_service/ops-certification-policy.txt' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^required_gate=package-fixtures$$' $(INSTALL_DATADIR)/package-manifest.txt
 	grep -q '^required_gate=version-fixtures$$' $(INSTALL_DATADIR)/package-manifest.txt
@@ -1252,7 +1267,7 @@ install-smoke: install
 	grep -q '^new_client_old_server_policy=certified$$' $(INSTALL_DATADIR)/api-abi-policy.txt
 	grep -q '^mem_service_compat_matrix_version=1$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^wire_version_current=1$$' $(INSTALL_DATADIR)/compat-matrix.txt
-	grep -q '^wire_schema_manifest_checksum=0xe23bc83a$$' $(INSTALL_DATADIR)/compat-matrix.txt
+	grep -q '^wire_schema_manifest_checksum=0x5905d107$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^idempotency_conflict_status=version_conflict$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^idempotency_persistence=store-journal-and-full-snapshot$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^audit_log_persistence=store-journal-and-full-snapshot$$' $(INSTALL_DATADIR)/compat-matrix.txt
@@ -1264,11 +1279,11 @@ install-smoke: install
 	grep -q '^mem_service_compat_baseline_version=1$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
 	grep -q '^old_client_new_server=compatible-within-v1$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
 	grep -q '^new_client_old_server=certified$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
-	grep -q '^compat_matrix_checksum=0xbcb85c0f$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
+	grep -q '^compat_matrix_checksum=0x5b574449$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
 	grep -q '^audit_log_persistence=store-journal-and-full-snapshot$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
 	grep -q '^baseline_payload=register_training_artifact:v1-training-step-compatible$$' $(INSTALL_DATADIR)/compat-baseline-v1.txt
 	grep -q '^mem_service_old_new_compat_matrix_version=1$$' $(INSTALL_DATADIR)/compat-old-new-matrix.txt
-	grep -q '^compat_baseline_checksum=0xf97cfd5f$$' $(INSTALL_DATADIR)/compat-old-new-matrix.txt
+	grep -q '^compat_baseline_checksum=0xe74ef98a$$' $(INSTALL_DATADIR)/compat-old-new-matrix.txt
 	grep -q '^case=old-client-current-server:runtime-compatible$$' $(INSTALL_DATADIR)/compat-old-new-matrix.txt
 	grep -q '^case=current-client-current-server:compat-runtime-fixtures$$' $(INSTALL_DATADIR)/compat-old-new-matrix.txt
 	grep -q '^evidence=compat-runtime-fixtures$$' $(INSTALL_DATADIR)/compat-old-new-matrix.txt

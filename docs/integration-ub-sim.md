@@ -10,6 +10,14 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+地址管理接入新增 `mem_service_client_poll_allocation()` 和诊断命令
+`poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>`。
+它只返回绑定到该 provider 代际的待办元数据，按 generation 扫描，无任务返回
+NOT_FOUND。provider 必须按对象 key/generation 核对已有 reservation，再经已有
+publish/reclaim 确认；查询不提供独占领取保证。此新增接口尚不表示 OBMM provider
+已自动执行这些任务。服务 wire 版本保持 1，新增 operation 为 `0x7c`；旧服务会
+拒绝未知操作，消费者不得静默退回手工 descriptor 发布流程。
+
 `mem_service` 已从 ub_sim 的 `guest-linux/aarch64` 子树抽取为独立仓库，
 本仓库是唯一权威来源。ub_sim 不再保存组件副本，而是按如下契约直接编译
 本仓库的源码：

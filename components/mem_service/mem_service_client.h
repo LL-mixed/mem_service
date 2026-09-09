@@ -505,6 +505,13 @@ int mem_service_client_retire_object(
     uint64_t expected_generation,
     struct mem_service_client_allocation *allocation_out,
     enum mem_service_wire_status *status_out);
+int mem_service_client_poll_allocation(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t after_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
 int mem_service_client_inspect_allocation(
     const struct mem_service_client *client,
     const char *key,

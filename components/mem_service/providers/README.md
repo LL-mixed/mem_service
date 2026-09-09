@@ -76,6 +76,35 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+`serve-allocations --config <file>` is the managed-allocation worker, built
+with `GVA_MANAGER_ROOT` pointing to the shared platform library directory.
+Its strict config contains `connect`, `node_id`, `incarnation`,
+`readiness_generation`, and `state_file`. It requires an existing aperture
+and active, canary-verified provider registration from infrastructure bootstrap;
+it does not create readiness by registering itself. It refreshes that same
+registration, polls its bound work, allocates/exports through gva_manager and
+publishes through the SDK. No inference process participates.
+
+This initial worker implements allocation only. Before reserving resources it
+creates and durably records an exclusive state file. Existing state prevents
+restart until reconciliation is implemented; do not delete it while resources
+may remain live. Failed or uncertain operations retain resources and stop the
+worker. RETIRING work also stops it, without unexport or address reuse. This is
+an intermediate implementation, not completed recovery, reclaim, or standalone
+bootstrap. One home allocator is required per address domain until global
+multi-home coordination is connected.
+
+OBMM descriptor v2 extends the 48-byte v1 prefix to 96 bytes. It retains
+the export token separately from the GSVA segment token, and carries the
+segment ID, epoch, flags, owner, node count, cache policy, p_tag and access
+rights. Core continues treating the entire descriptor as opaque. Strict
+descriptors require mappings at their UBA, reject incompatible requested
+addresses and permissions, and use the GSVA import operation. v1 remains
+explicitly supported for existing ordinary OBMM objects; failed v2 decoding
+or import must never retry as v1. Descriptor construction is not proof of
+allocation ownership or readiness; the home worker must supply actual kernel
+allocation/export results and retain lifecycle ownership.
+
 `tests/mem_service_obmm_provider_conformance.c` is the authoritative OBMM
 functional test. It runs inside at least two QEMU guests with `/dev/obmm`; a
 host protocol fixture or Linux cross-compile is not functional evidence. The
