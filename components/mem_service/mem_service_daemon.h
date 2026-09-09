@@ -52,11 +52,20 @@ struct mem_service_network_access {
 };
 
 struct mem_service_provider_registry;
+struct mem_service_provider_directory_config;
 
 struct mem_service_daemon_runtime {
     const struct mem_service_daemon_limits *limits;
     const struct mem_service_provider_registry *providers;
     const struct mem_service_network_access *network;
+    /*
+     * Optional required-provider set and lease for the control-plane
+     * provider directory. When present, managed data operations stay
+     * fail-closed until every required provider node holds a fresh
+     * registration; when absent the directory keeps legacy behavior
+     * (data operations allowed, readiness not gated).
+     */
+    const struct mem_service_provider_directory_config *provider_directory;
 };
 
 int mem_service_run_unix_daemon(const char *listen_spec);
@@ -118,6 +127,7 @@ int mem_service_run_serving_fail_closed_fixture_check(void);
 int mem_service_run_pretraining_fail_closed_fixture_check(void);
 int mem_service_run_typed_payload_fixture_check(void);
 int mem_service_run_allocation_fixture_check(void);
+int mem_service_run_provider_directory_fixture_check(void);
 int mem_service_run_restore_policy_fixture_check(void);
 int mem_service_run_upgrade_rollback_runtime_fixture_check(void);
 int mem_service_run_compat_runtime_fixture_check(void);

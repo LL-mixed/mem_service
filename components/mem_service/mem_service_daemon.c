@@ -7135,6 +7135,288 @@ int mem_service_run_allocation_fixture_check(void)
     return 0;
 }
 
+/*
+ * Provider directory fixture (M1.2). Exercises the core directory
+ * against explicit monotonic timestamps: legacy open gate without a
+ * required set, config validation, fail-closed gating until every
+ * required provider registers, idempotent same-incarnation replay,
+ * incarnation replacement and conflict, unknown-node refresh, lease
+ * expiry revoking readiness, re-register healing and deregister
+ * semantics. No daemon, socket or payload state is involved.
+ */
+int mem_service_run_provider_directory_fixture_check(void)
+{
+    struct mem_service_provider_directory directory;
+    struct mem_service_provider_directory_config config;
+    struct mem_service_provider_directory_poll poll;
+    uint64_t epoch_before;
+    bool replaced = false;
+    int failures = 0;
+
+    /* 1. Unconfigured directory keeps the legacy open gate. */
+    mem_service_provider_directory_init(&directory);
+    if (!mem_service_provider_directory_data_ops_allowed(&directory, 100U)) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "unconfigured gate not open\n");
+        failures -= 1;
+    }
+
+    /* 2. Config validation: duplicates and out-of-bounds lease fail. */
+    memset(&config, 0, sizeof(config));
+    snprintf(config.required_nodes[0],
+             MEM_SERVICE_PROVIDER_NODE_ID_LEN,
+             "node-a");
+    snprintf(config.required_nodes[1],
+             MEM_SERVICE_PROVIDER_NODE_ID_LEN,
+             "node-a");
+    config.required_count = 2U;
+    if (mem_service_provider_directory_configure(&directory, &config) == 0) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "duplicate required nodes accepted\n");
+        failures -= 1;
+    }
+    snprintf(config.required_nodes[1],
+             MEM_SERVICE_PROVIDER_NODE_ID_LEN,
+             "node-b");
+    config.lease_ms = MEM_SERVICE_PROVIDER_DIRECTORY_MIN_LEASE_MS - 1U;
+    if (mem_service_provider_directory_configure(&directory, &config) == 0) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "out-of-bounds lease accepted\n");
+        failures -= 1;
+    }
+
+    /* 3. Required set configured: gate is closed until both register. */
+    config.lease_ms = 1000U;
+    if (mem_service_provider_directory_configure(&directory, &config) != 0) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "valid config rejected\n");
+        return 1;
+    }
+    poll = mem_service_provider_directory_poll(&directory, 100U);
+    if (mem_service_provider_directory_data_ops_allowed(&directory, 100U) ||
+        poll.ready || poll.required_count != 2U ||
+        strcmp(poll.first_missing, "node-a") != 0) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "empty directory not fail-closed\n");
+        failures -= 1;
+    }
+
+    /* 4. Invalid registrations are rejected and counted. */
+    if (mem_service_provider_directory_register(&directory,
+                                                "node-a",
+                                                0U,
+                                                1U,
+                                                MEM_SERVICE_PROVIDER_CAP_MAP,
+                                                100U,
+                                                NULL) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_INVALID_REQUEST ||
+        mem_service_provider_directory_register(&directory,
+                                                "node-a",
+                                                1U,
+                                                1U,
+                                                0U,
+                                                100U,
+                                                NULL) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_INVALID_REQUEST ||
+        directory.stats.register_rejected_count != 2U) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "invalid register not rejected\n");
+        failures -= 1;
+    }
+
+    /* 5. First required provider registers: gate still closed. */
+    if (mem_service_provider_directory_register(&directory,
+                                                "node-a",
+                                                1U,
+                                                1U,
+                                                MEM_SERVICE_PROVIDER_CAP_MAP,
+                                                100U,
+                                                &replaced) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK ||
+        replaced ||
+        mem_service_provider_directory_data_ops_allowed(&directory, 101U)) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "partial registration opened the gate\n");
+        failures -= 1;
+    }
+
+    /* 6. Second required provider registers: gate opens. */
+    if (mem_service_provider_directory_register(&directory,
+                                                "node-b",
+                                                7U,
+                                                1U,
+                                                MEM_SERVICE_PROVIDER_CAP_MAP |
+                                                    MEM_SERVICE_PROVIDER_CAP_BLOCK_IO,
+                                                100U,
+                                                NULL) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK ||
+        !mem_service_provider_directory_data_ops_allowed(&directory, 101U) ||
+        mem_service_provider_directory_active_count(&directory, 101U) != 2U) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "full registration did not open the gate\n");
+        failures -= 1;
+    }
+
+    /* 7. Same-incarnation replay is idempotent: no replacement, no
+     * epoch bump. */
+    epoch_before = directory.directory_epoch;
+    if (mem_service_provider_directory_register(&directory,
+                                                "node-b",
+                                                7U,
+                                                2U,
+                                                MEM_SERVICE_PROVIDER_CAP_MAP,
+                                                200U,
+                                                &replaced) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK ||
+        replaced || directory.directory_epoch != epoch_before) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "same-incarnation replay not idempotent\n");
+        failures -= 1;
+    }
+
+    /* 8. A newer incarnation replaces the stale entry; the stale boot
+     * can no longer refresh. */
+    if (mem_service_provider_directory_register(&directory,
+                                                "node-b",
+                                                8U,
+                                                3U,
+                                                MEM_SERVICE_PROVIDER_CAP_MAP,
+                                                300U,
+                                                &replaced) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK ||
+        !replaced || directory.directory_epoch != epoch_before + 1U ||
+        directory.stats.register_replace_count != 1U) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "incarnation replacement mismatch\n");
+        failures -= 1;
+    }
+    if (mem_service_provider_directory_refresh(&directory,
+                                               "node-b",
+                                               7U,
+                                               4U,
+                                               400U) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_INCARNATION_CONFLICT ||
+        directory.stats.incarnation_conflict_count != 1U) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "stale incarnation refresh not conflicted\n");
+        failures -= 1;
+    }
+
+    /* 9. Refresh of an unknown node reports not_found. */
+    if (mem_service_provider_directory_refresh(&directory,
+                                               "node-x",
+                                               1U,
+                                               1U,
+                                               400U) !=
+        MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_NOT_FOUND) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "unknown refresh not not_found\n");
+        failures -= 1;
+    }
+
+    /* 10. Lease expiry evicts the stale entry and revokes readiness.
+     * node-a last refreshed at t=100, node-b at t=900; at t=1150 with a
+     * 1000ms lease only node-a is expired. */
+    if (mem_service_provider_directory_refresh(&directory,
+                                               "node-b",
+                                               8U,
+                                               5U,
+                                               900U) !=
+        MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "fresh refresh rejected\n");
+        failures -= 1;
+    }
+    poll = mem_service_provider_directory_poll(&directory, 1150U);
+    if (poll.expired_this_poll != 1U || poll.ready ||
+        strcmp(poll.first_missing, "node-a") != 0 ||
+        mem_service_provider_directory_data_ops_allowed(&directory, 1150U) ||
+        directory.stats.expired_count != 1U) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "lease expiry did not revoke readiness\n");
+        failures -= 1;
+    }
+
+    /* 11. Re-register heals the gate; deregister of the stale
+     * incarnation conflicts, then the active one succeeds and closes
+     * the gate again. */
+    if (mem_service_provider_directory_register(&directory,
+                                                "node-a",
+                                                2U,
+                                                6U,
+                                                MEM_SERVICE_PROVIDER_CAP_MAP,
+                                                1200U,
+                                                NULL) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK ||
+        !mem_service_provider_directory_data_ops_allowed(&directory, 1201U)) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "re-register did not heal the gate\n");
+        failures -= 1;
+    }
+    if (mem_service_provider_directory_deregister(&directory,
+                                                  "node-a",
+                                                  1U,
+                                                  1250U) !=
+        MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_INCARNATION_CONFLICT) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "stale deregister not conflicted\n");
+        failures -= 1;
+    }
+    if (mem_service_provider_directory_deregister(&directory,
+                                                  "node-a",
+                                                  2U,
+                                                  1300U) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK ||
+        mem_service_provider_directory_data_ops_allowed(&directory, 1301U) ||
+        mem_service_provider_directory_deregister(&directory,
+                                                  "node-a",
+                                                  2U,
+                                                  1301U) !=
+            MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_NOT_FOUND) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "deregister semantics mismatch\n");
+        failures -= 1;
+    }
+
+    /* 12. A zero-required config keeps the gate open with no entries. */
+    mem_service_provider_directory_init(&directory);
+    memset(&config, 0, sizeof(config));
+    config.lease_ms = 1000U;
+    if (mem_service_provider_directory_configure(&directory, &config) != 0 ||
+        !mem_service_provider_directory_data_ops_allowed(&directory, 100U)) {
+        fprintf(stderr,
+                "mem_service provider-directory-fixtures: "
+                "zero-required config not open\n");
+        failures -= 1;
+    }
+
+    if (failures != 0) {
+        return 1;
+    }
+    printf("mem_service provider-directory-fixtures: status=ok "
+           "gate=fail-closed idempotent_replay=ok incarnation_replace=ok "
+           "incarnation_conflict=ok lease_expiry=ok re_register_heal=ok "
+           "deregister=ok checks=12\n");
+    return 0;
+}
+
 int mem_service_run_durable_catalog_fixture_check(void)
 {
     char storage_root[160];
@@ -9449,12 +9731,23 @@ static enum mem_service_wire_status mem_service_status(struct mem_service *svc,
                  svc->durable_ready;
     size_t provider_ready_count;
     bool data_plane_ready;
+    struct mem_service_provider_directory_poll directory_poll;
 
     (void)mem_service_provider_registry_refresh(&svc->providers);
     provider_ready_count =
         mem_service_provider_registry_ready_count(&svc->providers);
+    /*
+     * Data-plane readiness aggregates the in-process provider registry
+     * with the remote provider directory: when the deployment requires
+     * per-node providers, every one of them must hold a fresh
+     * registration before data operations are reported as ready.
+     */
+    directory_poll = mem_service_provider_directory_poll(
+        &svc->provider_directory,
+        mem_service_monotonic_ms());
     data_plane_ready =
-        mem_service_provider_registry_data_plane_ready(&svc->providers);
+        mem_service_provider_registry_data_plane_ready(&svc->providers) &&
+        directory_poll.ready;
 
     snprintf(response,
              response_len,
@@ -9465,6 +9758,9 @@ static enum mem_service_wire_status mem_service_status(struct mem_service *svc,
              "data_plane_ready=%u\n"
              "provider_count=%zu\n"
              "provider_ready_count=%zu\n"
+             "provider_required_count=%zu\n"
+             "provider_active_count=%zu\n"
+             "provider_directory_ready=%u\n"
              "record_count=%zu\n"
              "prefix_group_count=%zu\n"
              "prefix_entry_count=%zu\n"
@@ -9480,6 +9776,9 @@ static enum mem_service_wire_status mem_service_status(struct mem_service *svc,
              data_plane_ready ? 1U : 0U,
              svc->providers.count,
              provider_ready_count,
+             directory_poll.required_count,
+             directory_poll.active_count,
+             directory_poll.ready ? 1U : 0U,
              svc->record_count,
              mem_service_count_record_kind(svc, MEM_SERVICE_RECORD_PREFIX_GROUP),
              mem_service_count_record_kind(svc, MEM_SERVICE_RECORD_REQUEST_PREFIX),
@@ -10146,6 +10445,10 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              "retire_object_count=%" PRIu64 "\n"
              "inspect_allocation_count=%" PRIu64 "\n"
              "allocation_stats_count=%" PRIu64 "\n"
+             "provider_register_count=%" PRIu64 "\n"
+             "provider_refresh_count=%" PRIu64 "\n"
+             "provider_status_count=%" PRIu64 "\n"
+             "provider_deregister_count=%" PRIu64 "\n"
              "artifact_query_hit_count=%" PRIu64 "\n"
              "artifact_query_miss_count=%" PRIu64 "\n"
              "idempotency_replay_count=%" PRIu64 "\n"
@@ -10208,6 +10511,10 @@ static enum mem_service_wire_status mem_service_metrics(struct mem_service *svc,
              m->retire_object_count,
              m->inspect_allocation_count,
              m->allocation_stats_count,
+             m->provider_register_count,
+             m->provider_refresh_count,
+             m->provider_status_count,
+             m->provider_deregister_count,
              m->artifact_query_hit_count,
              m->artifact_query_miss_count,
              m->idempotency_replay_count,
@@ -10751,6 +11058,28 @@ static bool mem_service_managed_payload_valid(
     return false;
 }
 
+/*
+ * Managed data operations stay fail-closed until the configured set of
+ * required providers holds fresh registrations. With no required
+ * provider set (legacy single-process deployments) the gate is open and
+ * behavior is unchanged.
+ */
+static bool mem_service_managed_data_plane_gate(
+    struct mem_service *svc,
+    char *response,
+    size_t response_len)
+{
+    if (mem_service_provider_directory_data_ops_allowed(
+            &svc->provider_directory,
+            mem_service_monotonic_ms())) {
+        return true;
+    }
+    snprintf(response,
+             response_len,
+             "status=internal\nreason=data_plane_not_ready\n");
+    return false;
+}
+
 static enum mem_service_wire_status mem_service_allocate_object(
     struct mem_service *svc,
     const char *payload,
@@ -10769,6 +11098,9 @@ static enum mem_service_wire_status mem_service_allocate_object(
                                            response,
                                            response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
     }
     memset(&request, 0, sizeof(request));
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
@@ -10811,6 +11143,9 @@ static enum mem_service_wire_status mem_service_acquire_object(
                                            response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
+    if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
     (void)mem_service_payload_get_string(payload,
                                          "session_id",
@@ -10848,6 +11183,9 @@ static enum mem_service_wire_status mem_service_release_object(
                                            response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
+    if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
     (void)mem_service_payload_get_string(payload,
                                          "session_id",
@@ -10883,6 +11221,9 @@ static enum mem_service_wire_status mem_service_retire_object(
                                            response,
                                            response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
     }
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
     has_expected_generation = mem_service_payload_get_u64_checked(
@@ -10997,6 +11338,319 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              stats.release_rejected_count,
              stats.retire_rejected_count,
              stats.quarantine_events);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+/*
+ * Provider directory operations (0x76 segment). Per-node provider
+ * processes register generation'd readiness after their bootstrap
+ * canary, refresh within the lease and deregister on shutdown. These
+ * operations carry control-plane metadata only; descriptors and payload
+ * never cross them.
+ */
+static enum mem_service_wire_status mem_service_provider_directory_result_to_wire(
+    enum mem_service_provider_directory_result result)
+{
+    switch (result) {
+    case MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK:
+        return MEM_SERVICE_WIRE_STATUS_OK;
+    case MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_INVALID_REQUEST:
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    case MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_NOT_FOUND:
+        return MEM_SERVICE_WIRE_STATUS_NOT_FOUND;
+    case MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_INCARNATION_CONFLICT:
+        return MEM_SERVICE_WIRE_STATUS_STALE_REF;
+    case MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_CAPACITY:
+    default:
+        return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
+    }
+}
+
+static enum mem_service_wire_status mem_service_provider_directory_finish(
+    enum mem_service_provider_directory_result result,
+    const char *node_id,
+    char *response,
+    size_t response_len)
+{
+    enum mem_service_wire_status status =
+        mem_service_provider_directory_result_to_wire(result);
+
+    if (result == MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK) {
+        return MEM_SERVICE_WIRE_STATUS_OK;
+    }
+    snprintf(response,
+             response_len,
+             "status=%s\nreason=%s\nnode_id=%s\n",
+             mem_service_wire_status_name(status),
+             mem_service_provider_directory_result_name(result),
+             node_id != NULL ? node_id : "-");
+    return status;
+}
+
+static enum mem_service_wire_status mem_service_provider_register(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    uint64_t incarnation;
+    uint64_t readiness_generation;
+    uint64_t capabilities;
+    uint64_t now_ms;
+    bool replaced = false;
+    struct mem_service_provider_directory_poll poll;
+    enum mem_service_provider_directory_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload,
+                                         "node_id",
+                                         node_id,
+                                         sizeof(node_id));
+    incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
+    readiness_generation =
+        mem_service_payload_get_u64(payload, "readiness_generation", 0);
+    capabilities = mem_service_payload_get_u64(payload, "capabilities", 0);
+    now_ms = mem_service_monotonic_ms();
+    result = mem_service_provider_directory_register(&svc->provider_directory,
+                                                     node_id,
+                                                     incarnation,
+                                                     readiness_generation,
+                                                     capabilities,
+                                                     now_ms,
+                                                     &replaced);
+    if (result != MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK) {
+        return mem_service_provider_directory_finish(result,
+                                                     node_id,
+                                                     response,
+                                                     response_len);
+    }
+    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    snprintf(response,
+             response_len,
+             "status=ok\n"
+             "node_id=%s\n"
+             "incarnation=%" PRIu64 "\n"
+             "replaced=%u\n"
+             "directory_epoch=%" PRIu64 "\n"
+             "lease_ms=%" PRIu64 "\n"
+             "provider_required_count=%zu\n"
+             "provider_active_count=%zu\n"
+             "provider_directory_ready=%u\n",
+             node_id,
+             incarnation,
+             replaced ? 1U : 0U,
+             svc->provider_directory.directory_epoch,
+             mem_service_provider_directory_effective_lease_ms(
+                 &svc->provider_directory),
+             poll.required_count,
+             poll.active_count,
+             poll.ready ? 1U : 0U);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static enum mem_service_wire_status mem_service_provider_refresh(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    uint64_t incarnation;
+    uint64_t readiness_generation;
+    uint64_t now_ms;
+    struct mem_service_provider_directory_poll poll;
+    enum mem_service_provider_directory_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload,
+                                         "node_id",
+                                         node_id,
+                                         sizeof(node_id));
+    incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
+    readiness_generation =
+        mem_service_payload_get_u64(payload, "readiness_generation", 0);
+    now_ms = mem_service_monotonic_ms();
+    result = mem_service_provider_directory_refresh(&svc->provider_directory,
+                                                    node_id,
+                                                    incarnation,
+                                                    readiness_generation,
+                                                    now_ms);
+    if (result != MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK) {
+        return mem_service_provider_directory_finish(result,
+                                                     node_id,
+                                                     response,
+                                                     response_len);
+    }
+    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    snprintf(response,
+             response_len,
+             "status=ok\n"
+             "node_id=%s\n"
+             "directory_epoch=%" PRIu64 "\n"
+             "provider_required_count=%zu\n"
+             "provider_active_count=%zu\n"
+             "provider_directory_ready=%u\n",
+             node_id,
+             svc->provider_directory.directory_epoch,
+             poll.required_count,
+             poll.active_count,
+             poll.ready ? 1U : 0U);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static enum mem_service_wire_status mem_service_provider_deregister(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    uint64_t incarnation;
+    uint64_t now_ms;
+    struct mem_service_provider_directory_poll poll;
+    enum mem_service_provider_directory_result result;
+
+    if (!mem_service_managed_payload_valid(payload,
+                                           MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER,
+                                           response,
+                                           response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload,
+                                         "node_id",
+                                         node_id,
+                                         sizeof(node_id));
+    incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
+    now_ms = mem_service_monotonic_ms();
+    result = mem_service_provider_directory_deregister(&svc->provider_directory,
+                                                       node_id,
+                                                       incarnation,
+                                                       now_ms);
+    if (result != MEM_SERVICE_PROVIDER_DIRECTORY_RESULT_OK) {
+        return mem_service_provider_directory_finish(result,
+                                                     node_id,
+                                                     response,
+                                                     response_len);
+    }
+    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    snprintf(response,
+             response_len,
+             "status=ok\n"
+             "node_id=%s\n"
+             "directory_epoch=%" PRIu64 "\n"
+             "provider_required_count=%zu\n"
+             "provider_active_count=%zu\n"
+             "provider_directory_ready=%u\n",
+             node_id,
+             svc->provider_directory.directory_epoch,
+             poll.required_count,
+             poll.active_count,
+             poll.ready ? 1U : 0U);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static enum mem_service_wire_status mem_service_provider_status(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    uint64_t now_ms;
+    struct mem_service_provider_directory_poll poll;
+    const struct mem_service_provider_directory *directory =
+        &svc->provider_directory;
+    size_t used;
+    size_t i;
+    int written;
+    bool truncated = false;
+
+    (void)payload;
+    now_ms = mem_service_monotonic_ms();
+    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    used = (size_t)snprintf(
+        response,
+        response_len,
+        "status=ok\n"
+        "directory_epoch=%" PRIu64 "\n"
+        "lease_ms=%" PRIu64 "\n"
+        "provider_required_count=%zu\n"
+        "provider_active_count=%zu\n"
+        "provider_directory_ready=%u\n"
+        "data_plane_ready=%u\n"
+        "register_ok_count=%" PRIu64 "\n"
+        "register_replace_count=%" PRIu64 "\n"
+        "refresh_ok_count=%" PRIu64 "\n"
+        "deregister_ok_count=%" PRIu64 "\n"
+        "register_rejected_count=%" PRIu64 "\n"
+        "refresh_rejected_count=%" PRIu64 "\n"
+        "deregister_rejected_count=%" PRIu64 "\n"
+        "incarnation_conflict_count=%" PRIu64 "\n"
+        "expired_count=%" PRIu64 "\n",
+        directory->directory_epoch,
+        mem_service_provider_directory_effective_lease_ms(directory),
+        poll.required_count,
+        poll.active_count,
+        poll.ready ? 1U : 0U,
+        (mem_service_provider_registry_data_plane_ready(&svc->providers) &&
+         poll.ready)
+            ? 1U
+            : 0U,
+        directory->stats.register_ok_count,
+        directory->stats.register_replace_count,
+        directory->stats.refresh_ok_count,
+        directory->stats.deregister_ok_count,
+        directory->stats.register_rejected_count,
+        directory->stats.refresh_rejected_count,
+        directory->stats.deregister_rejected_count,
+        directory->stats.incarnation_conflict_count,
+        directory->stats.expired_count);
+    if (used >= response_len) {
+        response[0] = '\0';
+        return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
+    }
+    for (i = 0; i < MEM_SERVICE_PROVIDER_DIRECTORY_MAX_PROVIDERS; ++i) {
+        const struct mem_service_provider_directory_entry *entry =
+            &directory->entries[i];
+        uint64_t age_ms;
+
+        if (!entry->in_use) {
+            continue;
+        }
+        age_ms = now_ms > entry->last_refresh_ms
+                     ? now_ms - entry->last_refresh_ms
+                     : 0;
+        written = snprintf(response + used,
+                           response_len - used,
+                           "provider=%s incarnation=%" PRIu64
+                           " readiness_generation=%" PRIu64
+                           " capabilities=%" PRIu64 " age_ms=%" PRIu64 "\n",
+                           entry->node_id,
+                           entry->incarnation,
+                           entry->readiness_generation,
+                           entry->capabilities,
+                           age_ms);
+        if (written < 0 || (size_t)written >= response_len - used) {
+            truncated = true;
+            break;
+        }
+        used += (size_t)written;
+    }
+    if (truncated) {
+        (void)snprintf(response + used,
+                       response_len - used,
+                       "truncated=1\n");
+    }
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
@@ -11122,6 +11776,14 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
         return mem_service_inspect_allocation(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_ALLOCATION_STATS:
         return mem_service_allocation_stats(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER:
+        return mem_service_provider_register(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH:
+        return mem_service_provider_refresh(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_PROVIDER_STATUS:
+        return mem_service_provider_status(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
+        return mem_service_provider_deregister(svc, payload, response, response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -11339,6 +12001,18 @@ static void mem_service_record_operation_metrics(
         break;
     case MEM_SERVICE_WIRE_OP_ALLOCATION_STATS:
         metrics->allocation_stats_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER:
+        metrics->provider_register_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH:
+        metrics->provider_refresh_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_PROVIDER_STATUS:
+        metrics->provider_status_count += 1U;
+        break;
+    case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
+        metrics->provider_deregister_count += 1U;
         break;
     default:
         break;
@@ -13207,8 +13881,9 @@ struct mem_service_connection_context {
  * acquire, release, retire, inspect-allocation, allocation-stats). Legacy
  * inline/path put, materialize, snapshot/restore and other local file or
  * admin operations stay available on unix endpoints and are rejected with
- * UNSUPPORTED on network endpoints. Provider control operations join this
- * set when their wire operations land.
+ * UNSUPPORTED on network endpoints. Provider directory control operations
+ * (register, refresh, status, deregister) are exposed so per-node provider
+ * processes can report readiness over the trusted guest network.
  */
 static bool mem_service_network_operation_allowed(
     enum mem_service_wire_operation operation)
@@ -13224,6 +13899,10 @@ static bool mem_service_network_operation_allowed(
     case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
     case MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION:
     case MEM_SERVICE_WIRE_OP_ALLOCATION_STATS:
+    case MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER:
+    case MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH:
+    case MEM_SERVICE_WIRE_OP_PROVIDER_STATUS:
+    case MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER:
         return true;
     default:
         return false;
@@ -13836,10 +14515,18 @@ static int mem_service_daemon_bootstrap(
     const char *store_path,
     const char *storage_root,
     const struct mem_service_daemon_limits *limits,
-    const struct mem_service_provider_registry *providers)
+    const struct mem_service_provider_registry *providers,
+    const struct mem_service_provider_directory_config *provider_directory)
 {
     if (mem_service_init(svc, true, true, true) != 0) {
         fprintf(stderr, "mem_service serve: init failed\n");
+        return 1;
+    }
+    if (provider_directory != NULL &&
+        mem_service_provider_directory_configure(&svc->provider_directory,
+                                                 provider_directory) != 0) {
+        fprintf(stderr,
+                "mem_service serve: invalid provider directory config\n");
         return 1;
     }
     if (providers != NULL) {
@@ -13969,6 +14656,8 @@ int mem_service_run_unix_daemon_with_runtime(
         runtime != NULL ? runtime->limits : NULL;
     const struct mem_service_provider_registry *providers =
         runtime != NULL ? runtime->providers : NULL;
+    const struct mem_service_provider_directory_config *provider_directory =
+        runtime != NULL ? runtime->provider_directory : NULL;
     int server_fd;
     int metrics_fd = -1;
     int rc = 1;
@@ -13984,7 +14673,8 @@ int mem_service_run_unix_daemon_with_runtime(
                                      store_path,
                                      storage_root,
                                      limits,
-                                     providers) != 0) {
+                                     providers,
+                                     provider_directory) != 0) {
         return 1;
     }
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -14172,6 +14862,8 @@ int mem_service_run_daemon_with_runtime(
         runtime != NULL ? runtime->providers : NULL;
     const struct mem_service_network_access *network =
         runtime != NULL ? runtime->network : NULL;
+    const struct mem_service_provider_directory_config *provider_directory =
+        runtime != NULL ? runtime->provider_directory : NULL;
     bool is_tcp = false;
     int server_fd;
     int metrics_fd = -1;
@@ -14211,7 +14903,8 @@ int mem_service_run_daemon_with_runtime(
                                      store_path,
                                      storage_root,
                                      limits,
-                                     providers) != 0) {
+                                     providers,
+                                     provider_directory) != 0) {
         return 1;
     }
     server_fd = socket(AF_INET, SOCK_STREAM, 0);

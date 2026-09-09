@@ -136,6 +136,7 @@ class MemServiceDaemonRuntimeTests(unittest.TestCase):
             str(SERVICE_DIR / "mem_service_ub_ssd_gsva_io.c"),
             str(SERVICE_DIR / "mem_service_records.c"),
             str(SERVICE_DIR / "mem_service_allocation.c"),
+            str(SERVICE_DIR / "mem_service_provider_directory.c"),
             "-lm",
             "-o",
             str(self.binary),
@@ -482,6 +483,7 @@ int main(int argc, char **argv)
             str(SERVICE_DIR / "mem_service_ub_ssd_gsva_io.c"),
             str(SERVICE_DIR / "mem_service_records.c"),
             str(SERVICE_DIR / "mem_service_allocation.c"),
+            str(SERVICE_DIR / "mem_service_provider_directory.c"),
             "-lm",
             "-o",
             str(binary),
@@ -1974,9 +1976,9 @@ int main(int argc, char **argv)
         self.assertIn("provider_sources=2", fixtures.stdout)
         self.assertIn("examples=2", fixtures.stdout)
         self.assertIn("compat_artifacts=3", fixtures.stdout)
-        self.assertIn("operations=30", fixtures.stdout)
-        self.assertIn("schema_manifest_len=14314", fixtures.stdout)
-        self.assertIn("schema_manifest_checksum=0x45d9849b", fixtures.stdout)
+        self.assertIn("operations=34", fixtures.stdout)
+        self.assertIn("schema_manifest_len=15194", fixtures.stdout)
+        self.assertIn("schema_manifest_checksum=0x85ad3f11", fixtures.stdout)
         self.assertIn("durable_backends=1", fixtures.stdout)
         self.assertIn("durable_catalogs=1", fixtures.stdout)
         self.assertIn("payload_block_backends=5", fixtures.stdout)
@@ -2000,7 +2002,7 @@ int main(int argc, char **argv)
         self.assertIn("admin_output_schema_len=7055", fixtures.stdout)
         self.assertIn("admin_output_schema_checksum=0x4f63a749", fixtures.stdout)
         self.assertIn("upgrade_rollback_policy_len=2144", fixtures.stdout)
-        self.assertIn("upgrade_rollback_policy_checksum=0xfb0fba5d", fixtures.stdout)
+        self.assertIn("upgrade_rollback_policy_checksum=0x469a8ede", fixtures.stdout)
         self.assertIn("alert_rules_len=2096", fixtures.stdout)
         self.assertIn("alert_rules_checksum=0x05a9245c", fixtures.stdout)
         self.assertIn("ops_certification_policies=1", fixtures.stdout)
@@ -2015,16 +2017,16 @@ int main(int argc, char **argv)
         self.assertIn("payload_gc_smokes=1", fixtures.stdout)
         self.assertIn("record_retention_smokes=1", fixtures.stdout)
         self.assertIn("package_manifest_len=9703", fixtures.stdout)
-        self.assertIn("package_manifest_checksum=0xd54f66df", fixtures.stdout)
+        self.assertIn("package_manifest_checksum=0xdb0c3de9", fixtures.stdout)
         self.assertIn("metrics_http_listeners=1", fixtures.stdout)
         self.assertIn("metrics_scrape_paths=1", fixtures.stdout)
         self.assertIn("compat_runtime_smokes=1", fixtures.stdout)
         self.assertIn("compat_matrix_len=1979", fixtures.stdout)
-        self.assertIn("compat_matrix_checksum=0xeec3c3e1", fixtures.stdout)
+        self.assertIn("compat_matrix_checksum=0xb60a3cd0", fixtures.stdout)
         self.assertIn("compat_baseline_len=1252", fixtures.stdout)
-        self.assertIn("compat_baseline_checksum=0x2ec93e38", fixtures.stdout)
+        self.assertIn("compat_baseline_checksum=0x28199e48", fixtures.stdout)
         self.assertIn("compat_old_new_matrix_len=1734", fixtures.stdout)
-        self.assertIn("compat_old_new_matrix_checksum=0xbb9552b1", fixtures.stdout)
+        self.assertIn("compat_old_new_matrix_checksum=0xc15552a9", fixtures.stdout)
 
         manifest = self._run_client("release-manifest")
         expected = (ROOT / "apps" / "mem_service" / "release-manifest.txt").read_text()
@@ -2038,10 +2040,10 @@ int main(int argc, char **argv)
         self.assertIn("service_version=0.1.0", version.stdout)
         self.assertIn("version_contract=text-kv", version.stdout)
         self.assertIn("wire_version=1", version.stdout)
-        self.assertIn("wire_schema_manifest_checksum=0x45d9849b", version.stdout)
+        self.assertIn("wire_schema_manifest_checksum=0x85ad3f11", version.stdout)
         self.assertIn("api_abi_policy_checksum=0x5e460a87", version.stdout)
         self.assertIn("package_manifest_len=9703", version.stdout)
-        self.assertIn("package_manifest_checksum=0xd54f66df", version.stdout)
+        self.assertIn("package_manifest_checksum=0xdb0c3de9", version.stdout)
         self.assertIn("release_manifest_command=release-manifest", version.stdout)
         self.assertIn("package_manifest_command=package-manifest", version.stdout)
         self.assertIn("config_security_gate=config-fixtures", version.stdout)
@@ -2052,7 +2054,7 @@ int main(int argc, char **argv)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("service_version=0.1.0", fixtures.stdout)
         self.assertIn("package_manifest_len=9703", fixtures.stdout)
-        self.assertIn("package_manifest_checksum=0xd54f66df", fixtures.stdout)
+        self.assertIn("package_manifest_checksum=0xdb0c3de9", fixtures.stdout)
 
     def test_release_readiness_cli_reports_external_certification_blockers(self):
         readiness = self._run_client("release-readiness")
@@ -2060,7 +2062,7 @@ int main(int argc, char **argv)
         self.assertIn("mem_service_release_readiness_version=1", readiness.stdout)
         self.assertIn("readiness_contract=text-kv", readiness.stdout)
         self.assertIn("package_manifest_len=9703", readiness.stdout)
-        self.assertIn("package_manifest_checksum=0xd54f66df", readiness.stdout)
+        self.assertIn("package_manifest_checksum=0xdb0c3de9", readiness.stdout)
         self.assertIn(
             "installed_sdk_preflight=scripts/verify_mem_service_installed_sdk.sh --preflight",
             readiness.stdout,
@@ -2142,7 +2144,7 @@ int main(int argc, char **argv)
             "evidence_os=linux\n"
             "evidence_init=systemd\n"
             "ops_certification_policy_checksum=0xe77c644b\n"
-            "package_manifest_checksum=0xd54f66df\n"
+            "package_manifest_checksum=0xdb0c3de9\n"
             "linux_systemd_service_smoke=pass\n"
             "linux_systemd_host_service_smoke=pass\n"
             "prometheus_scrape_smoke=pass\n"
@@ -2157,7 +2159,7 @@ int main(int argc, char **argv)
             "transport_backend=transport-tcp-block-v1\n"
             "transport_protocol=tcp-ipv4\n"
             "transport_topology=cross-host\n"
-            "package_manifest_checksum=0xd54f66df\n"
+            "package_manifest_checksum=0xdb0c3de9\n"
             "source_address_non_loopback=pass\n"
             "payload_block_round_trip=pass\n"
             "payload_checksum_validation=pass\n"
@@ -2193,7 +2195,7 @@ int main(int argc, char **argv)
             "evidence_os=linux\n"
             "evidence_init=systemd\n"
             "ops_certification_policy_checksum=0xe77c644b\n"
-            "package_manifest_checksum=0xd54f66df\n"
+            "package_manifest_checksum=0xdb0c3de9\n"
             "linux_systemd_service_smoke=pass\n"
             "linux_systemd_host_service_smoke=pass\n"
             "prometheus_scrape_smoke=pass\n"
@@ -2208,7 +2210,7 @@ int main(int argc, char **argv)
             "transport_backend=transport-tcp-block-v1\n"
             "transport_protocol=tcp-ipv4\n"
             "transport_topology=cross-host\n"
-            "package_manifest_checksum=0xd54f66df\n"
+            "package_manifest_checksum=0xdb0c3de9\n"
             "source_address_non_loopback=pass\n"
             "payload_block_round_trip=pass\n"
             "payload_checksum_validation=pass\n"
@@ -2302,7 +2304,7 @@ int main(int argc, char **argv)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("package_format=installed-layout-v1", fixtures.stdout)
         self.assertIn("manifest_len=9703", fixtures.stdout)
-        self.assertIn("manifest_checksum=0xd54f66df", fixtures.stdout)
+        self.assertIn("manifest_checksum=0xdb0c3de9", fixtures.stdout)
         self.assertIn("installed_files=52", fixtures.stdout)
         self.assertIn("required_gates=34", fixtures.stdout)
 
@@ -2681,7 +2683,7 @@ int main(int argc, char **argv)
             "evidence_os=linux\n"
             "evidence_init=systemd\n"
             "ops_certification_policy_checksum=0xe77c644b\n"
-            "package_manifest_checksum=0xd54f66df\n"
+            "package_manifest_checksum=0xdb0c3de9\n"
             "linux_systemd_service_smoke=pass\n"
             "linux_systemd_host_service_smoke=pass\n"
             "prometheus_scrape_smoke=pass\n"
@@ -2727,7 +2729,7 @@ int main(int argc, char **argv)
             generated.stdout,
         )
         self.assertIn("ops_certification_policy_checksum=0xe77c644b", generated.stdout)
-        self.assertIn("package_manifest_checksum=0xd54f66df", generated.stdout)
+        self.assertIn("package_manifest_checksum=0xdb0c3de9", generated.stdout)
         self.assertIn("rpm_package_smoke=fail", generated.stdout)
 
         with tempfile.TemporaryDirectory(prefix="msvc_ops_probe_", dir=str(_tmp_parent())) as tmp:
@@ -2782,7 +2784,7 @@ int main(int argc, char **argv)
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("policy_len=2144", fixtures.stdout)
-        self.assertIn("policy_checksum=0xfb0fba5d", fixtures.stdout)
+        self.assertIn("policy_checksum=0x469a8ede", fixtures.stdout)
         self.assertIn("required_gates=19", fixtures.stdout)
         self.assertIn("upgrade_policy=current-version-only", fixtures.stdout)
         self.assertIn("rollback_policy=current-version-only", fixtures.stdout)
@@ -2927,7 +2929,7 @@ int main(int argc, char **argv)
             "transport_backend=transport-tcp-block-v1\n"
             "transport_protocol=tcp-ipv4\n"
             "transport_topology=cross-host\n"
-            "package_manifest_checksum=0xd54f66df\n"
+            "package_manifest_checksum=0xdb0c3de9\n"
             "source_address_non_loopback=pass\n"
             "payload_block_round_trip=pass\n"
             "payload_checksum_validation=pass\n"
@@ -3823,9 +3825,9 @@ int main(int argc, char **argv)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("matrix_version=1", fixtures.stdout)
         self.assertIn("matrix_len=1979", fixtures.stdout)
-        self.assertIn("matrix_checksum=0xeec3c3e1", fixtures.stdout)
-        self.assertIn("operations=30", fixtures.stdout)
-        self.assertIn("fields=186", fixtures.stdout)
+        self.assertIn("matrix_checksum=0xb60a3cd0", fixtures.stdout)
+        self.assertIn("operations=34", fixtures.stdout)
+        self.assertIn("fields=195", fixtures.stdout)
         self.assertIn("statuses=11", fixtures.stdout)
 
         matrix = self._run_client("compat-matrix")
@@ -3838,7 +3840,7 @@ int main(int argc, char **argv)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("baseline_version=1", fixtures.stdout)
         self.assertIn("baseline_len=1252", fixtures.stdout)
-        self.assertIn("baseline_checksum=0x2ec93e38", fixtures.stdout)
+        self.assertIn("baseline_checksum=0x28199e48", fixtures.stdout)
         self.assertIn("old_client_new_server=v1", fixtures.stdout)
         self.assertIn("new_client_old_server=certified", fixtures.stdout)
 
@@ -3851,9 +3853,9 @@ int main(int argc, char **argv)
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("matrix_len=1734", fixtures.stdout)
-        self.assertIn("matrix_checksum=0xbb9552b1", fixtures.stdout)
-        self.assertIn("old_payloads=30", fixtures.stdout)
-        self.assertIn("current_payloads=30", fixtures.stdout)
+        self.assertIn("matrix_checksum=0xc15552a9", fixtures.stdout)
+        self.assertIn("old_payloads=34", fixtures.stdout)
+        self.assertIn("current_payloads=34", fixtures.stdout)
         self.assertIn("old_server_runtime_binary=in-tree", fixtures.stdout)
 
         matrix = self._run_client("compat-old-new-matrix")
@@ -3986,10 +3988,10 @@ int main(int argc, char **argv)
         fixtures = self._run_client("wire-schema-fixtures")
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
         self.assertIn("status=ok", fixtures.stdout)
-        self.assertIn("manifest_len=14314", fixtures.stdout)
-        self.assertIn("manifest_checksum=0x45d9849b", fixtures.stdout)
-        self.assertIn("operations=30", fixtures.stdout)
-        self.assertIn("fields=186", fixtures.stdout)
+        self.assertIn("manifest_len=15194", fixtures.stdout)
+        self.assertIn("manifest_checksum=0x85ad3f11", fixtures.stdout)
+        self.assertIn("operations=34", fixtures.stdout)
+        self.assertIn("fields=195", fixtures.stdout)
 
         manifest = self._run_client("wire-schema")
         self.assertEqual(manifest.returncode, 0, manifest.stderr + manifest.stdout)
@@ -4654,7 +4656,7 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
                 manifest.read_text(),
             )
             self.assertIn("package_format=installed-layout-v1", manifest.read_text())
-            self.assertIn("package_manifest_checksum=0xd54f66df", manifest.read_text())
+            self.assertIn("package_manifest_checksum=0xdb0c3de9", manifest.read_text())
             self.assertIn(
                 "installed_sdk_preflight=scripts/verify_mem_service_installed_sdk.sh --preflight",
                 manifest.read_text(),
@@ -5154,11 +5156,11 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
                 package_manifest.read_text(),
             )
             self.assertIn("cross_version_upgrade=certified", package_manifest.read_text())
-            self.assertIn("wire_schema_manifest_checksum=0x45d9849b", manifest.read_text())
+            self.assertIn("wire_schema_manifest_checksum=0x85ad3f11", manifest.read_text())
             self.assertIn("admin_output_schema_checksum=0x4f63a749", manifest.read_text())
             self.assertIn("admin_output_format=text-kv", manifest.read_text())
             self.assertIn("admin_metric_prefix=lingqu_mem_service_", manifest.read_text())
-            self.assertIn("upgrade_rollback_policy_checksum=0xfb0fba5d", manifest.read_text())
+            self.assertIn("upgrade_rollback_policy_checksum=0x469a8ede", manifest.read_text())
             self.assertIn("upgrade_policy=current-version-only", manifest.read_text())
             self.assertIn("rollback_policy=current-version-only", manifest.read_text())
             self.assertIn("old_server_runtime_binary=certified", manifest.read_text())
@@ -5216,9 +5218,9 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
             self.assertIn(
                 "wire_payload_typed_binary_gate=typed-payload-fixtures",
                 manifest.read_text())
-            self.assertIn("compat_matrix_checksum=0xeec3c3e1", manifest.read_text())
-            self.assertIn("compat_baseline_checksum=0x2ec93e38", manifest.read_text())
-            self.assertIn("compat_old_new_matrix_checksum=0xbb9552b1",
+            self.assertIn("compat_matrix_checksum=0xb60a3cd0", manifest.read_text())
+            self.assertIn("compat_baseline_checksum=0x28199e48", manifest.read_text())
+            self.assertIn("compat_old_new_matrix_checksum=0xc15552a9",
                           manifest.read_text())
             self.assertIn(
                 "host_deployment_manifest=share/lingqu/mem_service/deploy/linqu_mem_service.host.service",

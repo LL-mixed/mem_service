@@ -237,6 +237,27 @@ static const struct mem_service_wire_payload_field
         {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
 };
 
+static const struct mem_service_wire_payload_field
+    mem_service_wire_provider_register_fields[] = {
+        {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"readiness_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"capabilities", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_provider_refresh_fields[] = {
+        {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"readiness_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
+static const struct mem_service_wire_payload_field
+    mem_service_wire_provider_deregister_fields[] = {
+        {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+};
+
 static const struct mem_service_wire_operation_schema
     mem_service_wire_operation_schemas[] = {
         {MEM_SERVICE_WIRE_OP_HEALTH,
@@ -500,6 +521,41 @@ static const struct mem_service_wire_operation_schema
          MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
          NULL,
          0,
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER,
+         "provider_register",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_provider_register_fields,
+         sizeof(mem_service_wire_provider_register_fields) /
+             sizeof(mem_service_wire_provider_register_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH,
+         "provider_refresh",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_provider_refresh_fields,
+         sizeof(mem_service_wire_provider_refresh_fields) /
+             sizeof(mem_service_wire_provider_refresh_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_PROVIDER_STATUS,
+         "provider_status",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         NULL,
+         0,
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER,
+         "provider_deregister",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_provider_deregister_fields,
+         sizeof(mem_service_wire_provider_deregister_fields) /
+             sizeof(mem_service_wire_provider_deregister_fields[0]),
          NULL,
          0},
 };

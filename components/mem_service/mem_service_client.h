@@ -504,4 +504,58 @@ int mem_service_client_allocation_stats(
     struct mem_service_client_allocation_stats *stats_out,
     enum mem_service_wire_status *status_out);
 
+/*
+ * Provider directory client (0x76 segment). A per-node provider process
+ * registers its (node_id, incarnation) readiness after its bootstrap
+ * canary, refreshes within the lease and deregisters on shutdown. The
+ * returned view mirrors the control-plane directory summary; mapping
+ * handles and payload bytes never cross these operations.
+ */
+#define MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN 64U
+
+struct mem_service_client_provider_directory {
+    uint64_t directory_epoch;
+    uint64_t lease_ms;
+    uint64_t required_count;
+    uint64_t active_count;
+    bool directory_ready;
+    bool data_plane_ready;
+    bool replaced;
+    uint64_t register_ok_count;
+    uint64_t register_replace_count;
+    uint64_t refresh_ok_count;
+    uint64_t deregister_ok_count;
+    uint64_t register_rejected_count;
+    uint64_t refresh_rejected_count;
+    uint64_t deregister_rejected_count;
+    uint64_t incarnation_conflict_count;
+    uint64_t expired_count;
+};
+
+int mem_service_client_provider_register(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t readiness_generation,
+    uint64_t capabilities,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_provider_refresh(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t readiness_generation,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_provider_deregister(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_provider_status(
+    const struct mem_service_client *client,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out);
+
 #endif

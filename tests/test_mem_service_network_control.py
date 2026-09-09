@@ -157,6 +157,7 @@ class MemServiceNetworkControlTests(unittest.TestCase):
             str(SERVICE_DIR / "mem_service_ub_ssd_gsva_io.c"),
             str(SERVICE_DIR / "mem_service_records.c"),
             str(SERVICE_DIR / "mem_service_allocation.c"),
+            str(SERVICE_DIR / "mem_service_provider_directory.c"),
             "-lm",
             "-o",
             str(self.binary),

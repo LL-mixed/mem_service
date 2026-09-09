@@ -1,8 +1,8 @@
 mem_service_wire_schema_manifest_version=1
 wire_schema_version=1
 wire_payload_format=text-kv
-operation_count=30
-field_count=186
+operation_count=34
+field_count=195
 oneof_count=1
 oneof_field_count=2
 operation=health:1 schema_version=1 payload_format=text-kv fields=0 oneofs=0
@@ -224,3 +224,16 @@ field=retire_object.expected_generation type=u64 required=0
 operation=inspect_allocation:116 schema_version=1 payload_format=text-kv fields=1 oneofs=0
 field=inspect_allocation.key type=string required=1
 operation=allocation_stats:117 schema_version=1 payload_format=text-kv fields=0 oneofs=0
+operation=provider_register:118 schema_version=1 payload_format=text-kv fields=4 oneofs=0
+field=provider_register.node_id type=string required=1
+field=provider_register.incarnation type=u64 required=1
+field=provider_register.readiness_generation type=u64 required=1
+field=provider_register.capabilities type=u64 required=1
+operation=provider_refresh:119 schema_version=1 payload_format=text-kv fields=3 oneofs=0
+field=provider_refresh.node_id type=string required=1
+field=provider_refresh.incarnation type=u64 required=1
+field=provider_refresh.readiness_generation type=u64 required=1
+operation=provider_status:120 schema_version=1 payload_format=text-kv fields=0 oneofs=0
+operation=provider_deregister:121 schema_version=1 payload_format=text-kv fields=2 oneofs=0
+field=provider_deregister.node_id type=string required=1
+field=provider_deregister.incarnation type=u64 required=1

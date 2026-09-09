@@ -8,6 +8,7 @@
 #include "lingqu_object_service.h"
 #include "mem_service_allocation.h"
 #include "mem_service_provider.h"
+#include "mem_service_provider_directory.h"
 
 enum mem_service_record_kind {
     MEM_SERVICE_RECORD_PREFIX_GROUP = 1,
@@ -142,6 +143,10 @@ struct mem_service_metrics {
     uint64_t retire_object_count;
     uint64_t inspect_allocation_count;
     uint64_t allocation_stats_count;
+    uint64_t provider_register_count;
+    uint64_t provider_refresh_count;
+    uint64_t provider_status_count;
+    uint64_t provider_deregister_count;
     uint64_t artifact_query_hit_count;
     uint64_t artifact_query_miss_count;
     uint64_t idempotency_replay_count;
@@ -195,6 +200,7 @@ struct mem_service {
         idempotency_records[MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS];
     struct mem_service_audit_event audit_events[MEM_SERVICE_MAX_AUDIT_EVENTS];
     struct mem_service_managed_table managed;
+    struct mem_service_provider_directory provider_directory;
 };
 
 struct mem_service_object_payload_view {

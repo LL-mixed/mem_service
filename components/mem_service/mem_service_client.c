@@ -1563,3 +1563,185 @@ int mem_service_client_allocation_stats(
         mem_service_wire_payload_get_u64(&view, "quarantine_events", 0);
     return 0;
 }
+
+static void mem_service_client_parse_provider_directory(
+    const char *response,
+    struct mem_service_client_provider_directory *view_out)
+{
+    struct mem_service_wire_payload_view view;
+
+    if (view_out == NULL) {
+        return;
+    }
+    view = mem_service_wire_payload_view_from_cstr(response);
+    memset(view_out, 0, sizeof(*view_out));
+    view_out->directory_epoch =
+        mem_service_wire_payload_get_u64(&view, "directory_epoch", 0);
+    view_out->lease_ms =
+        mem_service_wire_payload_get_u64(&view, "lease_ms", 0);
+    view_out->required_count =
+        mem_service_wire_payload_get_u64(&view, "provider_required_count", 0);
+    view_out->active_count =
+        mem_service_wire_payload_get_u64(&view, "provider_active_count", 0);
+    view_out->directory_ready =
+        mem_service_wire_payload_get_u64(&view, "provider_directory_ready", 0) !=
+        0;
+    view_out->data_plane_ready =
+        mem_service_wire_payload_get_u64(&view, "data_plane_ready", 0) != 0;
+    view_out->replaced =
+        mem_service_wire_payload_get_u64(&view, "replaced", 0) != 0;
+    view_out->register_ok_count =
+        mem_service_wire_payload_get_u64(&view, "register_ok_count", 0);
+    view_out->register_replace_count =
+        mem_service_wire_payload_get_u64(&view, "register_replace_count", 0);
+    view_out->refresh_ok_count =
+        mem_service_wire_payload_get_u64(&view, "refresh_ok_count", 0);
+    view_out->deregister_ok_count =
+        mem_service_wire_payload_get_u64(&view, "deregister_ok_count", 0);
+    view_out->register_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "register_rejected_count", 0);
+    view_out->refresh_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "refresh_rejected_count", 0);
+    view_out->deregister_rejected_count =
+        mem_service_wire_payload_get_u64(&view, "deregister_rejected_count", 0);
+    view_out->incarnation_conflict_count =
+        mem_service_wire_payload_get_u64(&view, "incarnation_conflict_count", 0);
+    view_out->expired_count =
+        mem_service_wire_payload_get_u64(&view, "expired_count", 0);
+}
+
+static int mem_service_client_send_provider_op(
+    const struct mem_service_client *client,
+    enum mem_service_wire_operation operation,
+    const char *payload,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out)
+{
+    char response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN];
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    int rc;
+
+    memset(response, 0, sizeof(response));
+    rc = mem_service_client_send(client,
+                                 operation,
+                                 payload,
+                                 response,
+                                 sizeof(response),
+                                 &status);
+    if (status_out != NULL) {
+        *status_out = status;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    mem_service_client_parse_provider_directory(response, view_out);
+    return 0;
+}
+
+int mem_service_client_provider_register(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t readiness_generation,
+    uint64_t capabilities,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[512] = "";
+
+    if (incarnation == 0 || capabilities == 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "node_id",
+                                                  node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "incarnation",
+                                            incarnation) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "readiness_generation",
+                                            readiness_generation) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "capabilities",
+                                            capabilities) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_provider_op(client,
+                                               MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER,
+                                               payload,
+                                               view_out,
+                                               status_out);
+}
+
+int mem_service_client_provider_refresh(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    uint64_t readiness_generation,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[384] = "";
+
+    if (incarnation == 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "node_id",
+                                                  node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "incarnation",
+                                            incarnation) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "readiness_generation",
+                                            readiness_generation) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_provider_op(client,
+                                               MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH,
+                                               payload,
+                                               view_out,
+                                               status_out);
+}
+
+int mem_service_client_provider_deregister(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t incarnation,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[256] = "";
+
+    if (incarnation == 0 ||
+        mem_service_client_append_required_string(payload,
+                                                  sizeof(payload),
+                                                  "node_id",
+                                                  node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload,
+                                            sizeof(payload),
+                                            "incarnation",
+                                            incarnation) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_provider_op(client,
+                                               MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER,
+                                               payload,
+                                               view_out,
+                                               status_out);
+}
+
+int mem_service_client_provider_status(
+    const struct mem_service_client *client,
+    struct mem_service_client_provider_directory *view_out,
+    enum mem_service_wire_status *status_out)
+{
+    return mem_service_client_send_provider_op(client,
+                                               MEM_SERVICE_WIRE_OP_PROVIDER_STATUS,
+                                               "",
+                                               view_out,
+                                               status_out);
+}

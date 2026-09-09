@@ -16,6 +16,7 @@
 #include "components/mem_service/mem_service_core.h"
 #include "components/mem_service/mem_service_client.h"
 #include "components/mem_service/mem_service_daemon.h"
+#include "components/mem_service/mem_service_provider_directory.h"
 #include "components/mem_service/mem_service_object_contract.h"
 #include "components/mem_service/mem_service_ub_ssd_gsva_backend.h"
 #include "components/mem_service/mem_service_wire_client.h"
@@ -27,10 +28,10 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 14314U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x45d9849bU
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 30U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 186U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 15194U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x85ad3f11U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 34U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 195U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
@@ -40,7 +41,7 @@
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xfb0fba5dU
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x469a8edeU
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -53,7 +54,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xd54f66dfU
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xdb0c3de9U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -64,12 +65,12 @@
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0xeec3c3e1U
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0xb60a3cd0U
 #define MEM_SERVICE_COMPAT_MATRIX_STATUS_COUNT 11U
 #define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_LEN 1252U
-#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x2ec93e38U
+#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x28199e48U
 #define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_LEN 1734U
-#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0xbb9552b1U
+#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0xc15552a9U
 #define MEM_SERVICE_CLI_STORE_MAGIC "mem_service_store_v1"
 
 static void usage(const char *argv0)
@@ -137,6 +138,9 @@ static void usage(const char *argv0)
     printf(" [acquire-object|release-object --key <key> --idempotency-key <key> --session-id <id> [--expected-generation <u64>]]");
     printf(" [retire-object --key <key> --idempotency-key <key> [--expected-generation <u64>]]");
     printf(" [inspect-allocation --key <key>] [allocation-stats] [allocation-fixtures]");
+    printf(" [provider-register --node-id <id> --incarnation <u64> --readiness-generation <u64> --capabilities <u64>]");
+    printf(" [provider-refresh --node-id <id> --incarnation <u64> --readiness-generation <u64>]");
+    printf(" [provider-deregister --node-id <id> --incarnation <u64>] [provider-directory-status]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -2391,7 +2395,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "service_version=" MEM_SERVICE_RELEASE_VERSION "\n") == NULL ||
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
-        strstr(manifest, "wire_schema_manifest_checksum=0x45d9849b\n") == NULL ||
+        strstr(manifest, "wire_schema_manifest_checksum=0x85ad3f11\n") == NULL ||
         strstr(manifest, "api_abi_policy_checksum=0x5e460a87\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
@@ -5636,7 +5640,7 @@ static int run_release_fixture_check(void)
            "metrics_scrape_paths=1 "
            "client_retry_policies=1 "
            "client_api_profiles=2 compat_artifacts=3 "
-           "operations=30 statuses=11 "
+           "operations=34 statuses=11 "
            "schema_manifest_len=%u schema_manifest_checksum=0x%08x "
            "api_abi_policy_len=%u api_abi_policy_checksum=0x%08x "
            "admin_output_schema_len=%u "
@@ -6028,6 +6032,7 @@ struct mem_service_cli_config {
     bool has_auth_mode;
     bool has_node_id;
     bool has_network_io_timeout_ms;
+    bool has_provider_lease_ms;
     uint64_t max_records;
     uint64_t max_payload_bytes;
     uint64_t max_audit_events;
@@ -6035,10 +6040,12 @@ struct mem_service_cli_config {
     uint64_t max_retained_records;
     uint64_t max_retained_record_age_ms;
     uint64_t network_io_timeout_ms;
+    uint64_t provider_lease_ms;
     uint32_t max_retained_record_kind;
     bool max_retained_record_tenant_enabled;
     uint32_t max_retained_record_tenant;
     size_t network_peer_count;
+    size_t required_provider_count;
     char listen[160];
     char store[512];
     char storage_root[512];
@@ -6050,6 +6057,8 @@ struct mem_service_cli_config {
     char auth_mode[40];
     char node_id[MEM_SERVICE_NETWORK_NODE_ID_LEN];
     struct mem_service_network_peer network_peers[MEM_SERVICE_NETWORK_MAX_PEERS];
+    char required_providers[MEM_SERVICE_PROVIDER_DIRECTORY_MAX_PROVIDERS]
+                           [MEM_SERVICE_PROVIDER_NODE_ID_LEN];
 };
 
 static void trim_ascii(char *value)
@@ -6421,6 +6430,40 @@ static int append_network_peer(struct mem_service_cli_config *config,
     return 0;
 }
 
+/*
+ * Parse one repeatable "required_provider=<node_id>" entry naming a
+ * provider node whose fresh registration is required before managed data
+ * operations leave the fail-closed state. Node IDs must be unique.
+ */
+static int append_required_provider(struct mem_service_cli_config *config,
+                                    const char *value)
+{
+    size_t node_len;
+    size_t i;
+
+    if (config == NULL || value == NULL) {
+        return -1;
+    }
+    node_len = strlen(value);
+    if (node_len == 0 || node_len >= MEM_SERVICE_PROVIDER_NODE_ID_LEN) {
+        return -1;
+    }
+    if (config->required_provider_count >=
+        MEM_SERVICE_PROVIDER_DIRECTORY_MAX_PROVIDERS) {
+        return -1;
+    }
+    for (i = 0; i < config->required_provider_count; ++i) {
+        if (strcmp(config->required_providers[i], value) == 0) {
+            return -1;
+        }
+    }
+    memcpy(config->required_providers[config->required_provider_count],
+           value,
+           node_len + 1U);
+    config->required_provider_count += 1U;
+    return 0;
+}
+
 static int apply_config_field(struct mem_service_cli_config *config,
                               const char *name,
                               const char *value)
@@ -6486,6 +6529,18 @@ static int apply_config_field(struct mem_service_cli_config *config,
             return -1;
         }
         config->has_network_io_timeout_ms = true;
+        return 0;
+    }
+    if (strcmp(name, "required_provider") == 0) {
+        return append_required_provider(config, value);
+    }
+    if (strcmp(name, "provider_lease_ms") == 0) {
+        if (!parse_config_u64_value(value, &config->provider_lease_ms) ||
+            config->provider_lease_ms < MEM_SERVICE_PROVIDER_DIRECTORY_MIN_LEASE_MS ||
+            config->provider_lease_ms > MEM_SERVICE_PROVIDER_DIRECTORY_MAX_LEASE_MS) {
+            return -1;
+        }
+        config->has_provider_lease_ms = true;
         return 0;
     }
     if (strcmp(name, "metrics_mode") == 0) {
@@ -7165,14 +7220,18 @@ static int run_serve(int argc, char **argv)
     struct mem_service_cli_config config;
     struct mem_service_daemon_limits limits;
     struct mem_service_network_access network;
+    struct mem_service_provider_directory_config provider_directory;
     struct mem_service_daemon_runtime runtime;
     const struct mem_service_daemon_limits *limits_ptr = NULL;
+    const struct mem_service_provider_directory_config *provider_directory_ptr =
+        NULL;
     bool trusted_guest_network = false;
     bool listen_is_tcp;
 
     derived_store[0] = '\0';
     memset(&limits, 0, sizeof(limits));
     memset(&network, 0, sizeof(network));
+    memset(&provider_directory, 0, sizeof(provider_directory));
     memset(&runtime, 0, sizeof(runtime));
     if ((config_path == NULL && option_present(argc, argv, "--config")) ||
         parse_socket_arg(argc, argv, "--listen", &listen_spec) != 0) {
@@ -7228,6 +7287,21 @@ static int run_serve(int argc, char **argv)
                 config.has_max_retained_records ? config.max_retained_record_tenant : 0U;
             limits_ptr = &limits;
         }
+        if (config.required_provider_count > 0 || config.has_provider_lease_ms) {
+            /*
+             * Required-provider set for the control-plane provider
+             * directory: managed data operations stay fail-closed until
+             * every listed node holds a fresh registration. A configured
+             * lease without any required node only tunes expiry timing.
+             */
+            memcpy(provider_directory.required_nodes,
+                   config.required_providers,
+                   sizeof(provider_directory.required_nodes));
+            provider_directory.required_count = config.required_provider_count;
+            provider_directory.lease_ms =
+                config.has_provider_lease_ms ? config.provider_lease_ms : 0U;
+            provider_directory_ptr = &provider_directory;
+        }
         if (store_path == NULL && storage_root != NULL &&
             derive_store_from_storage_root(derived_store,
                                            sizeof(derived_store),
@@ -7257,6 +7331,15 @@ static int run_serve(int argc, char **argv)
         return 2;
     }
     if (!trusted_guest_network) {
+        if (provider_directory_ptr != NULL) {
+            runtime.limits = limits_ptr;
+            runtime.provider_directory = provider_directory_ptr;
+            return mem_service_run_unix_daemon_with_runtime(listen_spec,
+                                                            store_path,
+                                                            metrics_listen_spec,
+                                                            storage_root,
+                                                            &runtime);
+        }
         return mem_service_run_unix_daemon_with_store_metrics_catalog_and_limits(
             listen_spec,
             store_path,
@@ -7300,6 +7383,7 @@ static int run_serve(int argc, char **argv)
     runtime.limits = limits_ptr;
     runtime.providers = NULL;
     runtime.network = &network;
+    runtime.provider_directory = provider_directory_ptr;
     return mem_service_run_daemon_with_runtime(listen_spec,
                                                store_path,
                                                metrics_listen_spec,
@@ -9106,6 +9190,67 @@ static int run_allocation_stats(int argc, char **argv)
                                       NULL);
 }
 
+/*
+ * Provider directory commands (M1.2, wire ops 0x76-0x79). Thin
+ * pass-throughs; the control-plane daemon owns the directory state.
+ */
+static int run_provider_register(int argc, char **argv)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--readiness-generation", "readiness_generation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--capabilities", "capabilities") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER,
+                                      "provider-register",
+                                      payload);
+}
+
+static int run_provider_refresh(int argc, char **argv)
+{
+    char payload[384] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--readiness-generation", "readiness_generation") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH,
+                                      "provider-refresh",
+                                      payload);
+}
+
+static int run_provider_deregister(int argc, char **argv)
+{
+    char payload[256] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv, "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--incarnation", "incarnation") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER,
+                                      "provider-deregister",
+                                      payload);
+}
+
+static int run_provider_directory_status(int argc, char **argv)
+{
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_PROVIDER_STATUS,
+                                      "provider-directory-status",
+                                      NULL);
+}
+
 static int run_export_snapshot_page(int argc, char **argv)
 {
     char payload[160] = "";
@@ -10339,6 +10484,21 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "allocation-fixtures") == 0) {
         return mem_service_run_allocation_fixture_check();
+    }
+    if (strcmp(argv[1], "provider-directory-fixtures") == 0) {
+        return mem_service_run_provider_directory_fixture_check();
+    }
+    if (strcmp(argv[1], "provider-register") == 0) {
+        return run_provider_register(argc, argv);
+    }
+    if (strcmp(argv[1], "provider-refresh") == 0) {
+        return run_provider_refresh(argc, argv);
+    }
+    if (strcmp(argv[1], "provider-deregister") == 0) {
+        return run_provider_deregister(argc, argv);
+    }
+    if (strcmp(argv[1], "provider-directory-status") == 0) {
+        return run_provider_directory_status(argc, argv);
     }
     if (strcmp(argv[1], "register-prefix") == 0) {
         return run_register_prefix(argc, argv);

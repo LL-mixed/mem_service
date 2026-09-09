@@ -45,6 +45,15 @@ enum mem_service_wire_operation {
     MEM_SERVICE_WIRE_OP_RETIRE_OBJECT = 0x73,
     MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION = 0x74,
     MEM_SERVICE_WIRE_OP_ALLOCATION_STATS = 0x75,
+    /* 0x76 segment: provider directory control operations. Per-node
+     * provider processes register generation'd readiness, refresh their
+     * lease and deregister; the control plane aggregates the directory
+     * into data-plane readiness. Control metadata only: no descriptor
+     * fields or payload bytes cross these operations. */
+    MEM_SERVICE_WIRE_OP_PROVIDER_REGISTER = 0x76,
+    MEM_SERVICE_WIRE_OP_PROVIDER_REFRESH = 0x77,
+    MEM_SERVICE_WIRE_OP_PROVIDER_STATUS = 0x78,
+    MEM_SERVICE_WIRE_OP_PROVIDER_DEREGISTER = 0x79,
 };
 
 enum mem_service_wire_status {
