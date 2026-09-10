@@ -195,6 +195,21 @@ class MemServiceObjectSessionTests(unittest.TestCase):
         self.assertIn("status=ok", result.stdout)
         return result
 
+    def _allocation_stats(self) -> dict[str, str]:
+        result = self._run_client("allocation-stats", "--connect", self._connect)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("status=ok", result.stdout)
+        return _parse_kv(result.stdout)
+
+    def _daemon_metrics(self) -> dict[str, int]:
+        result = self._run_client("metrics", "--connect", self._connect)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        values: dict[str, int] = {}
+        for name, value in _parse_kv(result.stdout).items():
+            if value.isdigit():
+                values[name] = int(value)
+        return values
+
     def _write_session(self, name: str, connect: str, ops: list[str],
                        session_id: str | None = None,
                        header_extra: str = "") -> Path:
@@ -265,7 +280,13 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     # ALLOCATING, the provider session publishes, the consumer waits on
     # ACTIVE and takes a holder reference, the producer retires, the last
     # release drains to RETIRING and the provider's reclaim retires the
-    # identity. Every step is a separate real CLI process.
+    # identity. Every step is a separate real CLI process. The scratch
+    # barrier-1 object makes the cross-process ordering deterministic:
+    # the producer cannot retire before the consumer holds a reference
+    # (it waits for barrier-1 ALLOCATING, which the consumer only
+    # creates after its acquire), and the provider cannot reclaim while
+    # the consumer still holds one (it waits for barrier-1 RETIRED,
+    # which the consumer only retires after its release).
     def test_three_session_choreography_unix(self):
         daemon = self._start_home_daemon()
         try:
@@ -276,6 +297,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                 [
                     "allocate key=obj-1 idempotency_key=p-alloc-1 size_bytes=4096 capabilities=map",
                     "wait_state key=obj-1 state=active timeout_ms=20000 poll_ms=50",
+                    "wait_state key=barrier-1 state=allocating timeout_ms=20000 poll_ms=50",
                     "retire key=obj-1 idempotency_key=p-ret-1 expected_generation=1",
                     "wait_state key=obj-1 state=retired timeout_ms=20000 poll_ms=50",
                     "stats",
@@ -289,6 +311,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                     f"publish key=obj-1 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
                     "generation=1 descriptor_hex=deadbeef address=4096 address_len=8192",
                     "wait_state key=obj-1 state=retiring timeout_ms=20000 poll_ms=50",
+                    "wait_state key=barrier-1 state=retired timeout_ms=20000 poll_ms=50",
                     f"reclaim key=obj-1 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
                     "generation=1 confirmed=1",
                 ],
@@ -300,7 +323,12 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                     "wait_state key=obj-1 state=active timeout_ms=20000 poll_ms=50",
                     "acquire key=obj-1 idempotency_key=c-acq-1 expected_generation=1",
                     "inspect key=obj-1 expect_state=active expect_generation=1 expect_holder_count=1",
+                    "allocate key=barrier-1 idempotency_key=c-bar-1 size_bytes=4096 capabilities=map",
+                    "wait_state key=obj-1 state=retiring timeout_ms=20000 poll_ms=50",
                     "release key=obj-1 idempotency_key=c-rel-1 expected_generation=1",
+                    # Generations come from a table-level counter: obj-1
+                    # is 1, barrier-1 (allocated second) is 2.
+                    "retire key=barrier-1 idempotency_key=c-bar-ret expected_generation=2",
                 ],
             )
             producer_r, provider_r, consumer_r = self._run_sessions_concurrent(
@@ -316,20 +344,20 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("session=producer op=1 action=allocate key=obj-1 "
                           "status=ok state=allocating generation=1",
                           producer_r.stdout)
-            self.assertIn("session=producer op=3 action=retire key=obj-1 "
+            self.assertIn("session=producer op=4 action=retire key=obj-1 "
                           "status=ok state=retiring generation=1",
                           producer_r.stdout)
-            self.assertIn("session=producer op=5 action=stats status=ok "
+            self.assertIn("session=producer op=6 action=stats status=ok "
                           "live_objects=0", producer_r.stdout)
-            self.assertIn("session=producer result=ok ops=5", producer_r.stdout)
+            self.assertIn("session=producer result=ok ops=6", producer_r.stdout)
 
             self.assertIn("session=provider op=2 action=publish key=obj-1 "
                           "status=ok state=active generation=1",
                           provider_r.stdout)
-            self.assertIn("session=provider op=4 action=reclaim key=obj-1 "
+            self.assertIn("session=provider op=5 action=reclaim key=obj-1 "
                           "status=ok state=retired generation=1",
                           provider_r.stdout)
-            self.assertIn("session=provider result=ok ops=4", provider_r.stdout)
+            self.assertIn("session=provider result=ok ops=5", provider_r.stdout)
 
             self.assertIn("session=consumer op=2 action=acquire key=obj-1 "
                           "status=ok state=active generation=1",
@@ -337,7 +365,10 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("session=consumer op=3 action=inspect key=obj-1 "
                           "status=ok state=active generation=1",
                           consumer_r.stdout)
-            self.assertIn("session=consumer result=ok ops=4", consumer_r.stdout)
+            self.assertIn("session=consumer op=7 action=retire key=barrier-1 "
+                          "status=ok state=retired generation=2",
+                          consumer_r.stdout)
+            self.assertIn("session=consumer result=ok ops=7", consumer_r.stdout)
 
             stats = self._run_client("allocation-stats", "--connect", self._connect)
             self.assertEqual(stats.returncode, 0, stats.stderr + stats.stdout)
@@ -868,6 +899,889 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                                  f"{name}: rc={result.returncode} "
                                  f"stdout={result.stdout}")
                 self.assertIn(detail, result.stderr, f"{name}: {result.stderr}")
+
+    # Boundary semantics (plan M1.4): zero-length and oversized
+    # write/read payloads are rejected at config load (exit 2) before
+    # any connection; the session never starts.
+    def test_data_plane_zero_length_rejected_at_config(self):
+        over_max = 16 * 1024 * 1024 + 1
+        cases = {
+            "write-zero": f"op=write key=obj-1 offset=0 len=0 seed=1\n",
+            "read-zero": f"op=read key=obj-1 offset=0 len=0\n",
+            "write-oversized": f"op=write key=obj-1 offset=0 len={over_max} seed=1\n",
+            "read-oversized": f"op=read key=obj-1 offset=0 len={over_max}\n",
+        }
+        for name, op_line in cases.items():
+            with self.subTest(case=name):
+                config = self._write_config(
+                    f"bounds-{name}.conf",
+                    f"session_id=bounds-{name}\nconnect={self._connect}\n"
+                    f"provider=session-loopback\n{op_line}",
+                )
+                result = self._run_session(config)
+                self.assertEqual(result.returncode, 2,
+                                 f"{name}: rc={result.returncode} "
+                                 f"stdout={result.stdout}")
+                self.assertIn("len out of bounds", result.stderr,
+                              f"{name}: {result.stderr}")
+
+    # Exact-fit boundaries and non-zero offsets (plan M1.4): write two
+    # adjacent halves with different seeds, read them back independently
+    # with pattern verification, then read the whole mapping at
+    # offset+len == mapping.len with an FNV-1a checksum assertion, and
+    # read the final byte at offset == len-1.
+    def test_data_plane_exact_fit_and_partial_offsets(self):
+        daemon = self._start_active_object()
+        half = DATA_MAP_LEN // 2
+        expected = _fnv1a64(_pattern(11, half) + _pattern(77, half))
+        config = self._write_session(
+            "exact-fit.conf",
+            self._connect,
+            [
+                "acquire key=obj-1 idempotency_key=ef-acq-1",
+                "map key=obj-1",
+                f"write key=obj-1 offset=0 len={half} seed=11",
+                f"write key=obj-1 offset={half} len={half} seed=77",
+                f"read key=obj-1 offset={half} len={half} seed=77",
+                f"read key=obj-1 offset=0 len={DATA_MAP_LEN} "
+                f"expect_checksum=0x{expected:x}",
+                f"read key=obj-1 offset={DATA_MAP_LEN - 1} len=1",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=ef-rel-1",
+            ],
+            session_id="exact-fit",
+            header_extra="provider=session-loopback",
+        )
+        try:
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0,
+                             result.stderr + result.stdout)
+            for op_index, action in ((3, "write"), (4, "write"), (5, "read"),
+                                     (6, "read"), (7, "read")):
+                self.assertIn(f"session=exact-fit op={op_index} action={action} "
+                              f"key=obj-1 status=ok", result.stdout)
+            self.assertIn("session=exact-fit result=ok ops=9", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Unmappable publish addresses fail closed deterministically: an
+    # unaligned address can never satisfy the strict same-VA contract
+    # and is rejected at map time with map_failed, while a zero-length
+    # region is rejected earlier, at publish, by the daemon. The
+    # control-plane object is untouched by the data-plane failure: it
+    # stays active and the holder can still release cleanly.
+    def test_data_plane_unmappable_publish_address_rejected(self):
+        daemon = self._start_home_daemon()
+        try:
+            self._register_home()
+            setup = self._write_session(
+                "um-unaligned-setup.conf",
+                self._connect,
+                [
+                    "allocate key=obj-1 idempotency_key=um-unaligned-alloc "
+                    "size_bytes=4096 capabilities=map",
+                    f"publish key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    f"descriptor_hex=deadbeef address={DATA_MAP_ADDRESS + 512} "
+                    f"address_len={DATA_MAP_LEN}",
+                ],
+                session_id="um-unaligned-setup",
+            )
+            setup_r = self._run_session(setup)
+            self.assertEqual(setup_r.returncode, 0,
+                             setup_r.stderr + setup_r.stdout)
+
+            mapping = self._write_session(
+                "um-unaligned.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=um-acq-1",
+                    "map key=obj-1",
+                ],
+                session_id="um-unaligned",
+                header_extra="provider=session-loopback",
+            )
+            result = self._run_session(mapping)
+            self.assertEqual(result.returncode, 1,
+                             result.stderr + result.stdout)
+            self.assertIn("action=map key=obj-1 status=internal "
+                          "note=map_failed", result.stdout)
+            self.assertIn("session=um-unaligned result=failed op=2",
+                          result.stdout)
+
+            cleanup = self._write_session(
+                "um-unaligned-cleanup.conf",
+                self._connect,
+                [
+                    "inspect key=obj-1 expect_state=active "
+                    "expect_generation=1 expect_holder_count=1",
+                    "release key=obj-1 idempotency_key=um-rel-1 "
+                    "expected_generation=1",
+                ],
+                session_id="um-unaligned",
+            )
+            cleanup_r = self._run_session(cleanup)
+            self.assertEqual(cleanup_r.returncode, 0,
+                             cleanup_r.stderr + cleanup_r.stdout)
+
+            # A zero-length region never reaches the data plane: the
+            # daemon rejects the publish itself, and the object stays
+            # in allocating (deterministic rollback-free rejection).
+            zero = self._write_session(
+                "um-zero-len.conf",
+                self._connect,
+                [
+                    "allocate key=obj-2 idempotency_key=um-zero-alloc "
+                    "size_bytes=4096 capabilities=map",
+                    f"publish key=obj-2 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    f"descriptor_hex=deadbeef address={DATA_MAP_ADDRESS_DEC} "
+                    "address_len=0 expect_status=invalid_session",
+                    "inspect key=obj-2 expect_state=allocating "
+                    "expect_generation=2 expect_holder_count=0",
+                ],
+                session_id="um-zero-len",
+            )
+            zero_r = self._run_session(zero)
+            self.assertEqual(zero_r.returncode, 0,
+                             zero_r.stderr + zero_r.stdout)
+            self.assertIn("op=2 action=publish key=obj-2 status=invalid_session",
+                          zero_r.stdout)
+            self.assertIn("op=3 action=inspect key=obj-2 status=ok",
+                          zero_r.stdout)
+            self.assertIn("session=um-zero-len result=ok ops=3",
+                          zero_r.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Idempotency store exhaustion (64 records, no eviction): the 65th
+    # mutating op with a fresh idempotency key is rejected with
+    # capacity_exceeded no matter the operation, while a replay of an
+    # already-recorded key still succeeds (it needs no new slot) and
+    # non-mutating ops are unaffected. The idempotency store is the
+    # tighter bound: the 128-slot managed table can never be filled
+    # from the wire because every mutating op requires an idempotency
+    # key.
+    def test_idempotency_store_exhaustion(self):
+        daemon = self._start_home_daemon()
+        try:
+            self._register_home()
+            # A session config caps at 64 ops, so the 64 allocations
+            # are split across two sessions sharing one daemon.
+            for chunk in range(2):
+                fill_ops = [
+                    f"allocate key=fill-{n} idempotency_key=fill-{n}-alloc "
+                    "size_bytes=4096 capabilities=map"
+                    for n in range(chunk * 32, chunk * 32 + 32)
+                ]
+                fill = self._write_session(
+                    f"fill-{chunk}.conf", self._connect, fill_ops,
+                    session_id=f"fill-{chunk}")
+                fill_r = self._run_session(fill)
+                self.assertEqual(fill_r.returncode, 0,
+                                 f"chunk {chunk}: "
+                                 f"{fill_r.stderr}{fill_r.stdout}")
+
+            overflow = self._write_session(
+                "overflow.conf",
+                self._connect,
+                [
+                    "allocate key=overflow idempotency_key=ov-alloc "
+                    "size_bytes=4096 capabilities=map "
+                    "expect_status=capacity_exceeded",
+                    "retire key=fill-0 idempotency_key=ov-ret "
+                    "expected_generation=1 expect_status=capacity_exceeded",
+                    "inspect key=fill-0 expect_state=allocating "
+                    "expect_generation=1 expect_holder_count=0",
+                    "stats",
+                ],
+                session_id="overflow",
+            )
+            overflow_r = self._run_session(overflow)
+            self.assertEqual(overflow_r.returncode, 0,
+                             overflow_r.stderr + overflow_r.stdout)
+            self.assertIn("op=1 action=allocate key=overflow "
+                          "status=capacity_exceeded", overflow_r.stdout)
+            self.assertIn("op=2 action=retire key=fill-0 "
+                          "status=capacity_exceeded", overflow_r.stdout)
+            self.assertIn("op=3 action=inspect key=fill-0 status=ok",
+                          overflow_r.stdout)
+            self.assertIn("op=4 action=stats status=ok live_objects=64 ",
+                          overflow_r.stdout)
+            self.assertIn("in_flight=64 ", overflow_r.stdout)
+
+            # Identical payload (same session_id, same fields) replays
+            # the recorded response instead of needing a fresh record.
+            replay = self._write_session(
+                "replay.conf",
+                self._connect,
+                [
+                    "allocate key=fill-0 idempotency_key=fill-0-alloc "
+                    "size_bytes=4096 capabilities=map",
+                    "stats",
+                ],
+                session_id="fill-0",
+            )
+            replay_r = self._run_session(replay)
+            self.assertEqual(replay_r.returncode, 0,
+                             replay_r.stderr + replay_r.stdout)
+            self.assertIn("op=1 action=allocate key=fill-0 status=ok "
+                          "state=allocating", replay_r.stdout)
+            self.assertIn("op=2 action=stats status=ok live_objects=64 ",
+                          replay_r.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Holder exhaustion (8 holders per object): the 9th acquire is
+    # rejected with capacity_exceeded, and after one holder releases a
+    # retry succeeds. Acquire-only sessions fail their own leak check
+    # (live_holder) while the daemon keeps the holder registered: a
+    # disconnected client is never silently released.
+    def test_holder_exhaustion(self):
+        daemon = self._start_active_object()
+        try:
+            for n in range(1, 9):
+                held = self._write_session(
+                    f"h{n}.conf",
+                    self._connect,
+                    [f"acquire key=obj-1 idempotency_key=h{n}-acq"],
+                    session_id=f"h{n}",
+                )
+                held_r = self._run_session(held)
+                self.assertEqual(held_r.returncode, 1,
+                                 f"h{n}: {held_r.stderr}{held_r.stdout}")
+                self.assertIn("action=acquire key=obj-1 status=ok",
+                              held_r.stdout, f"h{n}: {held_r.stdout}")
+                self.assertIn(f"session=h{n} result=failed reason=live_holder",
+                              held_r.stdout, f"h{n}: {held_r.stdout}")
+
+            ninth = self._write_session(
+                "h9.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=h9-acq "
+                    "expect_status=capacity_exceeded",
+                    "inspect key=obj-1 expect_state=active "
+                    "expect_generation=1 expect_holder_count=8",
+                ],
+                session_id="h9",
+            )
+            ninth_r = self._run_session(ninth)
+            self.assertEqual(ninth_r.returncode, 0,
+                             ninth_r.stderr + ninth_r.stdout)
+            self.assertIn("op=1 action=acquire key=obj-1 "
+                          "status=capacity_exceeded", ninth_r.stdout)
+            self.assertIn("op=2 action=inspect key=obj-1 status=ok",
+                          ninth_r.stdout)
+
+            release = self._write_session(
+                "h1-release.conf",
+                self._connect,
+                ["release key=obj-1 idempotency_key=h1-rel "
+                 "expected_generation=1"],
+                session_id="h1",
+            )
+            release_r = self._run_session(release)
+            self.assertEqual(release_r.returncode, 0,
+                             release_r.stderr + release_r.stdout)
+
+            retry = self._write_session(
+                "h9b.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=h9b-acq",
+                    "inspect key=obj-1 expect_state=active "
+                    "expect_generation=1 expect_holder_count=8",
+                ],
+                session_id="h9b",
+            )
+            retry_r = self._run_session(retry)
+            self.assertEqual(retry_r.returncode, 1,
+                             retry_r.stderr + retry_r.stdout)
+            self.assertIn("op=1 action=acquire key=obj-1 status=ok",
+                          retry_r.stdout)
+            self.assertIn("op=2 action=inspect key=obj-1 status=ok",
+                          retry_r.stdout)
+            self.assertIn("session=h9b result=failed reason=live_holder",
+                          retry_r.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Concurrent allocation of the same key is deterministic: with the
+    # same idempotency key both clients observe the same single object;
+    # with different keys exactly one wins and the loser is rejected
+    # with version_conflict.
+    def test_concurrent_allocate_same_key(self):
+        daemon = self._start_home_daemon()
+        try:
+            self._register_home()
+            # Same idempotency key + identical request payload (same
+            # session_id) from two processes: one executes, the other
+            # replays the recorded response.
+            same = [
+                self._write_session(
+                    f"race-a{n}.conf",
+                    self._connect,
+                    ["allocate key=race-a idempotency_key=race-a-shared "
+                     "size_bytes=4096 capabilities=map"],
+                    session_id="race-a",
+                )
+                for n in (1, 2)
+            ]
+            same_r = self._run_sessions_concurrent(same)
+            for result in same_r:
+                self.assertEqual(result.returncode, 0,
+                                 result.stderr + result.stdout)
+                self.assertIn("action=allocate key=race-a status=ok",
+                              result.stdout)
+
+            diff = [
+                self._write_session(
+                    f"race-b{n}.conf",
+                    self._connect,
+                    [f"allocate key=race-b idempotency_key=race-b-k{n} "
+                     "size_bytes=4096 capabilities=map"],
+                    session_id=f"race-b{n}",
+                )
+                for n in (1, 2)
+            ]
+            diff_r = self._run_sessions_concurrent(diff)
+            oks = [r for r in diff_r if r.returncode == 0]
+            conflicts = [r for r in diff_r if r.returncode == 1]
+            self.assertEqual(len(oks), 1,
+                             "\n".join(r.stdout + r.stderr for r in diff_r))
+            self.assertEqual(len(conflicts), 1,
+                             "\n".join(r.stdout + r.stderr for r in diff_r))
+            self.assertIn("action=allocate key=race-b status=ok",
+                          oks[0].stdout)
+            self.assertIn("action=allocate key=race-b status=version_conflict",
+                          conflicts[0].stdout)
+
+            stats = self._write_session("race-stats.conf", self._connect,
+                                        ["stats"], session_id="race-stats")
+            stats_r = self._run_session(stats)
+            self.assertEqual(stats_r.returncode, 0,
+                             stats_r.stderr + stats_r.stdout)
+            self.assertIn("action=stats status=ok live_objects=2 ",
+                          stats_r.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Wire idempotency for holder ops (plan M1.4): a retry carrying the
+    # same operation/idempotency identity and a byte-identical payload
+    # replays the recorded outcome without re-executing the mutation;
+    # the same key with any field changed (expected_generation,
+    # session_id) or attached to a different operation is a
+    # version_conflict, never a silent second change. The managed layer
+    # is also naturally idempotent: re-acquire by an existing holder
+    # with a fresh key succeeds without adding a holder, while a
+    # re-executed release with a fresh key is a deterministic
+    # not_found. Daemon metrics idempotency_replay_count /
+    # idempotency_conflict_count and the managed ok/rejected counters
+    # separate ledger replay from re-execution.
+    def test_acquire_release_idempotent_replay_and_version_conflict(self):
+        daemon = self._start_active_object()
+        try:
+            session = self._write_session(
+                "idem-holder.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=ih-acq-1 expected_generation=1",
+                    "acquire key=obj-1 idempotency_key=ih-acq-1 expected_generation=1",
+                    "inspect key=obj-1 expect_state=active expect_generation=1 "
+                    "expect_holder_count=1",
+                    "acquire key=obj-1 idempotency_key=ih-acq-2 expected_generation=1",
+                    "inspect key=obj-1 expect_state=active expect_generation=1 "
+                    "expect_holder_count=1",
+                    "acquire key=obj-1 idempotency_key=ih-acq-1 expected_generation=2 "
+                    "expect_status=version_conflict",
+                    "acquire key=obj-1 idempotency_key=ih-acq-1 session_id=stranger "
+                    "expected_generation=1 expect_status=version_conflict",
+                    "release key=obj-1 idempotency_key=ih-acq-1 expected_generation=1 "
+                    "expect_status=version_conflict",
+                    "release key=obj-1 idempotency_key=ih-rel-1 expected_generation=1",
+                    "release key=obj-1 idempotency_key=ih-rel-1 expected_generation=1",
+                    "release key=obj-1 idempotency_key=ih-rel-2 expected_generation=1 "
+                    "expect_status=not_found",
+                    "inspect key=obj-1 expect_state=active expect_generation=1 "
+                    "expect_holder_count=0",
+                    "stats",
+                ],
+                session_id="idem-holder",
+            )
+            result = self._run_session(session)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("op=1 action=acquire key=obj-1 status=ok "
+                          "state=active generation=1", result.stdout)
+            # op=2 is the ledger replay of op=1: identical outcome.
+            self.assertIn("op=2 action=acquire key=obj-1 status=ok "
+                          "state=active generation=1", result.stdout)
+            # op=4 is a natural re-acquire by the existing holder.
+            self.assertIn("op=4 action=acquire key=obj-1 status=ok "
+                          "state=active generation=1", result.stdout)
+            self.assertIn("op=6 action=acquire key=obj-1 "
+                          "status=version_conflict", result.stdout)
+            self.assertIn("op=7 action=acquire key=obj-1 "
+                          "status=version_conflict", result.stdout)
+            self.assertIn("op=8 action=release key=obj-1 "
+                          "status=version_conflict", result.stdout)
+            self.assertIn("op=9 action=release key=obj-1 status=ok "
+                          "state=active generation=1", result.stdout)
+            # op=10 replays the recorded release; a re-executed release
+            # would be not_found because the holder is already gone.
+            self.assertIn("op=10 action=release key=obj-1 status=ok "
+                          "state=active generation=1", result.stdout)
+            self.assertIn("op=11 action=release key=obj-1 status=not_found",
+                          result.stdout)
+            self.assertIn("op=13 action=stats status=ok live_objects=1 ",
+                          result.stdout)
+            self.assertIn("live_refs=0 ", result.stdout)
+            self.assertIn("session=idem-holder result=ok ops=13", result.stdout)
+
+            stats = self._allocation_stats()
+            self.assertEqual(stats["acquire_ok_count"], "2")
+            self.assertEqual(stats["acquire_rejected_count"], "0")
+            self.assertEqual(stats["release_ok_count"], "1")
+            self.assertEqual(stats["release_rejected_count"], "1")
+            self.assertEqual(stats["live_refs"], "0")
+            self.assertEqual(stats["live_objects"], "1")
+
+            metrics = self._daemon_metrics()
+            self.assertEqual(metrics["idempotency_replay_count"], 2)
+            self.assertEqual(metrics["idempotency_conflict_count"], 3)
+        finally:
+            self._stop_server(daemon)
+
+    # Retire/reclaim idempotency: a holder-free provider-backed object
+    # parks in RETIRING until the home provider confirms reclaim. A
+    # byte-identical retire replay is served from the ledger; a retire
+    # with a fresh key re-executes harmlessly on RETIRING. Reclaim is
+    # deliberately not a ledger operation: a repeated confirmed reclaim
+    # against the terminal RETIRED state is naturally idempotent and
+    # returns ok/retired without touching the replay counters, while a
+    # retire against RETIRED is a deterministic stale_ref rejection.
+    def test_retire_reclaim_idempotent_replay_and_terminal_rejection(self):
+        daemon = self._start_active_object()
+        try:
+            retire = self._write_session(
+                "retire.conf",
+                self._connect,
+                [
+                    "retire key=obj-1 idempotency_key=rt-1 expected_generation=1",
+                    "retire key=obj-1 idempotency_key=rt-1 expected_generation=1",
+                    "retire key=obj-1 idempotency_key=rt-1 expected_generation=2 "
+                    "expect_status=version_conflict",
+                    "retire key=obj-1 idempotency_key=rt-2 expected_generation=1",
+                    "inspect key=obj-1 expect_state=retiring expect_generation=1",
+                    "stats",
+                ],
+                session_id="retire",
+            )
+            retire_r = self._run_session(retire)
+            self.assertEqual(retire_r.returncode, 0,
+                             retire_r.stderr + retire_r.stdout)
+            self.assertIn("op=1 action=retire key=obj-1 status=ok "
+                          "state=retiring generation=1", retire_r.stdout)
+            self.assertIn("op=2 action=retire key=obj-1 status=ok "
+                          "state=retiring generation=1", retire_r.stdout)
+            self.assertIn("op=3 action=retire key=obj-1 "
+                          "status=version_conflict", retire_r.stdout)
+            self.assertIn("op=4 action=retire key=obj-1 status=ok "
+                          "state=retiring generation=1", retire_r.stdout)
+            self.assertIn("op=6 action=stats status=ok live_objects=1 ",
+                          retire_r.stdout)
+
+            reclaim = self._write_session(
+                "reclaim.conf",
+                self._connect,
+                [
+                    f"reclaim key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 confirmed=1",
+                    f"reclaim key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 confirmed=1",
+                    "retire key=obj-1 idempotency_key=rt-3 expected_generation=1 "
+                    "expect_status=stale_ref",
+                    "inspect key=obj-1 expect_state=retired expect_generation=1",
+                    "stats",
+                ],
+                session_id="reclaim",
+            )
+            reclaim_r = self._run_session(reclaim)
+            self.assertEqual(reclaim_r.returncode, 0,
+                             reclaim_r.stderr + reclaim_r.stdout)
+            self.assertIn("op=1 action=reclaim key=obj-1 status=ok "
+                          "state=retired generation=1", reclaim_r.stdout)
+            self.assertIn("op=2 action=reclaim key=obj-1 status=ok "
+                          "state=retired generation=1", reclaim_r.stdout)
+            self.assertIn("op=3 action=retire key=obj-1 status=stale_ref",
+                          reclaim_r.stdout)
+            self.assertIn("op=5 action=stats status=ok live_objects=0 ",
+                          reclaim_r.stdout)
+
+            stats = self._allocation_stats()
+            self.assertEqual(stats["retire_ok_count"], "2")
+            self.assertEqual(stats["retire_rejected_count"], "1")
+            self.assertEqual(stats["reclaim_ok_count"], "2")
+            self.assertEqual(stats["reclaim_rejected_count"], "0")
+            self.assertEqual(stats["live_objects"], "0")
+            self.assertEqual(stats["quarantined_objects"], "0")
+
+            metrics = self._daemon_metrics()
+            self.assertEqual(metrics["idempotency_replay_count"], 1)
+            self.assertEqual(metrics["idempotency_conflict_count"], 1)
+        finally:
+            self._stop_server(daemon)
+
+    # Rejected outcomes are ledger outcomes too: a stale-generation
+    # acquire is recorded with its stale_ref response, and an identical
+    # retry replays that rejection instead of re-executing it (the
+    # managed rejected counter moves exactly once). The object itself
+    # is untouched: no holder appears and the state stays active.
+    def test_rejected_outcome_idempotent_replay(self):
+        daemon = self._start_active_object()
+        try:
+            session = self._write_session(
+                "idem-reject.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=rj-acq-1 "
+                    "expected_generation=99 expect_status=stale_ref",
+                    "acquire key=obj-1 idempotency_key=rj-acq-1 "
+                    "expected_generation=99 expect_status=stale_ref",
+                    "inspect key=obj-1 expect_state=active expect_generation=1 "
+                    "expect_holder_count=0",
+                    "stats",
+                ],
+                session_id="idem-reject",
+            )
+            result = self._run_session(session)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("op=1 action=acquire key=obj-1 status=stale_ref",
+                          result.stdout)
+            self.assertIn("op=2 action=acquire key=obj-1 status=stale_ref",
+                          result.stdout)
+            self.assertIn("op=4 action=stats status=ok live_objects=1 ",
+                          result.stdout)
+            self.assertIn("session=idem-reject result=ok ops=4", result.stdout)
+
+            stats = self._allocation_stats()
+            self.assertEqual(stats["acquire_ok_count"], "0")
+            self.assertEqual(stats["acquire_rejected_count"], "1")
+            self.assertEqual(stats["live_refs"], "0")
+
+            metrics = self._daemon_metrics()
+            self.assertEqual(metrics["idempotency_replay_count"], 1)
+            self.assertEqual(metrics["idempotency_conflict_count"], 0)
+        finally:
+            self._stop_server(daemon)
+
+    # Failed publishes apply nothing (plan M1.4 failure determinism):
+    # a provider-mismatch publish (wrong incarnation) is stopped by the
+    # daemon's provider caller check and a stale-generation publish is
+    # rejected by the managed table, both before any field is written,
+    # so the object stays ALLOCATING with its original generation and
+    # zero reserved resources, and a later correct publish still
+    # completes the allocation.
+    def test_failed_publish_leaves_allocating_state_deterministic(self):
+        daemon = self._start_home_daemon()
+        try:
+            self._register_home()
+            session = self._write_session(
+                "pub-fail.conf",
+                self._connect,
+                [
+                    "allocate key=obj-p idempotency_key=pf-alloc "
+                    "size_bytes=4096 capabilities=map",
+                    f"publish key=obj-p node_id={HOME_NODE} incarnation=99 "
+                    "generation=1 descriptor_hex=deadbeef address=4096 "
+                    "address_len=8192 expect_status=version_conflict",
+                    f"publish key=obj-p node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=99 "
+                    "descriptor_hex=deadbeef address=4096 "
+                    "address_len=8192 expect_status=stale_ref",
+                    "inspect key=obj-p expect_state=allocating "
+                    "expect_generation=1 expect_holder_count=0",
+                    "stats",
+                    f"publish key=obj-p node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    "descriptor_hex=deadbeef address=4096 address_len=8192",
+                    "inspect key=obj-p expect_state=active expect_generation=1",
+                    "stats",
+                ],
+                session_id="pub-fail",
+            )
+            result = self._run_session(session)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("op=2 action=publish key=obj-p "
+                          "status=version_conflict", result.stdout)
+            self.assertIn("op=3 action=publish key=obj-p status=stale_ref",
+                          result.stdout)
+            self.assertIn("op=4 action=inspect key=obj-p status=ok "
+                          "state=allocating generation=1", result.stdout)
+            self.assertIn("op=5 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=0 address_reserved_bytes=0 "
+                          "live_refs=0 in_flight=1 quarantined_objects=0 "
+                          "quarantined_bytes=0", result.stdout)
+            self.assertIn("op=6 action=publish key=obj-p status=ok "
+                          "state=active generation=1", result.stdout)
+            self.assertIn("op=8 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=8192 live_refs=0 in_flight=0 "
+                          "quarantined_objects=0 quarantined_bytes=0",
+                          result.stdout)
+
+            # The daemon caller check rejects the wrong-incarnation
+            # publish before it reaches the managed table, so only the
+            # stale-generation publish is counted as a managed-layer
+            # rejection; neither rejection wrote any object state.
+            stats = self._allocation_stats()
+            self.assertEqual(stats["publish_ok_count"], "1")
+            self.assertEqual(stats["publish_rejected_count"], "1")
+        finally:
+            self._stop_server(daemon)
+
+    # in_flight is a transient process value, not a leak: it counts
+    # exactly the ALLOCATING and RETIRING phases and returns to zero
+    # at ACTIVE and at RETIRED, while backing/address counters only
+    # exist between publish and reclaim.
+    def test_in_flight_transient_across_lifecycle(self):
+        daemon = self._start_home_daemon()
+        try:
+            self._register_home()
+            session = self._write_session(
+                "inflight.conf",
+                self._connect,
+                [
+                    "allocate key=obj-x idempotency_key=if-alloc "
+                    "size_bytes=4096 capabilities=map",
+                    "stats",
+                    f"publish key=obj-x node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    "descriptor_hex=deadbeef address=4096 address_len=8192",
+                    "stats",
+                    "acquire key=obj-x idempotency_key=if-acq "
+                    "expected_generation=1",
+                    "stats",
+                    "release key=obj-x idempotency_key=if-rel "
+                    "expected_generation=1",
+                    "stats",
+                    "retire key=obj-x idempotency_key=if-ret "
+                    "expected_generation=1",
+                    "stats",
+                    f"reclaim key=obj-x node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 confirmed=1",
+                    "stats",
+                ],
+                session_id="inflight",
+            )
+            result = self._run_session(session)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("op=2 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=0 address_reserved_bytes=0 "
+                          "live_refs=0 in_flight=1 quarantined_objects=0 "
+                          "quarantined_bytes=0", result.stdout)
+            self.assertIn("op=4 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=8192 live_refs=0 in_flight=0 "
+                          "quarantined_objects=0 quarantined_bytes=0",
+                          result.stdout)
+            self.assertIn("op=6 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=8192 live_refs=1 in_flight=0 "
+                          "quarantined_objects=0 quarantined_bytes=0",
+                          result.stdout)
+            self.assertIn("op=8 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=8192 live_refs=0 in_flight=0 "
+                          "quarantined_objects=0 quarantined_bytes=0",
+                          result.stdout)
+            self.assertIn("op=10 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=8192 live_refs=0 in_flight=1 "
+                          "quarantined_objects=0 quarantined_bytes=0",
+                          result.stdout)
+            self.assertIn("op=12 action=stats status=ok live_objects=0 "
+                          "backing_allocated_bytes=0 address_reserved_bytes=0 "
+                          "live_refs=0 in_flight=0 quarantined_objects=0 "
+                          "quarantined_bytes=0", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Quarantine is the deterministic terminal state for an
+    # unconfirmable release (plan M1.4 isolation stats): a provider
+    # reclaim with confirmed=0 moves the object to QUARANTINED, its
+    # bytes are reported only in the quarantined counters and never
+    # mixed back into live/backing/address accounting, and every later
+    # mutation against the quarantined identity fails closed (acquire,
+    # retire) except the naturally idempotent terminal reclaim.
+    # Re-allocating the same key is a version_conflict: a quarantined
+    # identity is never silently reused.
+    def test_quarantine_isolation_stats_and_terminal_behavior(self):
+        daemon = self._start_active_object()
+        try:
+            session = self._write_session(
+                "quarantine.conf",
+                self._connect,
+                [
+                    "stats",
+                    "retire key=obj-1 idempotency_key=q-ret-1 "
+                    "expected_generation=1",
+                    "stats",
+                    f"reclaim key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 confirmed=0",
+                    "inspect key=obj-1 expect_state=quarantined "
+                    "expect_generation=1",
+                    "stats",
+                    "acquire key=obj-1 idempotency_key=q-acq-1 "
+                    "expected_generation=1 expect_status=stale_ref",
+                    "retire key=obj-1 idempotency_key=q-ret-2 "
+                    "expected_generation=1 expect_status=stale_ref",
+                    f"reclaim key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 confirmed=1",
+                    "allocate key=obj-1 idempotency_key=q-alloc-2 "
+                    "size_bytes=4096 capabilities=map "
+                    "expect_status=version_conflict",
+                    "stats",
+                ],
+                session_id="quarantine",
+            )
+            result = self._run_session(session)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("op=1 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=16384 live_refs=0 "
+                          "in_flight=0 quarantined_objects=0 "
+                          "quarantined_bytes=0", result.stdout)
+            self.assertIn("op=4 action=reclaim key=obj-1 status=ok "
+                          "state=quarantined generation=1", result.stdout)
+            self.assertIn("op=6 action=stats status=ok live_objects=0 "
+                          "backing_allocated_bytes=0 address_reserved_bytes=0 "
+                          "live_refs=0 in_flight=0 quarantined_objects=1 "
+                          "quarantined_bytes=4096", result.stdout)
+            self.assertIn("op=7 action=acquire key=obj-1 status=stale_ref",
+                          result.stdout)
+            self.assertIn("op=8 action=retire key=obj-1 status=stale_ref",
+                          result.stdout)
+            self.assertIn("op=9 action=reclaim key=obj-1 status=ok "
+                          "state=quarantined generation=1", result.stdout)
+            self.assertIn("op=10 action=allocate key=obj-1 "
+                          "status=version_conflict", result.stdout)
+            self.assertIn("op=11 action=stats status=ok live_objects=0 "
+                          "backing_allocated_bytes=0 address_reserved_bytes=0 "
+                          "live_refs=0 in_flight=0 quarantined_objects=1 "
+                          "quarantined_bytes=4096", result.stdout)
+
+            stats = self._allocation_stats()
+            self.assertEqual(stats["quarantine_events"], "1")
+            self.assertEqual(stats["quarantined_objects"], "1")
+            self.assertEqual(stats["quarantined_bytes"], "4096")
+            self.assertEqual(stats["reclaim_ok_count"], "2")
+            self.assertEqual(stats["acquire_rejected_count"], "1")
+            self.assertEqual(stats["retire_rejected_count"], "1")
+            self.assertEqual(stats["allocate_rejected_count"], "1")
+        finally:
+            self._stop_server(daemon)
+
+    # A killed client never implies release (plan M1.4: a disconnected
+    # holder is not evidence of release): after the client process is
+    # SIGKILLed mid-session the daemon keeps the holder registered
+    # indefinitely and every reclaim, confirmed or not, is rejected
+    # while the holder record exists. With the owning session gone no
+    # explicit release can ever arrive, so the object stays in RETIRING
+    # permanently, still counted in live_refs and in_flight.
+    def test_killed_client_holder_is_never_silently_reclaimed(self):
+        daemon = self._start_active_object()
+        victim = None
+        try:
+            victim_config = self._write_session(
+                "killed.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=k-acq-1 "
+                    "expected_generation=1",
+                    "wait_state key=obj-1 state=retired timeout_ms=30000 "
+                    "poll_ms=100",
+                ],
+                session_id="killed",
+            )
+            victim = subprocess.Popen(
+                [str(self.binary), "object-session", "--config",
+                 str(victim_config)],
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                if victim.poll() is not None:
+                    stdout, stderr = victim.communicate(timeout=1)
+                    self.fail(f"victim session exited early rc="
+                              f"{victim.returncode}\n{stdout}{stderr}")
+                if self._allocation_stats().get("live_refs") == "1":
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("holder was never registered by victim session")
+
+            victim.kill()
+            victim.communicate(timeout=5)
+            victim = None
+
+            # The RPC disconnect changes nothing: the holder survives
+            # client death across repeated observations.
+            first = self._allocation_stats()
+            time.sleep(0.2)
+            second = self._allocation_stats()
+            self.assertEqual(first["live_refs"], "1")
+            self.assertEqual(second["live_refs"], "1")
+            self.assertEqual(first["live_objects"], "1")
+
+            checker = self._write_session(
+                "checker.conf",
+                self._connect,
+                [
+                    "retire key=obj-1 idempotency_key=k-ret-1 "
+                    "expected_generation=1",
+                    "inspect key=obj-1 expect_state=retiring "
+                    "expect_generation=1 expect_holder_count=1",
+                    f"reclaim key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    "confirmed=1 expect_status=stale_ref",
+                    f"reclaim key=obj-1 node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    "confirmed=0 expect_status=stale_ref",
+                    "inspect key=obj-1 expect_state=retiring "
+                    "expect_generation=1 expect_holder_count=1",
+                    "stats",
+                ],
+                session_id="checker",
+            )
+            checker_r = self._run_session(checker)
+            self.assertEqual(checker_r.returncode, 0,
+                             checker_r.stderr + checker_r.stdout)
+            self.assertIn("op=3 action=reclaim key=obj-1 status=stale_ref",
+                          checker_r.stdout)
+            self.assertIn("op=4 action=reclaim key=obj-1 status=stale_ref",
+                          checker_r.stdout)
+            self.assertIn("op=5 action=inspect key=obj-1 status=ok "
+                          "state=retiring generation=1", checker_r.stdout)
+            self.assertIn("op=6 action=stats status=ok live_objects=1 "
+                          "backing_allocated_bytes=4096 "
+                          "address_reserved_bytes=16384 live_refs=1 "
+                          "in_flight=1 quarantined_objects=0 "
+                          "quarantined_bytes=0",
+                          checker_r.stdout)
+
+            stats = self._allocation_stats()
+            self.assertEqual(stats["reclaim_rejected_count"], "2")
+            self.assertEqual(stats["reclaim_ok_count"], "0")
+            self.assertEqual(stats["quarantine_events"], "0")
+        finally:
+            if victim is not None:
+                victim.kill()
+                victim.communicate(timeout=5)
+            self._stop_server(daemon)
 
 
 if __name__ == "__main__":
