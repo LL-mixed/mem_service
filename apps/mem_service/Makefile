@@ -248,11 +248,35 @@ else
 all: linqu_mem_service linqu_mem_service_core
 endif
 
-linqu_mem_service: $(MEM_SERVICE_CORE_SRCS)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -lm -o $@
+# The guest CLI carries the OBMM peer-mapping provider so object-session can
+# run map/unmap/write/read against real /dev/obmm. That provider needs Linux
+# kernel uapi headers (vendor/obmm and kernel_ub include <linux/types.h>), so
+# only Linux-targeting toolchains can compile it: the default cross CC and
+# native Linux builds enable OBMM, while host-only toolchains (e.g. the macOS
+# cc used by the release layout tests via CC=cc) keep the loopback provider
+# only, matching linqu_mem_service_host. Override with MEM_SERVICE_OBMM=0/1
+# when the toolchain detection is wrong.
+MEM_SERVICE_OBMM_TOOLCHAIN := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifneq ($(findstring linux,$(MEM_SERVICE_OBMM_TOOLCHAIN)),)
+MEM_SERVICE_OBMM ?= 1
+else
+MEM_SERVICE_OBMM ?= 0
+endif
+ifeq ($(MEM_SERVICE_OBMM),1)
+LINQU_MEM_SERVICE_OBMM_SRCS := $(MEM_SERVICE_PROVIDER_OBMM) $(LIBOBMM_SRCS)
+LINQU_MEM_SERVICE_OBMM_DEFS := -DMEM_SERVICE_OBJECT_SESSION_OBMM
+LINQU_MEM_SERVICE_OBMM_LDLIBS := $(LIBOBMM_LDLIBS)
+else
+LINQU_MEM_SERVICE_OBMM_SRCS :=
+LINQU_MEM_SERVICE_OBMM_DEFS :=
+LINQU_MEM_SERVICE_OBMM_LDLIBS :=
+endif
 
-linqu_mem_service_core: $(MEM_SERVICE_CORE_SRCS)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -lm -o $@
+linqu_mem_service: $(MEM_SERVICE_CORE_SRCS) $(LINQU_MEM_SERVICE_OBMM_SRCS)
+	$(CC) $(CFLAGS) $(LINQU_MEM_SERVICE_OBMM_DEFS) $(INCLUDES) $^ $(LINQU_MEM_SERVICE_OBMM_LDLIBS) -lm -o $@
+
+linqu_mem_service_core: $(MEM_SERVICE_CORE_SRCS) $(LINQU_MEM_SERVICE_OBMM_SRCS)
+	$(CC) $(CFLAGS) $(LINQU_MEM_SERVICE_OBMM_DEFS) $(INCLUDES) $^ $(LINQU_MEM_SERVICE_OBMM_LDLIBS) -lm -o $@
 
 linqu_mem_service_qwen3: $(filter-out $(LLM_INFER),$(MEM_SERVICE_QWEN3_ADAPTER_SRCS)) $(LIBOBMM_SRCS)
 	@test -f "$(LLM_INFER)" || { \

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -26,6 +27,10 @@
 
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
 #include "components/llm_infer/llm_infer.h"
+#endif
+
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+#include "components/mem_service/providers/mem_service_provider_obmm.h"
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
@@ -145,7 +150,7 @@ static void usage(const char *argv0)
     printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
-    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats> field=value ...]");
+    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read> field=value ...]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -9345,15 +9350,31 @@ static int run_reclaim_allocation(int argc, char **argv)
  * wait_state polls inspect-allocation inside a bounded timeout so
  * producer/consumer coordination keys off object state, never fixed
  * sleeps. The CLI holds no allocation semantics of its own: each op is
- * exactly one SDK call. Payload (map/write/read) ops join when the
- * provider data path lands; this slice covers the control-plane
- * choreography shared by T-share-memory producer/consumer pairs.
+ * exactly one SDK call.
+ *
+ * Data-plane ops (map/unmap/write/read) run in this process through the
+ * provider channel selected by the session header provider= line; the
+ * control RPC still only manages references, handles and publish state.
+ * provider=session-loopback registers an in-process mmap loopback
+ * provider that honors strict fixed-address mapping (no fallback VA) and
+ * is meant for session behavior tests; provider=obmm binds the real OBMM
+ * endpoint and is only available when built with
+ * MEM_SERVICE_OBJECT_SESSION_OBMM. A session must acquire before map,
+ * unmap before release, and end with no live mapping or holder: the CLI
+ * fails the session otherwise, so choreography leaks are deterministic.
  */
 #define MEM_SERVICE_OBJECT_SESSION_MAX_OPS 64U
 #define MEM_SERVICE_OBJECT_SESSION_MAX_FIELDS 16U
 #define MEM_SERVICE_OBJECT_SESSION_LINE_LEN 768U
 #define MEM_SERVICE_OBJECT_SESSION_FIELD_NAME_LEN 32U
 #define MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN 288U
+#define MEM_SERVICE_OBJECT_SESSION_MAX_DATA_LEN (16U * 1024U * 1024U)
+#define MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS 4U
+#define MEM_SERVICE_OBJECT_SESSION_PROVIDER_KIND_LEN 24U
+#define MEM_SERVICE_OBJECT_SESSION_DEFAULT_IMPORT_REGION_BYTES \
+    (256ULL * 1024ULL * 1024ULL)
+#define MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS 4U
+#define MEM_SERVICE_OBJECT_SESSION_OBMM_REQUIRED_PEER_MAPPINGS 1U
 #define MEM_SERVICE_OBJECT_SESSION_MAX_WAIT_MS 60000U
 #define MEM_SERVICE_OBJECT_SESSION_MAX_REQUEST_TIMEOUT_MS 60000U
 #define MEM_SERVICE_OBJECT_SESSION_DEFAULT_REQUEST_TIMEOUT_MS 5000U
@@ -9371,6 +9392,10 @@ enum mem_service_object_session_action {
     MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH = 7,
     MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM = 8,
     MEM_SERVICE_OBJECT_SESSION_ACTION_STATS = 9,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_MAP = 10,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP = 11,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE = 12,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_READ = 13,
 };
 
 struct mem_service_object_session_field {
@@ -9404,15 +9429,220 @@ struct mem_service_object_session_op {
     uint64_t address;
     uint64_t address_len;
     bool confirmed;
+    uint64_t map_flags;
+    uint64_t data_offset;
+    uint64_t data_len;
+    uint64_t data_seed;
+    bool has_data_seed;
+    bool has_expect_checksum;
+    uint64_t expect_checksum;
 };
 
 struct mem_service_object_session_config {
     char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
     char connect[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
     uint64_t request_timeout_ms;
+    bool provider_configured;
+    char provider_kind[MEM_SERVICE_OBJECT_SESSION_PROVIDER_KIND_LEN];
+    char provider_device[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
+    char provider_cna_path[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
+    char provider_instance[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
+    uint64_t provider_import_region_bytes;
+    bool has_provider_device;
+    bool has_provider_cna_path;
+    bool has_provider_instance;
+    bool has_provider_import_region_bytes;
     uint32_t op_count;
     struct mem_service_object_session_op
         ops[MEM_SERVICE_OBJECT_SESSION_MAX_OPS];
+};
+
+/*
+ * In-process loopback mapping provider for session behavior tests. It
+ * performs real anonymous mmap at the exact requested address (hint only,
+ * never MAP_FIXED) so a conflicting address fails closed instead of
+ * silently substituting another VA, mirroring the strict GSVA contract.
+ */
+struct mem_service_object_session_loopback_mapping {
+    bool active;
+    uint64_t handle;
+    void *base;
+    uint64_t len;
+};
+
+struct mem_service_object_session_loopback {
+    struct mem_service_object_session_loopback_mapping
+        mappings[MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS];
+    uint64_t next_handle;
+};
+
+struct mem_service_object_session_state {
+    bool has_view;
+    bool held;
+    struct mem_service_client_allocation view;
+    bool mapped;
+    struct mem_service_client_object_mapping mapping;
+    bool provider_ready;
+    struct mem_service_provider_registry registry;
+    struct mem_service_provider_channel channel;
+    struct mem_service_object_session_loopback loopback;
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+    bool obmm_open;
+    struct mem_service_provider_obmm_endpoint obmm_endpoint;
+#endif
+};
+
+static int mem_service_object_session_loopback_probe(
+    void *context,
+    enum mem_service_provider_state *state_out)
+{
+    if (context == NULL || state_out == NULL) {
+        return -1;
+    }
+    *state_out = MEM_SERVICE_PROVIDER_STATE_READY;
+    return 0;
+}
+
+static int mem_service_object_session_loopback_map(
+    void *context,
+    const struct mem_service_mapping_request *request,
+    struct mem_service_mapping *mapping_out)
+{
+    struct mem_service_object_session_loopback *loopback = context;
+    void *base;
+    int prot = 0;
+    size_t i;
+
+    if (loopback == NULL || request == NULL || mapping_out == NULL ||
+        request->memory_kind != MEM_SERVICE_MEMORY_HOST ||
+        request->len == 0 ||
+        request->offset > request->remote_region_len ||
+        request->len > request->remote_region_len - request->offset ||
+        (request->flags & ~MEM_SERVICE_MAPPING_FLAG_VALID_MASK) != 0 ||
+        (request->flags & (MEM_SERVICE_MAPPING_FLAG_READ |
+                           MEM_SERVICE_MAPPING_FLAG_WRITE)) == 0 ||
+        (request->flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS) == 0 ||
+        request->requested_address == NULL || request->offset != 0) {
+        return -1;
+    }
+    for (i = 0; i < MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS; ++i) {
+        if (!loopback->mappings[i].active) {
+            break;
+        }
+    }
+    if (i == MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS) {
+        return -1;
+    }
+    if ((request->flags & MEM_SERVICE_MAPPING_FLAG_READ) != 0) {
+        prot |= PROT_READ;
+    }
+    if ((request->flags & MEM_SERVICE_MAPPING_FLAG_WRITE) != 0) {
+        prot |= PROT_WRITE;
+    }
+    /* No MAP_FIXED: the kernel honors the hint only when the range is
+     * free, so a live mapping can never be clobbered; any other returned
+     * address is a strict-address failure and is torn down at once. */
+    base = mmap(request->requested_address,
+                request->len,
+                prot,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0);
+    if (base == MAP_FAILED) {
+        return -1;
+    }
+    if (base != request->requested_address) {
+        (void)munmap(base, request->len);
+        return -1;
+    }
+    loopback->next_handle += 1U;
+    loopback->mappings[i].active = true;
+    loopback->mappings[i].handle = loopback->next_handle;
+    loopback->mappings[i].base = base;
+    loopback->mappings[i].len = request->len;
+    memset(mapping_out, 0, sizeof(*mapping_out));
+    mapping_out->handle = loopback->next_handle;
+    mapping_out->base = base;
+    mapping_out->len = request->len;
+    mapping_out->memory_kind = request->memory_kind;
+    return 0;
+}
+
+static int mem_service_object_session_loopback_unmap(void *context,
+                                                     uint64_t mapping_handle)
+{
+    struct mem_service_object_session_loopback *loopback = context;
+    size_t i;
+
+    if (loopback == NULL || mapping_handle == 0) {
+        return -1;
+    }
+    for (i = 0; i < MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS; ++i) {
+        if (loopback->mappings[i].active &&
+            loopback->mappings[i].handle == mapping_handle) {
+            if (munmap(loopback->mappings[i].base,
+                       loopback->mappings[i].len) != 0) {
+                return -1;
+            }
+            memset(&loopback->mappings[i],
+                   0,
+                   sizeof(loopback->mappings[i]));
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Loopback ranges are same-process memory: visibility is immediate, so
+ * publish/invalidate/wait-visible all reduce to a checksum assertion. */
+static int mem_service_object_session_loopback_range(
+    void *context,
+    const struct mem_service_mapping_range_request *request,
+    struct mem_service_visibility_completion *completion_out)
+{
+    struct mem_service_object_session_loopback *loopback = context;
+    const uint8_t *base = NULL;
+    uint64_t checksum;
+    size_t i;
+
+    if (loopback == NULL || request == NULL || completion_out == NULL ||
+        request->len == 0) {
+        return -1;
+    }
+    for (i = 0; i < MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS; ++i) {
+        if (loopback->mappings[i].active &&
+            loopback->mappings[i].handle == request->mapping_handle) {
+            base = loopback->mappings[i].base;
+            if (request->offset > loopback->mappings[i].len ||
+                request->len >
+                    loopback->mappings[i].len - request->offset) {
+                return -1;
+            }
+            break;
+        }
+    }
+    if (base == NULL) {
+        return -1;
+    }
+    checksum = mem_service_provider_checksum64(
+        (const uint8_t *)base + request->offset, request->len);
+    if (checksum != request->expected_checksum) {
+        return -1;
+    }
+    memset(completion_out, 0, sizeof(*completion_out));
+    completion_out->visible_bytes = request->len;
+    completion_out->checksum = checksum;
+    return 0;
+}
+
+static const struct mem_service_provider_ops
+    mem_service_object_session_loopback_ops = {
+        .probe = mem_service_object_session_loopback_probe,
+        .map_remote_region = mem_service_object_session_loopback_map,
+        .unmap_remote_region = mem_service_object_session_loopback_unmap,
+        .publish_range = mem_service_object_session_loopback_range,
+        .invalidate_range = mem_service_object_session_loopback_range,
+        .wait_range_visible = mem_service_object_session_loopback_range,
 };
 
 static const char *mem_service_object_session_action_name(uint32_t action)
@@ -9436,6 +9666,14 @@ static const char *mem_service_object_session_action_name(uint32_t action)
         return "reclaim";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS:
         return "stats";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+        return "map";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+        return "unmap";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
+        return "write";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_READ:
+        return "read";
     default:
         return "unknown";
     }
@@ -9563,6 +9801,46 @@ static bool mem_service_object_session_parse_hex(const char *value,
     return true;
 }
 
+/* Like parse_u64 but accepts 0x-prefixed hex (base 0), for checksums. */
+static bool mem_service_object_session_parse_u64_base0(const char *value,
+                                                       uint64_t *out)
+{
+    char *end = NULL;
+    unsigned long long parsed;
+
+    if (value == NULL || !isdigit((unsigned char)value[0])) {
+        return false;
+    }
+    errno = 0;
+    parsed = strtoull(value, &end, 0);
+    if (errno != 0 || end == value || *end != '\0') {
+        return false;
+    }
+    *out = (uint64_t)parsed;
+    return true;
+}
+
+static bool mem_service_object_session_parse_map_flags(const char *value,
+                                                       uint64_t *out)
+{
+    if (value == NULL) {
+        return false;
+    }
+    if (strcmp(value, "read") == 0) {
+        *out = MEM_SERVICE_CLIENT_MAP_READ;
+        return true;
+    }
+    if (strcmp(value, "write") == 0) {
+        *out = MEM_SERVICE_CLIENT_MAP_WRITE;
+        return true;
+    }
+    if (strcmp(value, "readwrite") == 0) {
+        *out = MEM_SERVICE_CLIENT_MAP_READ | MEM_SERVICE_CLIENT_MAP_WRITE;
+        return true;
+    }
+    return false;
+}
+
 static bool mem_service_object_session_parse_status(
     const char *value,
     enum mem_service_wire_status *out)
@@ -9665,6 +9943,18 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
     static const char *const reclaim[] = {
         "key", "node_id", "incarnation", "generation", "confirmed",
     };
+    static const char *const map[] = {
+        "key", "flags",
+    };
+    static const char *const unmap[] = {
+        "key",
+    };
+    static const char *const write[] = {
+        "key", "offset", "len", "seed",
+    };
+    static const char *const read[] = {
+        "key", "offset", "len", "seed", "expect_checksum",
+    };
     const char *const *table = NULL;
     size_t count = 0;
     size_t i;
@@ -9704,6 +9994,22 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         table = reclaim;
         count = sizeof(reclaim) / sizeof(reclaim[0]);
         break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+        table = map;
+        count = sizeof(map) / sizeof(map[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+        table = unmap;
+        count = sizeof(unmap) / sizeof(unmap[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
+        table = write;
+        count = sizeof(write) / sizeof(write[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_READ:
+        table = read;
+        count = sizeof(read) / sizeof(read[0]);
+        break;
     default:
         break;
     }
@@ -9731,6 +10037,10 @@ static bool mem_service_object_session_parse_action(const char *name,
         {"publish", MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH},
         {"reclaim", MEM_SERVICE_OBJECT_SESSION_ACTION_RECLAIM},
         {"stats", MEM_SERVICE_OBJECT_SESSION_ACTION_STATS},
+        {"map", MEM_SERVICE_OBJECT_SESSION_ACTION_MAP},
+        {"unmap", MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP},
+        {"write", MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE},
+        {"read", MEM_SERVICE_OBJECT_SESSION_ACTION_READ},
     };
     size_t i;
 
@@ -10111,6 +10421,77 @@ static int mem_service_object_session_parse_op(
         op->confirmed = confirmed != 0U;
         break;
     }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "flags");
+        if (value == NULL) {
+            op->map_flags = MEM_SERVICE_CLIENT_MAP_READ |
+                            MEM_SERVICE_CLIENT_MAP_WRITE;
+        } else if (!mem_service_object_session_parse_map_flags(
+                       value, &op->map_flags)) {
+            mem_service_object_session_config_error(line_no,
+                                                    "invalid flags",
+                                                    value);
+            return 2;
+        }
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("offset", op->data_offset);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("len", op->data_len);
+        if (op->data_len == 0 ||
+            op->data_len > MEM_SERVICE_OBJECT_SESSION_MAX_DATA_LEN) {
+            mem_service_object_session_config_error(line_no,
+                                                    "len out of bounds",
+                                                    NULL);
+            return 2;
+        }
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("seed", op->data_seed);
+        op->has_data_seed = true;
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_READ:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("offset", op->data_offset);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("len", op->data_len);
+        if (op->data_len == 0 ||
+            op->data_len > MEM_SERVICE_OBJECT_SESSION_MAX_DATA_LEN) {
+            mem_service_object_session_config_error(line_no,
+                                                    "len out of bounds",
+                                                    NULL);
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "seed");
+        if (value != NULL) {
+            if (!mem_service_object_session_parse_u64(value,
+                                                      &op->data_seed)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid u64 field",
+                                                        "seed");
+                return 2;
+            }
+            op->has_data_seed = true;
+        }
+        value = mem_service_object_session_find_field(fields,
+                                                      field_count,
+                                                      "expect_checksum");
+        if (value != NULL) {
+            if (!mem_service_object_session_parse_u64_base0(
+                    value, &op->expect_checksum)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "invalid checksum field",
+                                                        "expect_checksum");
+                return 2;
+            }
+            op->has_expect_checksum = true;
+        }
+        break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS:
         break;
     default:
@@ -10124,6 +10505,9 @@ static int mem_service_object_session_parse_op(
 #undef MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64
     return 0;
 }
+
+static int mem_service_object_session_validate_provider(
+    struct mem_service_object_session_config *config);
 
 static int mem_service_object_session_load_config(
     const char *path,
@@ -10213,6 +10597,74 @@ static int mem_service_object_session_load_config(
                 return 2;
             }
             have_request_timeout = true;
+        } else if (strncmp(start, "provider=", 9) == 0) {
+            if (config->provider_configured ||
+                strlen(start + 9) >=
+                    sizeof(config->provider_kind)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad provider",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            snprintf(config->provider_kind,
+                     sizeof(config->provider_kind),
+                     "%s",
+                     start + 9);
+            config->provider_configured = true;
+        } else if (strncmp(start, "provider_device=", 16) == 0) {
+            if (config->has_provider_device ||
+                !mem_service_object_session_copy_field(
+                    config->provider_device,
+                    sizeof(config->provider_device),
+                    start + 16)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad provider_device",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->has_provider_device = true;
+        } else if (strncmp(start, "provider_cna_path=", 18) == 0) {
+            if (config->has_provider_cna_path ||
+                !mem_service_object_session_copy_field(
+                    config->provider_cna_path,
+                    sizeof(config->provider_cna_path),
+                    start + 18)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad provider_cna_path",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->has_provider_cna_path = true;
+        } else if (strncmp(start, "provider_instance=", 18) == 0) {
+            if (config->has_provider_instance ||
+                !mem_service_object_session_copy_field(
+                    config->provider_instance,
+                    sizeof(config->provider_instance),
+                    start + 18)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad provider_instance",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->has_provider_instance = true;
+        } else if (strncmp(start, "provider_import_region_bytes=", 29) == 0) {
+            if (config->has_provider_import_region_bytes ||
+                !mem_service_object_session_parse_u64(
+                    start + 29,
+                    &config->provider_import_region_bytes) ||
+                config->provider_import_region_bytes == 0) {
+                mem_service_object_session_config_error(
+                    line_no,
+                    "bad provider_import_region_bytes",
+                    NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->has_provider_import_region_bytes = true;
         } else if (strncmp(start, "op=", 3) == 0) {
             if (config->op_count >= MEM_SERVICE_OBJECT_SESSION_MAX_OPS) {
                 mem_service_object_session_config_error(line_no,
@@ -10250,7 +10702,74 @@ static int mem_service_object_session_load_config(
         mem_service_object_session_config_error(0, "no op lines", NULL);
         return 2;
     }
+    if (mem_service_object_session_validate_provider(config) != 0) {
+        return 2;
+    }
     return 0;
+}
+
+static bool mem_service_object_session_action_is_data_plane(uint32_t action)
+{
+    return action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ;
+}
+
+static int mem_service_object_session_validate_provider(
+    struct mem_service_object_session_config *config)
+{
+    bool needs_provider = false;
+    uint32_t i;
+
+    for (i = 0; i < config->op_count; ++i) {
+        if (mem_service_object_session_action_is_data_plane(
+                config->ops[i].action)) {
+            needs_provider = true;
+            break;
+        }
+    }
+    if (!config->provider_configured) {
+        if (needs_provider) {
+            mem_service_object_session_config_error(
+                0,
+                "map/unmap/write/read ops require a provider= line",
+                NULL);
+            return 2;
+        }
+        return 0;
+    }
+    if (strcmp(config->provider_kind, "session-loopback") == 0) {
+        if (config->has_provider_device ||
+            config->has_provider_cna_path ||
+            config->has_provider_instance ||
+            config->has_provider_import_region_bytes) {
+            mem_service_object_session_config_error(
+                0,
+                "provider_device/provider_cna_path/provider_instance/"
+                "provider_import_region_bytes are only valid for "
+                "provider=obmm",
+                NULL);
+            return 2;
+        }
+        return 0;
+    }
+    if (strcmp(config->provider_kind, "obmm") == 0) {
+#ifndef MEM_SERVICE_OBJECT_SESSION_OBMM
+        mem_service_object_session_config_error(
+            0,
+            "provider=obmm requires a build with "
+            "MEM_SERVICE_OBJECT_SESSION_OBMM",
+            NULL);
+        return 2;
+#else
+        return 0;
+#endif
+    }
+    mem_service_object_session_config_error(0,
+                                            "unknown provider kind",
+                                            config->provider_kind);
+    return 2;
 }
 
 static void mem_service_object_session_print_op_line(
@@ -10285,14 +10804,183 @@ static void mem_service_object_session_print_op_line(
     (void)fflush(stdout);
 }
 
+/* Open the configured session provider and bind a mapping channel. */
+static int mem_service_object_session_provider_open(
+    const struct mem_service_object_session_config *config,
+    struct mem_service_object_session_state *state)
+{
+    struct mem_service_provider_registration registration;
+    const char *name;
+    const char *instance;
+
+    if (!config->provider_configured) {
+        return 0;
+    }
+    if (mem_service_provider_registry_init(&state->registry) != 0) {
+        return -1;
+    }
+    if (strcmp(config->provider_kind, "session-loopback") == 0) {
+        memset(&registration, 0, sizeof(registration));
+        registration.name = "session-loopback";
+        registration.instance = "local-0";
+        registration.capabilities = MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING;
+        registration.ops = &mem_service_object_session_loopback_ops;
+        registration.context = &state->loopback;
+        name = registration.name;
+        instance = registration.instance;
+    } else {
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+        struct mem_service_provider_obmm_config obmm_config;
+
+        memset(&obmm_config, 0, sizeof(obmm_config));
+        obmm_config.instance = config->has_provider_instance
+                                   ? config->provider_instance
+                                   : "obmm-0";
+        obmm_config.device_path = config->has_provider_device
+                                      ? config->provider_device
+                                      : NULL;
+        obmm_config.primary_cna_path = config->has_provider_cna_path
+                                           ? config->provider_cna_path
+                                           : NULL;
+        obmm_config.import_region_bytes =
+            config->has_provider_import_region_bytes
+                ? config->provider_import_region_bytes
+                : MEM_SERVICE_OBJECT_SESSION_DEFAULT_IMPORT_REGION_BYTES;
+        obmm_config.import_pa_bias = 0;
+        obmm_config.max_remote_mappings =
+            MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS;
+        obmm_config.required_peer_mappings =
+            MEM_SERVICE_OBJECT_SESSION_OBMM_REQUIRED_PEER_MAPPINGS;
+        obmm_config.force_osync = false;
+        if (mem_service_provider_obmm_endpoint_open(&state->obmm_endpoint,
+                                                    &obmm_config) != 0 ||
+            mem_service_provider_obmm_endpoint_registration(
+                &state->obmm_endpoint, &registration) != 0) {
+            return -1;
+        }
+        state->obmm_open = true;
+        name = registration.name;
+        instance = registration.instance;
+#else
+        return -1;
+#endif
+    }
+    if (mem_service_provider_registry_register(&state->registry,
+                                               &registration) != 0 ||
+        mem_service_provider_channel_bind(&state->registry,
+                                          name,
+                                          instance,
+                                          MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING,
+                                          &state->channel) != 0) {
+        return -1;
+    }
+    state->provider_ready = true;
+    return 0;
+}
+
+static void mem_service_object_session_provider_close(
+    struct mem_service_object_session_state *state)
+{
+    if (state->mapped) {
+        /* Best-effort teardown on a failed session; the end-of-session
+         * check has already flagged the leaked mapping as an error. */
+        (void)mem_service_client_unmap_allocation(&state->channel,
+                                                  &state->mapping);
+        state->mapped = false;
+    }
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+    if (state->obmm_open) {
+        mem_service_provider_obmm_endpoint_close(&state->obmm_endpoint);
+        state->obmm_open = false;
+    }
+#endif
+    state->provider_ready = false;
+}
+
+/* Result line for data-plane ops (no wire RPC; status is synthesized). */
+static void mem_service_object_session_print_data_op_line(
+    const struct mem_service_object_session_config *config,
+    uint32_t index,
+    const struct mem_service_object_session_op *op,
+    enum mem_service_wire_status status,
+    const char *note,
+    uint64_t address,
+    uint64_t len,
+    uint64_t checksum,
+    bool has_checksum)
+{
+    printf("mem_service object-session: session=%s op=%u action=%s key=%s "
+           "status=%s",
+           config->session_id,
+           index,
+           mem_service_object_session_action_name(op->action),
+           op->key[0] != '\0' ? op->key : "-",
+           mem_service_wire_status_name(status));
+    if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP && note == NULL) {
+        printf(" base=0x%016llx len=%llu",
+               (unsigned long long)address,
+               (unsigned long long)len);
+    }
+    if ((op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE ||
+         op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ) &&
+        note == NULL) {
+        printf(" offset=%llu len=%llu",
+               (unsigned long long)op->data_offset,
+               (unsigned long long)op->data_len);
+        if (has_checksum) {
+            printf(" checksum=0x%016llx", (unsigned long long)checksum);
+        }
+    }
+    if (note != NULL) {
+        printf(" note=%s", note);
+    }
+    printf("\n");
+    (void)fflush(stdout);
+}
+
+static int mem_service_object_session_finish_data_op(
+    const struct mem_service_object_session_config *config,
+    uint32_t index,
+    const struct mem_service_object_session_op *op,
+    enum mem_service_wire_status status,
+    const char *note,
+    uint64_t address,
+    uint64_t len,
+    uint64_t checksum,
+    bool has_checksum)
+{
+    mem_service_object_session_print_data_op_line(config,
+                                                  index,
+                                                  op,
+                                                  status,
+                                                  note,
+                                                  address,
+                                                  len,
+                                                  checksum,
+                                                  has_checksum);
+    if (status != op->expect_status) {
+        printf("mem_service object-session: session=%s op=%u action=%s "
+               "mismatch=status expected_status=%s\n",
+               config->session_id,
+               index,
+               mem_service_object_session_action_name(op->action),
+               mem_service_wire_status_name(op->expect_status));
+        (void)fflush(stdout);
+        return 1;
+    }
+    return 0;
+}
+
 /*
  * One op: exactly one SDK call (wait_state loops inspect inside its
- * bounded timeout). Returns 0 when the observed wire status and any
- * expect_* assertions match; 1 on mismatch or transport failure.
+ * bounded timeout; data-plane ops stay in-process through the provider
+ * channel). Returns 0 when the observed wire status and any expect_*
+ * assertions match; 1 on mismatch or transport failure.
  */
 static int mem_service_object_session_run_op(
     const struct mem_service_client *client,
     const struct mem_service_object_session_config *config,
+    struct mem_service_object_session_state *state,
     const struct mem_service_object_session_op *op,
     uint32_t index)
 {
@@ -10332,6 +11020,21 @@ static int mem_service_object_session_run_op(
                                                &status);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+        /* The SDK contract requires unmap before release: a live mapping
+         * on the same key fails closed instead of racing the unmap. */
+        if (state->mapped &&
+            strcmp(state->mapping.key, op->key) == 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_INTERNAL,
+                "mapping_active",
+                0,
+                0,
+                0,
+                false);
+        }
         rc = mem_service_client_release_object(client,
                                                op->key,
                                                op->idempotency_key,
@@ -10379,6 +11082,269 @@ static int mem_service_object_session_run_op(
                                                    &view,
                                                    &status);
         break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+        if (!state->provider_ready) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+                "provider_unavailable",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (state->mapped) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED,
+                "already_mapped",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (!state->has_view ||
+            strcmp(state->view.key, op->key) != 0 ||
+            !state->held) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND,
+                "no_holder",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (strcmp(state->view.state, "active") != 0 ||
+            !state->view.provider_backed ||
+            (state->view.capabilities &
+             MEM_SERVICE_CLIENT_MANAGED_CAP_MAP) == 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+                "not_mappable",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (mem_service_client_map_allocation(&state->channel,
+                                              &state->view,
+                                              op->map_flags,
+                                              &state->mapping) != 0) {
+            memset(&state->mapping, 0, sizeof(state->mapping));
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_INTERNAL,
+                "map_failed",
+                0,
+                0,
+                0,
+                false);
+        }
+        state->mapped = true;
+        return mem_service_object_session_finish_data_op(
+            config,
+            index,
+            op,
+            MEM_SERVICE_WIRE_STATUS_OK,
+            NULL,
+            (uint64_t)(uintptr_t)state->mapping.base,
+            state->mapping.len,
+            0,
+            false);
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+        if (!state->mapped ||
+            strcmp(state->mapping.key, op->key) != 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND,
+                "not_mapped",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (mem_service_client_unmap_allocation(&state->channel,
+                                                &state->mapping) != 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_INTERNAL,
+                "unmap_failed",
+                0,
+                0,
+                0,
+                false);
+        }
+        state->mapped = false;
+        memset(&state->mapping, 0, sizeof(state->mapping));
+        return mem_service_object_session_finish_data_op(
+            config,
+            index,
+            op,
+            MEM_SERVICE_WIRE_STATUS_OK,
+            NULL,
+            0,
+            0,
+            0,
+            false);
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE: {
+        uint64_t checksum = 0;
+        uint8_t *base;
+        uint64_t i;
+
+        if (!state->mapped ||
+            strcmp(state->mapping.key, op->key) != 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND,
+                "not_mapped",
+                0,
+                0,
+                0,
+                false);
+        }
+        if ((state->mapping.flags & MEM_SERVICE_CLIENT_MAP_WRITE) == 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+                "not_writable",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (op->data_offset > state->mapping.len ||
+            op->data_len > state->mapping.len - op->data_offset) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED,
+                "out_of_bounds",
+                0,
+                0,
+                0,
+                false);
+        }
+        base = (uint8_t *)state->mapping.base + op->data_offset;
+        for (i = 0; i < op->data_len; ++i) {
+            base[i] = (uint8_t)(op->data_seed + i);
+        }
+        checksum = mem_service_provider_checksum64(base, op->data_len);
+        return mem_service_object_session_finish_data_op(
+            config,
+            index,
+            op,
+            MEM_SERVICE_WIRE_STATUS_OK,
+            NULL,
+            0,
+            0,
+            checksum,
+            true);
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_READ: {
+        uint64_t checksum = 0;
+        const uint8_t *base;
+        uint64_t i;
+
+        if (!state->mapped ||
+            strcmp(state->mapping.key, op->key) != 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND,
+                "not_mapped",
+                0,
+                0,
+                0,
+                false);
+        }
+        if ((state->mapping.flags & MEM_SERVICE_CLIENT_MAP_READ) == 0) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED,
+                "not_readable",
+                0,
+                0,
+                0,
+                false);
+        }
+        if (op->data_offset > state->mapping.len ||
+            op->data_len > state->mapping.len - op->data_offset) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED,
+                "out_of_bounds",
+                0,
+                0,
+                0,
+                false);
+        }
+        base = (const uint8_t *)state->mapping.base + op->data_offset;
+        if (op->has_data_seed) {
+            for (i = 0; i < op->data_len; ++i) {
+                if (base[i] != (uint8_t)(op->data_seed + i)) {
+                    return mem_service_object_session_finish_data_op(
+                        config,
+                        index,
+                        op,
+                        MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH,
+                        "pattern_mismatch",
+                        0,
+                        0,
+                        0,
+                        false);
+                }
+            }
+        }
+        checksum = mem_service_provider_checksum64(base, op->data_len);
+        if (op->has_expect_checksum && checksum != op->expect_checksum) {
+            return mem_service_object_session_finish_data_op(
+                config,
+                index,
+                op,
+                MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH,
+                "checksum_mismatch",
+                0,
+                0,
+                0,
+                false);
+        }
+        return mem_service_object_session_finish_data_op(
+            config,
+            index,
+            op,
+            MEM_SERVICE_WIRE_STATUS_OK,
+            NULL,
+            0,
+            0,
+            checksum,
+            true);
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS: {
         struct mem_service_client_allocation_stats stats;
 
@@ -10477,6 +11443,22 @@ static int mem_service_object_session_run_op(
         return 1;
     }
 
+    /* Track the session's current object view and holder reference so
+     * data-plane ops key off it. Switching keys drops the tracked holder;
+     * the daemon remains the owner-of-record for live references. */
+    if (status == MEM_SERVICE_WIRE_STATUS_OK && view.state[0] != '\0') {
+        if (!state->has_view || strcmp(state->view.key, view.key) != 0) {
+            state->held = false;
+        }
+        state->has_view = true;
+        state->view = view;
+        if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE) {
+            state->held = true;
+        } else if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE) {
+            state->held = false;
+        }
+    }
+
     if (status != op->expect_status) {
         mem_service_object_session_print_op_line(
             config,
@@ -10550,11 +11532,13 @@ static int mem_service_object_session_run_op(
 static int run_object_session(int argc, char **argv)
 {
     struct mem_service_object_session_config config;
+    struct mem_service_object_session_state state;
     struct mem_service_client client;
     struct mem_service_wire_client_options options;
     uint64_t started_ms;
     uint32_t i;
     const char *config_path = NULL;
+    const char *end_failure = NULL;
 
     if (argc == 4 && strcmp(argv[2], "--config") == 0) {
         config_path = argv[3];
@@ -10567,6 +11551,15 @@ static int run_object_session(int argc, char **argv)
     if (mem_service_object_session_load_config(config_path, &config) != 0) {
         return 2;
     }
+    memset(&state, 0, sizeof(state));
+    if (mem_service_object_session_provider_open(&config, &state) != 0) {
+        fprintf(stderr,
+                "mem_service object-session: session=%s provider %s "
+                "unavailable\n",
+                config.session_id,
+                config.provider_kind);
+        return 2;
+    }
     mem_service_wire_client_options_init(&options);
     options.timeout_ms = config.request_timeout_ms;
     mem_service_client_init_with_options(&client, config.connect, &options);
@@ -10575,6 +11568,7 @@ static int run_object_session(int argc, char **argv)
     for (i = 0; i < config.op_count; ++i) {
         if (mem_service_object_session_run_op(&client,
                                               &config,
+                                              &state,
                                               &config.ops[i],
                                               i + 1U) != 0) {
             printf("mem_service object-session: session=%s result=failed "
@@ -10585,9 +11579,29 @@ static int run_object_session(int argc, char **argv)
                        mem_service_object_session_monotonic_ms() -
                        started_ms));
             (void)fflush(stdout);
+            mem_service_object_session_provider_close(&state);
             return 1;
         }
     }
+    /* A session must end clean: unmap before release already ran per-op,
+     * so a live mapping or holder here means the config itself leaked. */
+    if (state.mapped) {
+        end_failure = "active_mapping";
+    } else if (state.held) {
+        end_failure = "live_holder";
+    }
+    if (end_failure != NULL) {
+        printf("mem_service object-session: session=%s result=failed "
+               "reason=%s elapsed_ms=%llu\n",
+               config.session_id,
+               end_failure,
+               (unsigned long long)(
+                   mem_service_object_session_monotonic_ms() - started_ms));
+        (void)fflush(stdout);
+        mem_service_object_session_provider_close(&state);
+        return 1;
+    }
+    mem_service_object_session_provider_close(&state);
     printf("mem_service object-session: session=%s result=ok ops=%u "
            "elapsed_ms=%llu\n",
            config.session_id,

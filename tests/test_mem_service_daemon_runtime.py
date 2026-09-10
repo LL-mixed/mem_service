@@ -94,6 +94,7 @@ class MemServiceWireClientBuildTests(unittest.TestCase):
                 str(source),
                 str(SERVICE_DIR / "mem_service_client.c"),
                 str(SERVICE_DIR / "mem_service_wire_client.c"),
+                str(SERVICE_DIR / "mem_service_provider.c"),
                 "-o",
                 str(binary),
             ]
@@ -372,6 +373,7 @@ class MemServiceDaemonRuntimeTests(unittest.TestCase):
             str(source),
             str(SERVICE_DIR / "mem_service_client.c"),
             str(SERVICE_DIR / "mem_service_wire_client.c"),
+            str(SERVICE_DIR / "mem_service_provider.c"),
             "-o",
             str(self.client_binary),
         ]
@@ -502,6 +504,7 @@ int main(int argc, char **argv)
             str(SDK_EXAMPLES_DIR / source_name),
             str(SERVICE_DIR / "mem_service_client.c"),
             str(SERVICE_DIR / "mem_service_wire_client.c"),
+            str(SERVICE_DIR / "mem_service_provider.c"),
             "-o",
             str(binary),
         ]
@@ -1083,6 +1086,7 @@ int main(int argc, char **argv)
             str(source),
             str(SERVICE_DIR / "mem_service_client.c"),
             str(SERVICE_DIR / "mem_service_wire_client.c"),
+            str(SERVICE_DIR / "mem_service_provider.c"),
             "-o",
             str(binary),
         ]

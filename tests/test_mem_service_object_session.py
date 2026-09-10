@@ -39,6 +39,28 @@ def _parse_kv(text: str) -> dict[str, str]:
     return values
 
 
+# Strict same-VA target for loopback mappings: page-aligned, outside the
+# default heap/stack/dyld ranges on macOS arm64 and inside the 39-bit
+# user space of Linux aarch64, so the anonymous mmap hint is honored
+# exactly on both (probed on macOS: 16 GB hints are stable across runs).
+DATA_MAP_ADDRESS = 0x400000000
+DATA_MAP_ADDRESS_DEC = str(DATA_MAP_ADDRESS)
+DATA_MAP_LEN = 16384
+
+
+def _pattern(seed: int, length: int) -> bytes:
+    return bytes(((seed + i) & 0xFF) for i in range(length))
+
+
+def _fnv1a64(data: bytes) -> int:
+    """Same FNV-1a-64 as mem_service_provider_checksum64."""
+    checksum = 1469598103934665603
+    for byte in data:
+        checksum ^= byte
+        checksum = (checksum * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return checksum
+
+
 @unittest.skipUnless(shutil.which("cc"), "host cc is required")
 class MemServiceObjectSessionTests(unittest.TestCase):
     """M1.2 object-session CLI behavior (plan §3.7).
@@ -50,8 +72,12 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     choreography over unix and TCP transports, wait_state coordination
     and bounded timeout, expect_status negative paths, inspect field
     assertions, stats reporting, provider-gating fail-closed behavior,
-    and config validation. Payload (map/write/read) ops are out of scope
-    until the provider data path lands.
+    and config validation. The M1.3 data plane is covered through the
+    in-process session-loopback provider: strict same-VA map, seeded
+    write/read pattern checks with FNV-1a checksums, the
+    acquire→map→unmap→release ordering rules, end-of-session leak
+    detection, and provider-kind validation (provider=obmm is rejected
+    on this host build, which lacks MEM_SERVICE_OBJECT_SESSION_OBMM).
     """
 
     def setUp(self):
@@ -202,6 +228,38 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             if thread.is_alive():
                 self.fail(f"object-session {configs[i]} did not finish in time")
         return [result for result in results if result is not None]
+
+    # Bring up a daemon holding one published, provider-backed, mappable
+    # object whose home address sits inside the loopback provider's
+    # strict fixed-address range, so data-plane sessions can map it.
+    def _start_active_object(self, key: str = "obj-1") -> subprocess.Popen:
+        daemon = self._start_home_daemon()
+        self._register_home()
+        producer = self._write_session(
+            "producer.conf",
+            self._connect,
+            [
+                f"allocate key={key} idempotency_key=p-alloc-1 "
+                "size_bytes=4096 capabilities=map",
+            ],
+        )
+        provider = self._write_session(
+            "provider.conf",
+            self._connect,
+            [
+                f"publish key={key} node_id={HOME_NODE} "
+                f"incarnation={HOME_INCARNATION} generation=1 "
+                f"descriptor_hex=deadbeef address={DATA_MAP_ADDRESS_DEC} "
+                f"address_len={DATA_MAP_LEN}",
+            ],
+        )
+        producer_r = self._run_session(producer)
+        self.assertEqual(producer_r.returncode, 0,
+                         producer_r.stderr + producer_r.stdout)
+        provider_r = self._run_session(provider)
+        self.assertEqual(provider_r.returncode, 0,
+                         provider_r.stderr + provider_r.stdout)
+        return daemon
 
     # Full producer/consumer/provider choreography: allocate parks in
     # ALLOCATING, the provider session publishes, the consumer waits on
@@ -583,6 +641,233 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                                   str(self.root / "does-not-exist.conf"))
         self.assertEqual(result.returncode, 2)
         self.assertIn("config error", result.stderr)
+
+    # Data plane through the in-process loopback provider: acquire gates
+    # map, the write pattern is read back and pinned by an FNV-1a
+    # checksum computed in the test, and unmap gates release. The mapped
+    # base must equal the published home address (strict same-VA).
+    def test_data_plane_map_write_read_loopback(self):
+        daemon = self._start_active_object()
+        try:
+            seed = 7
+            length = 4096
+            checksum = _fnv1a64(_pattern(seed, length))
+            consumer = self._write_session(
+                "consumer.conf",
+                self._connect,
+                [
+                    "wait_state key=obj-1 state=active timeout_ms=20000 poll_ms=50",
+                    "acquire key=obj-1 idempotency_key=c-acq-1 "
+                    "expected_generation=1",
+                    "map key=obj-1 flags=readwrite",
+                    f"write key=obj-1 offset=0 len={length} seed={seed}",
+                    f"read key=obj-1 offset=0 len={length} seed={seed} "
+                    f"expect_checksum=0x{checksum:016x}",
+                    "unmap key=obj-1",
+                    "release key=obj-1 idempotency_key=c-rel-1 "
+                    "expected_generation=1",
+                ],
+                session_id="consumer",
+                header_extra="provider=session-loopback",
+            )
+            result = self._run_session(consumer)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("action=map key=obj-1 status=ok "
+                          f"base=0x{DATA_MAP_ADDRESS:016x} len={DATA_MAP_LEN}",
+                          result.stdout)
+            self.assertIn("action=write key=obj-1 status=ok offset=0 "
+                          f"len={length} checksum=0x{checksum:016x}",
+                          result.stdout)
+            self.assertIn("action=read key=obj-1 status=ok offset=0 "
+                          f"len={length} checksum=0x{checksum:016x}",
+                          result.stdout)
+            self.assertIn("action=unmap key=obj-1 status=ok", result.stdout)
+            self.assertIn("session=consumer result=ok ops=7", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Every data-plane ordering violation fails closed at the offending
+    # op; each scenario is a separate session config against one active
+    # object. Data ops carry no expect_status, so a rejection always
+    # aborts the session with result=failed at that op.
+    def test_data_plane_state_machine_rejections(self):
+        daemon = self._start_active_object()
+        scenarios: list[tuple[str, list[str], str, str]] = [
+            ("map-before-acquire",
+             ["map key=obj-1"],
+             "action=map key=obj-1 status=not_found note=no_holder",
+             "result=failed op=1"),
+            ("unmap-not-mapped",
+             ["unmap key=obj-1"],
+             "action=unmap key=obj-1 status=not_found note=not_mapped",
+             "result=failed op=1"),
+            ("write-not-mapped",
+             ["write key=obj-1 offset=0 len=16 seed=1"],
+             "action=write key=obj-1 status=not_found note=not_mapped",
+             "result=failed op=1"),
+            ("read-not-mapped",
+             ["read key=obj-1 offset=0 len=16"],
+             "action=read key=obj-1 status=not_found note=not_mapped",
+             "result=failed op=1"),
+            ("double-map",
+             ["acquire key=obj-1 idempotency_key=dm-acq-1",
+              "map key=obj-1",
+              "map key=obj-1"],
+             "action=map key=obj-1 status=capacity_exceeded "
+             "note=already_mapped",
+             "result=failed op=3"),
+            ("release-while-mapped",
+             ["acquire key=obj-1 idempotency_key=r-acq-1",
+              "map key=obj-1",
+              "release key=obj-1 idempotency_key=r-rel-1"],
+             "action=release key=obj-1 status=internal note=mapping_active",
+             "result=failed op=3"),
+            ("write-not-writable",
+             ["acquire key=obj-1 idempotency_key=w-acq-1",
+              "map key=obj-1 flags=read",
+              "write key=obj-1 offset=0 len=16 seed=1"],
+             "action=write key=obj-1 status=unsupported note=not_writable",
+             "result=failed op=3"),
+            ("read-not-readable",
+             ["acquire key=obj-1 idempotency_key=nr-acq-1",
+              "map key=obj-1 flags=write",
+              "read key=obj-1 offset=0 len=16"],
+             "action=read key=obj-1 status=unsupported note=not_readable",
+             "result=failed op=3"),
+            ("write-out-of-bounds",
+             ["acquire key=obj-1 idempotency_key=o-acq-1",
+              "map key=obj-1",
+              f"write key=obj-1 offset=0 len={DATA_MAP_LEN + 1} seed=1"],
+             "action=write key=obj-1 status=capacity_exceeded "
+             "note=out_of_bounds",
+             "result=failed op=3"),
+            ("read-out-of-bounds",
+             ["acquire key=obj-1 idempotency_key=ob-acq-1",
+              "map key=obj-1",
+              f"read key=obj-1 offset={DATA_MAP_LEN} len=1"],
+             "action=read key=obj-1 status=capacity_exceeded "
+             "note=out_of_bounds",
+             "result=failed op=3"),
+            ("read-pattern-mismatch",
+             ["acquire key=obj-1 idempotency_key=pm-acq-1",
+              "map key=obj-1",
+              "write key=obj-1 offset=0 len=256 seed=7",
+              "read key=obj-1 offset=0 len=256 seed=9"],
+             "action=read key=obj-1 status=checksum_mismatch "
+             "note=pattern_mismatch",
+             "result=failed op=4"),
+            ("read-checksum-mismatch",
+             ["acquire key=obj-1 idempotency_key=cm-acq-1",
+              "map key=obj-1",
+              "write key=obj-1 offset=0 len=256 seed=7",
+              "read key=obj-1 offset=0 len=256 expect_checksum=0xdeadbeef"],
+             "action=read key=obj-1 status=checksum_mismatch "
+             "note=checksum_mismatch",
+             "result=failed op=4"),
+        ]
+        try:
+            for name, ops, marker, failure in scenarios:
+                with self.subTest(scenario=name):
+                    config = self._write_session(
+                        f"neg-{name}.conf",
+                        self._connect,
+                        ops,
+                        session_id=f"neg-{name}",
+                        header_extra="provider=session-loopback",
+                    )
+                    result = self._run_session(config)
+                    self.assertEqual(result.returncode, 1,
+                                     f"{name}: {result.stderr}{result.stdout}")
+                    self.assertIn(marker, result.stdout,
+                                  f"{name}: {result.stdout}")
+                    self.assertIn(f"session=neg-{name} {failure}",
+                                  result.stdout, f"{name}: {result.stdout}")
+        finally:
+            self._stop_server(daemon)
+
+    # End-of-session leak detection: a live mapping or a live holder
+    # fails the session even though every op succeeded.
+    def test_data_plane_end_of_session_leaks(self):
+        daemon = self._start_active_object()
+        try:
+            mapped = self._write_session(
+                "leak-mapped.conf",
+                self._connect,
+                [
+                    "acquire key=obj-1 idempotency_key=lm-acq-1",
+                    "map key=obj-1",
+                ],
+                session_id="leak-mapped",
+                header_extra="provider=session-loopback",
+            )
+            result = self._run_session(mapped)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertIn("session=leak-mapped result=failed "
+                          "reason=active_mapping", result.stdout)
+
+            held = self._write_session(
+                "leak-held.conf",
+                self._connect,
+                ["acquire key=obj-1 idempotency_key=lh-acq-1"],
+                session_id="leak-held",
+                header_extra="provider=session-loopback",
+            )
+            result = self._run_session(held)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertIn("session=leak-held result=failed reason=live_holder",
+                          result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    # Without a provider= line, data-plane ops are rejected at config
+    # load (exit 2 before any connection): the session never starts
+    # instead of silently falling back to a unavailable data plane.
+    def test_data_plane_requires_provider_line(self):
+        for action in ("map key=obj-1",
+                       "unmap key=obj-1",
+                       "write key=obj-1 offset=0 len=16 seed=1",
+                       "read key=obj-1 offset=0 len=16"):
+            with self.subTest(action=action):
+                config = self._write_config(
+                    f"no-provider-{action.split()[0]}.conf",
+                    f"session_id=no-provider\nconnect={self._connect}\n"
+                    f"op={action}\n",
+                )
+                result = self._run_session(config)
+                self.assertEqual(result.returncode, 2,
+                                 f"{action}: rc={result.returncode} "
+                                 f"stdout={result.stdout}")
+                self.assertIn("map/unmap/write/read ops require a provider= "
+                              "line", result.stderr,
+                              f"{action}: {result.stderr}")
+
+    # provider=obmm is compile-gated: this host build lacks
+    # MEM_SERVICE_OBJECT_SESSION_OBMM, so it is rejected at config load;
+    # the loopback provider rejects obmm-only tuning keys; unknown kinds
+    # are rejected outright. Config errors exit 2 before any connection.
+    def test_provider_kind_validation(self):
+        cases = {
+            "obmm-unbuilt": ("provider=obmm\n",
+                             "provider=obmm requires a build with "
+                             "MEM_SERVICE_OBJECT_SESSION_OBMM"),
+            "loopback-with-device": ("provider=session-loopback\n"
+                                     "provider_device=/dev/obmm\n",
+                                     "only valid for provider=obmm"),
+            "unknown-kind": ("provider=bogus\n",
+                             "unknown provider kind"),
+        }
+        for name, (header, detail) in cases.items():
+            with self.subTest(case=name):
+                config = self._write_config(
+                    f"prov-{name}.conf",
+                    f"session_id=prov-{name}\nconnect={self._connect}\n"
+                    f"{header}op=stats\n",
+                )
+                result = self._run_session(config)
+                self.assertEqual(result.returncode, 2,
+                                 f"{name}: rc={result.returncode} "
+                                 f"stdout={result.stdout}")
+                self.assertIn(detail, result.stderr, f"{name}: {result.stderr}")
 
 
 if __name__ == "__main__":
