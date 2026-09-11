@@ -11127,7 +11127,7 @@ static int mem_service_object_session_provider_open(
     return 0;
 }
 
-static void mem_service_object_session_provider_close(
+static int mem_service_object_session_provider_close(
     struct mem_service_object_session_state *state)
 {
     if (state->mapped) {
@@ -11140,17 +11140,21 @@ static void mem_service_object_session_provider_close(
                     (unsigned long long)state->mapping.generation,
                     (unsigned long long)state->mapping.binding.mapping.handle);
             /* Do not destroy the endpoint while cleanup ownership remains. */
-            return;
+            return -1;
         }
         state->mapped = false;
     }
 #ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
     if (state->obmm_open) {
-        mem_service_provider_obmm_endpoint_close(&state->obmm_endpoint);
+        if (mem_service_provider_obmm_endpoint_close_checked(&state->obmm_endpoint) != 0) {
+            fprintf(stderr, "mem_service object-session: endpoint_cleanup_pending\n");
+            return -1;
+        }
         state->obmm_open = false;
     }
 #endif
     state->provider_ready = false;
+    return 0;
 }
 
 /* Result line for data-plane ops (no wire RPC; status is synthesized). */
@@ -11997,7 +12001,11 @@ static int run_object_session(int argc, char **argv)
         mem_service_object_session_provider_close(&state);
         return 1;
     }
-    mem_service_object_session_provider_close(&state);
+    if (mem_service_object_session_provider_close(&state) != 0) {
+        printf("mem_service object-session: session=%s result=failed "
+               "reason=endpoint_cleanup_pending\n", config.session_id);
+        return 1;
+    }
     printf("mem_service object-session: session=%s result=ok ops=%u "
            "elapsed_ms=%llu\n",
            config.session_id,

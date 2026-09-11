@@ -68,6 +68,10 @@ int mem_service_provider_obmm_endpoint_verify_mapping(
     uint64_t len,
     uint64_t expected_checksum,
     uint64_t timeout_ms);
+/* Failure retains implementation for cleanup/reconciliation; no new work is
+ * admitted once close starts. A NULL/already-closed endpoint succeeds. */
+int mem_service_provider_obmm_endpoint_close_checked(
+    struct mem_service_provider_obmm_endpoint *endpoint);
 void mem_service_provider_obmm_endpoint_close(
     struct mem_service_provider_obmm_endpoint *endpoint);
 int mem_service_provider_obmm_run_protocol_fixture(void);

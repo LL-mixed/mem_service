@@ -17,6 +17,12 @@ unmap 失败同样保留清理归属并撤销 SDK 访问。`object-session` 报�
 退出清理仍失败时报告 `cleanup_pending`，不销毁持有未确认资源的 endpoint；
 该诊断不证明进程退出后的 kernel 清理或恢复已完成。
 
+OBMM provider 增加 `mem_service_provider_obmm_endpoint_close_checked()`：清理失败
+保留 endpoint，上层须保留该对象并处理失败；关闭开始后拒绝新注册/映射。
+object-session 将关闭失败传播为非零退出码。旧 void 接口继续存在，失败时报告
+`endpoint cleanup_pending`。部分 VMA/import 回滚逐项保留尚未确认的归属；close
+错误进入隔离状态，不能通过重试同一 fd 编号解除隔离，须由恢复流程核对。
+
 映射生命周期新增中立 `mem_service_client_mapping_transition()`（wire `0x7d`），
 诊断入口为 `mapping-transition --key <key> --session-id <session> --generation <g>
 --mapping-id <id> --action <begin|confirm|close|finish|cancel|inspect>

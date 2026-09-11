@@ -56,19 +56,31 @@ struct mem_service_obmm_region_slot {
     struct mem_service_obmm_descriptor_v1 descriptor;
 };
 
+struct mem_service_obmm_view {
+    struct {
+        void *address;
+        uint64_t len;
+        bool owned;
+    } parts[3];
+};
+
 struct mem_service_obmm_mapping_slot {
     bool active;
     bool imported;
     bool map_osync;
+    bool close_uncertain;
     uint64_t handle;
     uint64_t view_offset;
     uint64_t view_len;
     struct mem_service_obmm_descriptor_v1 descriptor;
     struct obmm_helpers_region region;
+    struct mem_service_obmm_view view;
 };
 
 struct mem_service_obmm_context {
     int obmm_fd;
+    bool closing;
+    bool close_uncertain;
     uint32_t local_cna;
     bool mapping_verified;
     bool force_osync;
@@ -407,7 +419,8 @@ static int mem_service_obmm_provider_probe(
     if (context == NULL || state_out == NULL) {
         return -1;
     }
-    if (context->obmm_fd < 0 || fcntl(context->obmm_fd, F_GETFD) < 0) {
+    if (context->closing || context->obmm_fd < 0 ||
+        fcntl(context->obmm_fd, F_GETFD) < 0) {
         *state_out = MEM_SERVICE_PROVIDER_STATE_UNAVAILABLE;
     } else if (!context->mapping_verified ||
                context->verified_peer_count <
@@ -429,7 +442,7 @@ static int mem_service_obmm_provider_register_region(
     struct obmm_helpers_meta meta;
     size_t i;
 
-    if (context == NULL || request == NULL || region_out == NULL ||
+    if (context == NULL || context->closing || request == NULL || region_out == NULL ||
         request->base != NULL || request->len == 0 ||
         request->memory_kind != MEM_SERVICE_MEMORY_HOST ||
         request->flags != MEM_SERVICE_REGION_FLAG_PROVIDER_ALLOCATED) {
@@ -563,20 +576,39 @@ static int mem_service_obmm_import_gsva(
     return 0;
 }
 
-/* OBMM forbids VMA splitting and mprotect. Create independent, contiguous
- * VMAs with their final permissions; rollback only ranges this call owns. */
+static int mem_service_obmm_unmap_view(struct mem_service_obmm_view *view)
+{
+    int rc = 0;
+    for (unsigned i = 0; i < 3; ++i) {
+        if (!view->parts[i].owned) continue;
+        if (munmap(view->parts[i].address, view->parts[i].len) != 0) {
+            rc = -1;
+        } else {
+            memset(&view->parts[i], 0, sizeof(view->parts[i]));
+        }
+    }
+    return rc;
+}
+
+/* OBMM forbids VMA splitting and mprotect. Retain the exact ranges actually
+ * created, including an unexpected mmap address, until cleanup is confirmed. */
 static int mem_service_obmm_map_view(void *address, uint64_t size,
-    uint64_t offset, uint64_t len, int prot, int flags, int fd)
+    uint64_t offset, uint64_t len, int prot, int flags, int fd,
+    struct mem_service_obmm_view *view)
 {
     long page_result = sysconf(_SC_PAGESIZE);
     uint64_t page, bounds[4];
     unsigned i;
 
-    if (!address || !len || page_result <= 0 || offset > size ||
+    if (!view || !address || !len || page_result <= 0 || offset > size ||
         len > size - offset || size > SIZE_MAX ||
         size > UINTPTR_MAX - (uintptr_t)address) return -1;
     page = (uint64_t)page_result;
     if ((page & (page - 1)) || (uintptr_t)address % page || size % page) return -1;
+    for (i = 0; i < 3; ++i) {
+        if (view->parts[i].owned) return -1;
+    }
+    memset(view, 0, sizeof(*view));
     bounds[0] = 0;
     bounds[1] = offset & ~(page - 1);
     bounds[2] = offset + len;
@@ -588,15 +620,14 @@ static int mem_service_obmm_map_view(void *address, uint64_t size,
         if (!length) continue;
         void *actual = mmap(wanted, length, i == 1 ? prot : PROT_NONE,
                             flags, fd, (off_t)bounds[i]);
+        if (actual != MAP_FAILED) {
+            view->parts[i].address = actual;
+            view->parts[i].len = length;
+            view->parts[i].owned = true;
+        }
         if (actual == MAP_FAILED || actual != wanted) {
-            if (actual != MAP_FAILED) (void)munmap(actual, length);
-            while (i) {
-                --i;
-                if (bounds[i + 1] != bounds[i])
-                    (void)munmap((uint8_t *)address + bounds[i],
-                                 bounds[i + 1] - bounds[i]);
-            }
-            return -1;
+            return mem_service_obmm_unmap_view(view) == 0 ? -1 :
+                   MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
         }
     }
     return 0;
@@ -604,7 +635,8 @@ static int mem_service_obmm_map_view(void *address, uint64_t size,
 
 static int mem_service_obmm_map_strict(uint64_t mem_id,
     const struct mem_service_obmm_descriptor_v1 *d, uint32_t access,
-    uint64_t offset, uint64_t len, bool osync, struct obmm_helpers_region *region)
+    uint64_t offset, uint64_t len, bool osync, struct obmm_helpers_region *region,
+    struct mem_service_obmm_view *view)
 {
     char path[128];
     int prot = 0;
@@ -619,14 +651,16 @@ static int mem_service_obmm_map_strict(uint64_t mem_id,
     if (region->fd < 0) return -1;
     region->addr = (void *)(uintptr_t)d->remote_uba;
     if (mem_service_obmm_map_view(region->addr, d->size, offset, len, prot,
-          MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_GSVA, region->fd)) {
-        close(region->fd);
-        region->fd = -1;
+          MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_GSVA, region->fd, view)) {
+        /* The caller owns fd, import and any residual VMAs, even on failure. */
         region->addr = NULL;
         return -1;
     }
     return 0;
 }
+
+static int mem_service_obmm_provider_unmap_remote_region(void *opaque,
+                                                        uint64_t mapping_handle);
 
 static int mem_service_obmm_provider_map_remote_region(
     void *opaque,
@@ -643,7 +677,8 @@ static int mem_service_obmm_provider_map_remote_region(
     size_t slot_index = 0;
     size_t i;
 
-    if (context == NULL || request == NULL || mapping_out == NULL ||
+    if (context == NULL || context->closing || request == NULL || mapping_out == NULL ||
+        context->next_mapping_handle == UINT64_MAX ||
         request->memory_kind != MEM_SERVICE_MEMORY_HOST || request->len == 0 ||
         (request->flags & ~MEM_SERVICE_MAPPING_FLAG_VALID_MASK) != 0 ||
         (request->flags & (MEM_SERVICE_MAPPING_FLAG_READ |
@@ -706,28 +741,37 @@ static int mem_service_obmm_provider_map_remote_region(
         }
     }
     memset(slot, 0, sizeof(*slot));
+    slot->active = true;
+    slot->imported = !local;
+    slot->map_osync = map_osync;
+    slot->handle = ++context->next_mapping_handle;
+    slot->descriptor = descriptor;
     slot->region.fd = -1;
+    slot->region.mem_id = import_mem_id;
     if ((descriptor.strict_gsva ?
          mem_service_obmm_map_strict(import_mem_id, &descriptor, request->flags,
                                      request->offset, request->len, map_osync,
-                                     &slot->region) :
+                                     &slot->region, &slot->view) :
          obmm_map_region_at(import_mem_id,
                            request->requested_address,
                            descriptor.size,
                            map_osync,
                            &slot->region)) != 0) {
-        if (!local) {
-            (void)obmm_do_unimport(context->obmm_fd, import_mem_id);
+        if (mem_service_obmm_provider_unmap_remote_region(context, slot->handle) != 0) {
+            memset(mapping_out, 0, sizeof(*mapping_out));
+            mapping_out->handle = slot->handle;
+            mapping_out->memory_kind = request->memory_kind;
+            return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
         }
         return -1;
     }
-    slot->active = true;
-    slot->imported = !local;
-    slot->map_osync = map_osync;
-    slot->handle = ++context->next_mapping_handle;
+    if (!descriptor.strict_gsva) {
+        slot->view.parts[0].address = slot->region.addr;
+        slot->view.parts[0].len = slot->region.len;
+        slot->view.parts[0].owned = true;
+    }
     slot->view_offset = request->offset;
     slot->view_len = request->len;
-    slot->descriptor = descriptor;
     memset(mapping_out, 0, sizeof(*mapping_out));
     mapping_out->handle = slot->handle;
     mapping_out->base = (uint8_t *)slot->region.addr + request->offset;
@@ -743,16 +787,24 @@ static int mem_service_obmm_provider_unmap_remote_region(
     struct mem_service_obmm_context *context = opaque;
     struct mem_service_obmm_mapping_slot *slot =
         mem_service_obmm_find_mapping(context, mapping_handle);
-    uint64_t mem_id;
-    bool imported;
-
     if (slot == NULL) {
         return -1;
     }
-    mem_id = slot->region.mem_id;
-    imported = slot->imported;
-    obmm_unmap_region(&slot->region);
-    if (imported && obmm_do_unimport(context->obmm_fd, mem_id) != 0) {
+    slot->view_len = 0;
+    slot->region.addr = NULL;
+    if (mem_service_obmm_unmap_view(&slot->view) != 0 || slot->close_uncertain)
+        return -1;
+    if (slot->region.fd >= 0) {
+        int fd = slot->region.fd;
+        slot->region.fd = -1;
+        if (close(fd) != 0) {
+            /* Linux may already have released fd: never retry its number. */
+            slot->close_uncertain = true;
+            return -1;
+        }
+    }
+    if (slot->imported &&
+        obmm_do_unimport(context->obmm_fd, slot->region.mem_id) != 0) {
         return -1;
     }
     memset(slot, 0, sizeof(*slot));
@@ -876,7 +928,7 @@ static int mem_service_obmm_provider_publish_range(
                                                               request->mapping_handle)
                                                         : NULL;
 
-    if (slot == NULL || completion_out == NULL ||
+    if (slot == NULL || context->closing || completion_out == NULL ||
         request->offset > slot->view_len || !request->len ||
         request->len > slot->view_len - request->offset) {
         fprintf(stderr,
@@ -924,7 +976,7 @@ static int mem_service_obmm_provider_invalidate_range(
                                                         : NULL;
     int rc;
 
-    if (slot == NULL || completion_out == NULL ||
+    if (slot == NULL || context->closing || completion_out == NULL ||
         request->offset > slot->view_len || !request->len ||
         request->len > slot->view_len - request->offset) {
         return -1;
@@ -974,9 +1026,13 @@ static int mem_service_obmm_provider_wait_range_visible(
     uint64_t observed_checksum = 0;
     uint64_t deadline;
 
-    if (request == NULL || request->timeout_ms == 0) {
+    if (context == NULL || context->closing || request == NULL ||
+        completion_out == NULL || request->timeout_ms == 0 || request->len == 0) {
         return -1;
     }
+    slot = mem_service_obmm_find_mapping(context, request->mapping_handle);
+    if (slot == NULL || slot->region.addr == NULL || request->offset > slot->view_len ||
+        request->len > slot->view_len - request->offset) return -1;
     deadline = mem_service_obmm_now_ms() + request->timeout_ms;
     do {
         if (mem_service_obmm_provider_invalidate_range(
@@ -1391,34 +1447,43 @@ int mem_service_provider_obmm_endpoint_verify_mapping(
     return rc;
 }
 
-void mem_service_provider_obmm_endpoint_close(
+int mem_service_provider_obmm_endpoint_close_checked(
     struct mem_service_provider_obmm_endpoint *endpoint)
 {
     struct mem_service_obmm_context *context;
     size_t i;
+    int rc = 0;
 
     if (endpoint == NULL || endpoint->implementation == NULL) {
-        return;
+        return 0;
     }
     context = endpoint->implementation;
+    context->closing = true;
     for (i = 0; i < MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS; ++i) {
         if (context->mappings[i].active) {
-            (void)mem_service_obmm_provider_unmap_remote_region(
-                context, context->mappings[i].handle);
+            if (mem_service_obmm_provider_unmap_remote_region(
+                    context, context->mappings[i].handle) != 0) rc = -1;
         }
     }
+    if (rc != 0) return rc;
     for (i = 0; i < MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS; ++i) {
         if (context->regions[i].active) {
-            (void)obmm_do_unexport(
-                context->obmm_fd,
-                context->regions[i].descriptor.export_mem_id);
+            if (mem_service_obmm_provider_deregister_region(
+                    context, context->regions[i].handle) != 0) rc = -1;
         }
     }
+    if (rc != 0 || context->close_uncertain) return -1;
     if (context->obmm_fd >= 0) {
-        close(context->obmm_fd);
+        int fd = context->obmm_fd;
+        context->obmm_fd = -1;
+        if (close(fd) != 0) {
+            context->close_uncertain = true;
+            return -1;
+        }
     }
     free(context);
     endpoint->implementation = NULL;
+    return 0;
 }
 #else
 int mem_service_provider_obmm_endpoint_open(
@@ -1505,14 +1570,19 @@ int mem_service_provider_obmm_endpoint_verify_mapping(
     return -1;
 }
 
+int mem_service_provider_obmm_endpoint_close_checked(
+    struct mem_service_provider_obmm_endpoint *endpoint)
+{
+    return endpoint == NULL || endpoint->implementation == NULL ? 0 : -1;
+}
+#endif
+
 void mem_service_provider_obmm_endpoint_close(
     struct mem_service_provider_obmm_endpoint *endpoint)
 {
-    if (endpoint != NULL) {
-        endpoint->implementation = NULL;
-    }
+    if (mem_service_provider_obmm_endpoint_close_checked(endpoint) != 0)
+        fprintf(stderr, "[mem_service_obmm] endpoint cleanup_pending\n");
 }
-#endif
 
 int mem_service_provider_obmm_run_protocol_fixture(void)
 {

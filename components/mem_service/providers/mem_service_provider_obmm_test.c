@@ -10,9 +10,84 @@ static unsigned import_calls, event_calls;
 static bool import_fails, ioctl_fails, event_fails;
 static uint32_t last_event;
 
+static bool cleanup_mode, open_fails, unimport_fails, unexport_fails, close_fails;
+static unsigned cleanup_imports, cleanup_unimports, cleanup_unexports, cleanup_closes;
+static unsigned cleanup_unmaps;
+static void *failed_unmap_address;
+static int mapping_fd = -1;
+int __real_open(const char *path, int flags, ...);
+int __real_close(int fd);
+void *__real_mmap(void *address, size_t len, int prot, int flags, int fd, off_t offset);
+int __real_munmap(void *address, size_t len);
+
+int __wrap_open(const char *path, int flags, ...)
+{
+    if (cleanup_mode && !strncmp(path, "/dev/obmm_shmdev", 16)) {
+        if (open_fails) { errno = ENOENT; return -1; }
+        mapping_fd = __real_open("/dev/null", O_RDONLY);
+        return mapping_fd;
+    }
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode = (mode_t)va_arg(args, int);
+        va_end(args);
+    }
+    return __real_open(path, flags, mode);
+}
+
+void *__wrap_mmap(void *address, size_t len, int prot, int flags, int fd, off_t offset)
+{
+    if (cleanup_mode && fd == mapping_fd && fd >= 0)
+        return __real_mmap(address, len, prot,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    return __real_mmap(address, len, prot, flags, fd, offset);
+}
+
+int __wrap_munmap(void *address, size_t len)
+{
+    if (cleanup_mode) {
+        ++cleanup_unmaps;
+        if (address == failed_unmap_address) { errno = EIO; return -1; }
+    }
+    return __real_munmap(address, len);
+}
+
+int __wrap_close(int fd)
+{
+    if (cleanup_mode && fd == mapping_fd && fd >= 0) {
+        ++cleanup_closes;
+        int rc = __real_close(fd);
+        mapping_fd = -1;
+        if (close_fails) { errno = EIO; return -1; }
+        return rc;
+    }
+    return __real_close(fd);
+}
+
+int __wrap_obmm_unimport(mem_id id, unsigned long flags)
+{
+    assert(cleanup_mode && id == 31 && flags == 0);
+    ++cleanup_unimports;
+    return unimport_fails ? -1 : 0;
+}
+
+int __wrap_obmm_unexport(mem_id id, unsigned long flags)
+{
+    assert(cleanup_mode && id == 17 && flags == 0);
+    ++cleanup_unexports;
+    return unexport_fails ? -1 : 0;
+}
+
 mem_id __wrap_obmm_import(const struct obmm_mem_desc *desc, unsigned long flags,
                          int base_dist, int *numa)
 {
+    if (cleanup_mode) {
+        assert(desc && flags == (OBMM_IMPORT_FLAG_ALLOW_MMAP | 0x8UL));
+        ++cleanup_imports;
+        return 31;
+    }
     struct private_v4 {
         struct obmm_sim_dec_import_priv_v2 gsva;
         uint32_t gsva_token_id, reserved;
@@ -52,6 +127,157 @@ int __wrap_ioctl(int fd, unsigned long op, ...)
     return ioctl_fails ? -1 : 0;
 }
 
+static struct mem_service_obmm_context *cleanup_context(
+    struct mem_service_provider_obmm_endpoint *endpoint, size_t size)
+{
+    cleanup_mode = true;
+    open_fails = unimport_fails = unexport_fails = close_fails = false;
+    cleanup_imports = cleanup_unimports = cleanup_unexports = cleanup_closes = 0;
+    cleanup_unmaps = 0;
+    failed_unmap_address = NULL;
+    mapping_fd = -1;
+    struct mem_service_obmm_context *context = calloc(1, sizeof(*context));
+    assert(context);
+    context->obmm_fd = __real_open("/dev/null", O_RDONLY);
+    assert(context->obmm_fd >= 0);
+    context->local_cna = 8;
+    context->max_remote_mappings = 1;
+    context->import_region_bytes = size;
+    context->import_pas[0] = 0x90000000;
+    context->mapping_verified = true;
+    endpoint->implementation = context;
+    return context;
+}
+
+static struct mem_service_mapping_request cleanup_request(void *base, size_t page)
+{
+    struct mem_service_obmm_descriptor_v1 descriptor = {
+        .strict_gsva = true, .export_mem_id = 17, .token_id = 97, .export_cna = 7,
+        .remote_uba = (uint64_t)(uintptr_t)base, .size = page * 4,
+        .segment_id = 9, .epoch = 5, .gsva_token_id = 2, .gsva_token_value = 3,
+        .access_flags = 3, .cache_policy = GSVA_CACHE_POLICY_WRITE_THROUGH,
+        .segment_flags = 7, .node_count = 2,
+    };
+    struct mem_service_mapping_request request = {
+        .remote_region_len = page * 4, .offset = page, .len = page,
+        .memory_kind = MEM_SERVICE_MEMORY_HOST, .flags = MEM_SERVICE_MAPPING_FLAG_READ,
+    };
+    assert(!mem_service_obmm_descriptor_encode(&descriptor, &request.remote_descriptor));
+    return request;
+}
+
+static void test_import_and_partial_view_cleanup(void)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    void *base = __real_mmap(NULL, page * 4, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(base != MAP_FAILED && !__real_munmap(base, page * 4));
+    struct mem_service_mapping_request request = cleanup_request(base, page);
+    struct mem_service_mapping mapping = {0};
+    struct mem_service_provider_obmm_endpoint endpoint = {0};
+    struct mem_service_obmm_context *context = cleanup_context(&endpoint, page * 4);
+    open_fails = unimport_fails = true;
+    assert(mem_service_obmm_provider_map_remote_region(context, &request, &mapping) ==
+           MEM_SERVICE_MAPPING_CLEANUP_REQUIRED);
+    assert(cleanup_imports == 1 && cleanup_unimports == 1 && mapping.handle);
+    assert(context->mappings[0].active && context->mappings[0].imported);
+    assert(context->mappings[0].region.mem_id == 31 && !mapping.base && !mapping.len);
+    assert(mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
+    assert(cleanup_imports == 1); /* No slot reuse over an unresolved import. */
+    assert(mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(endpoint.implementation == context && context->closing);
+    unimport_fails = false;
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(!endpoint.implementation && cleanup_unimports == 3);
+
+    context = cleanup_context(&endpoint, page * 4);
+    uint8_t *foreign = __real_mmap((uint8_t *)base + page, page, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    assert(foreign == (uint8_t *)base + page);
+    foreign[0] = 0x79;
+    failed_unmap_address = base;
+    assert(mem_service_obmm_provider_map_remote_region(context, &request, &mapping) ==
+           MEM_SERVICE_MAPPING_CLEANUP_REQUIRED);
+    assert(mapping.handle && !mapping.base && !mapping.len);
+    assert(context->mappings[0].view.parts[0].owned);
+    assert(context->mappings[0].view.parts[0].address == base);
+    assert(!cleanup_unimports && !cleanup_closes && foreign[0] == 0x79);
+    assert(mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(endpoint.implementation == context && foreign[0] == 0x79);
+    enum mem_service_provider_state state;
+    assert(!mem_service_obmm_provider_probe(context, &state));
+    assert(state == MEM_SERVICE_PROVIDER_STATE_UNAVAILABLE);
+    assert(mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
+    unsigned attempts = cleanup_unmaps;
+    failed_unmap_address = NULL;
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(cleanup_unmaps == attempts + 1 && cleanup_unimports == 1);
+    assert(foreign[0] == 0x79 && !__real_munmap(foreign, page));
+    cleanup_mode = false;
+}
+
+static void test_unmap_and_endpoint_failure_retention(void)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    void *base = __real_mmap(NULL, page * 4, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(base != MAP_FAILED && !__real_munmap(base, page * 4));
+    struct mem_service_mapping_request request = cleanup_request(base, page);
+    struct mem_service_mapping mapping = {0};
+    struct mem_service_provider_obmm_endpoint endpoint = {0};
+    struct mem_service_obmm_context *context = cleanup_context(&endpoint, page * 4);
+    assert(!mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
+    failed_unmap_address = base;
+    assert(mem_service_obmm_provider_unmap_remote_region(context, mapping.handle));
+    assert(context->mappings[0].active && !context->mappings[0].view_len);
+    assert(!context->mappings[0].region.addr && !cleanup_unimports && !cleanup_closes);
+    struct mem_service_mapping_range_request range = {
+        .mapping_handle = mapping.handle, .len = 1, .expected_checksum = 1, .timeout_ms = 1,
+    };
+    struct mem_service_visibility_completion completion;
+    assert(mem_service_obmm_provider_publish_range(context, &range, &completion));
+    assert(mem_service_obmm_provider_invalidate_range(context, &range, &completion));
+    assert(mem_service_obmm_provider_wait_range_visible(context, &range, &completion));
+    unsigned attempts = cleanup_unmaps;
+    failed_unmap_address = NULL;
+    assert(!mem_service_obmm_provider_unmap_remote_region(context, mapping.handle));
+    assert(cleanup_unmaps == attempts + 1 && cleanup_unimports == 1 && cleanup_closes == 1);
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+
+    context = cleanup_context(&endpoint, page * 4);
+    assert(!mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
+    close_fails = true;
+    assert(mem_service_obmm_provider_unmap_remote_region(context, mapping.handle));
+    assert(context->mappings[0].close_uncertain && context->mappings[0].region.fd == -1);
+    int reused_fd = __real_open("/dev/null", O_RDONLY);
+    assert(reused_fd >= 0);
+    assert(mem_service_obmm_provider_unmap_remote_region(context, mapping.handle));
+    assert(cleanup_closes == 1 && cleanup_unimports == 0 && fcntl(reused_fd, F_GETFD) >= 0);
+    assert(mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(endpoint.implementation == context && fcntl(reused_fd, F_GETFD) >= 0);
+    assert(!__real_close(reused_fd));
+    /* The imported ID is synthetic; release only this fixture's real fd and
+     * heap after proving production cleanup retained the quarantine. */
+    assert(!__real_close(context->obmm_fd));
+    free(context);
+    endpoint.implementation = NULL;
+
+    context = cleanup_context(&endpoint, page * 4);
+    context->regions[0].active = true;
+    context->regions[0].handle = 9;
+    context->regions[0].descriptor.export_mem_id = 17;
+    unexport_fails = true;
+    assert(mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(endpoint.implementation == context && context->regions[0].active);
+    mem_service_provider_obmm_endpoint_close(&endpoint);
+    assert(endpoint.implementation == context && cleanup_unexports == 2);
+    unexport_fails = false;
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(!endpoint.implementation && cleanup_unexports == 3);
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    cleanup_mode = false;
+}
+
 static void assert_page_fault(const uint8_t *address)
 {
     int status;
@@ -73,32 +299,33 @@ static void test_logical_view_page_guards(void)
 {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     struct obmm_helpers_region region = {.len = page * 4};
+    struct mem_service_obmm_view view = {0};
     region.addr = mmap(NULL, region.len, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(region.addr != MAP_FAILED);
     assert(munmap(region.addr, region.len) == 0);
     int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE;
     assert(!mem_service_obmm_map_view(region.addr, region.len, page + 13,
-                                      page - 26, PROT_READ | PROT_WRITE, flags, -1));
+                                      page - 26, PROT_READ | PROT_WRITE, flags, -1, &view));
     memset((uint8_t *)region.addr + page, 0x53, page);
     assert(((uint8_t *)region.addr)[page + 13] == 0x53);
     assert(((uint8_t *)region.addr)[page * 2 - 14] == 0x53);
     assert_page_fault(region.addr);
     assert_page_fault((uint8_t *)region.addr + page * 2);
-    assert(munmap(region.addr, region.len) == 0);
+    assert(mem_service_obmm_unmap_view(&view) == 0);
     assert(!mem_service_obmm_map_view(region.addr, region.len, 0, region.len,
-                                      PROT_READ | PROT_WRITE, flags, -1));
+                                      PROT_READ | PROT_WRITE, flags, -1, &view));
     assert(mem_service_obmm_map_view(region.addr, region.len, region.len, 1,
-                                     PROT_READ, flags, -1));
+                                     PROT_READ, flags, -1, &view));
     assert(mem_service_obmm_map_view(region.addr, region.len, 0, 0,
-                                     PROT_READ, flags, -1));
-    assert(munmap(region.addr, region.len) == 0);
+                                     PROT_READ, flags, -1, &view));
+    assert(mem_service_obmm_unmap_view(&view) == 0);
     uint8_t *occupied = mmap((uint8_t *)region.addr + page, page,
                              PROT_READ | PROT_WRITE, flags, -1, 0);
     assert(occupied == (uint8_t *)region.addr + page);
     occupied[0] = 0x79;
     assert(mem_service_obmm_map_view(region.addr, region.len, page, page,
-                                     PROT_READ, flags, -1));
+                                     PROT_READ, flags, -1, &view));
     assert(occupied[0] == 0x79);
     /* A collision rolls back the new prefix, preserving the preexisting VMA. */
     assert(mmap(region.addr, page, PROT_NONE, flags, -1, 0) == region.addr);
@@ -153,6 +380,9 @@ int main(void)
     assert(mem_service_obmm_provider_invalidate_range(&context, &range, &completion));
     assert(!event_calls); /* Invalid ranges cannot start coherence operations. */
     test_logical_view_page_guards();
+    test_import_and_partial_view_cleanup();
+    test_unmap_and_endpoint_failure_retention();
+    puts("obmm_cleanup_ownership=pass");
     puts("gsva_import_dual_token=pass gsva_visibility_fail_closed=pass page_guards=pass");
     return 0;
 }

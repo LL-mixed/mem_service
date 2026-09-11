@@ -40,13 +40,17 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                  "-I", str(ROOT), *LIBOBMM_INCLUDE_FLAGS,
                  str(PROVIDERS / "mem_service_provider_obmm_test.c"),
                  str(COMPONENT / "mem_service_provider.c"), *LIBOBMM_SRCS,
-                 "-Wl,--wrap=obmm_import", "-Wl,--wrap=ioctl", "-o", str(binary)],
+                 "-Wl,--wrap=obmm_import", "-Wl,--wrap=ioctl",
+                 "-Wl,--wrap=obmm_unimport", "-Wl,--wrap=obmm_unexport",
+                 "-Wl,--wrap=open", "-Wl,--wrap=close", "-Wl,--wrap=mmap",
+                 "-Wl,--wrap=munmap", "-o", str(binary)],
                 capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stderr)
             if native:
                 result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("gsva_import_dual_token=pass", result.stdout)
+                self.assertIn("obmm_cleanup_ownership=pass", result.stdout)
 
     def _compile(self, compiler: str, output: pathlib.Path, linux_backend=None) -> None:
         if linux_backend is None:

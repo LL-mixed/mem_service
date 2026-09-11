@@ -76,6 +76,14 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+严格映射的部分失败按每个实际创建的 VMA 记录归属；回滚仅解除这些范围，保留
+解除失败的范围、import ID 和 slot。失败结果的 handle 仅用于重试清理，任何范围
+访问均被拒绝。确认所有 VMA 已解除后才关闭映射 fd，再执行 unimport；slot 在
+全部完成后才可复用。close 错误保留隔离状态，禁止盲目重试可能已复用的 fd。
+`endpoint_close_checked()` 返回清理结果；失败保留 endpoint 上下文并拒绝新的
+映射/注册，旧 void 关闭入口保留兼容并报告失败。此契约需通过故障注入与真实
+guest 验证；跨进程崩溃恢复仍由恢复阶段实现。
+
 `serve-allocations --config <file>` is the managed-allocation worker, built
 with `GVA_MANAGER_ROOT` pointing to the shared platform library directory.
 Its strict config contains `connect`, `node_id`, `incarnation`,
