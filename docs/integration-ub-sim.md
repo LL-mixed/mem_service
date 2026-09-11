@@ -10,6 +10,38 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+`object-session` 新增 `publish_data` / `wait_visible` 操作，参数为 `key`、
+`offset`、`len` 和 `seed` 或 `expect_checksum`。写入后先发布，再通过控制状态
+通知另一客户端；读取前等待指定 checksum 可见。两者使用进程内中立 provider SDK，
+不新增 wire opcode。等待预算取 session 的 `request_timeout_ms`。原始 write/read
+保留为字节访问与负例诊断，不能单独作为跨节点可见性证据。
+
+OBMM session 必须配置 `provider_node_id`、`provider_node_count`（2 至 8）和
+非零 `provider_generation`。同一组各节点同时启动，使用同一 generation 完成
+本进程 endpoint 的 peer canary 后绑定 SDK channel；服务目录的 readiness 仍由
+基础设施单独验证。这些配置只用于 provider 诊断入口。
+
+`serve-allocations` 的 worker 配置必须包含 `allocation_granularity_bytes`。
+当前 2 MiB guest pool 使用 `2097152`；worker 将 backing 和地址保留向上对齐，
+对象的 `size_bytes` 保持请求值，SDK 数据操作拒绝访问逻辑大小之外的 padding。
+SDK 向 provider 分别传递逻辑视图长度和完整 backing descriptor。严格 OBMM 映射
+创建独立的可访问视图与 `PROT_NONE` 保护页 VMA，保持完整 backing 地址保留；
+OBMM 禁止 `mprotect` 和 VMA 拆分，此路径不依赖这两种操作。末页内的 padding 仍由 SDK 字节范围检查
+约束，CPU 页表无法提供子页隔离。
+
+诊断 session 支持 `op=probe_readonly key=<key>` 和 `op=probe_guard key=<key>`。
+前者要求已持有只读映射，验证 CPU 写入触发故障；后者要求 OBMM backing 内至少
+存在一个完整 padding 页，验证 CPU 读取该页触发故障。探针在映射所属进程执行，
+只接受目标地址的同步 SIGSEGV/SIGBUS，随后恢复信号处理器；OBMM VMA 不继承到
+fork 子进程，因此子进程的访问故障不能用于证明原映射的保护。无适用保护页时
+返回 UNSUPPORTED，不能计作验证通过。这两个操作仅用于诊断，不属于业务 SDK。
+session 的 `provider_import_region_bytes` 同时作为 canary 大小，须满足 pool 粒度
+并覆盖对象 backing。此配置显式描述部署 profile，不代表自动探测硬件能力。
+
+取消 ALLOCATING 对象会进入 RETIRING，等待 home 清理确认；迟到 publish 只登记
+待清理 reservation，不重新开放 acquire。当前 worker 重启遇到已有 state 文件时
+拒绝运行，地址不重用，异常资源保留待核对。该限制不能视为恢复与强制撤销已完成。
+
 地址管理接入新增 `mem_service_client_poll_allocation()` 和诊断命令
 `poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>`。
 它只返回绑定到该 provider 代际的待办元数据，按 generation 扫描，无任务返回
@@ -23,8 +55,8 @@ publish/reclaim 确认；查询不提供独占领取保证。此新增接口尚�
 本仓库的源码：
 
 - ub_sim 的 make/shell 变量 `MEM_SERVICE_ROOT` 指向本仓库检出，默认值为
-  相对 `ub_sim/guest-linux/aarch64` 的兄弟检出 `../../../mem_service`
-  （即两个仓库并排放在同一目录下时开箱即用）。
+  相对 `ub_sim/guest-linux/aarch64` 的 `../../mem_service`，即 ub_sim 根目录的
+  Git submodule。独立检出可通过显式 `MEM_SERVICE_ROOT` 指定，仍须满足源码锁。
 - `ub_sim/guest-linux/aarch64/mem_service.lock` 固定允许消费的
   `VERSION` 与 Git revision；`scripts/verify_mem_service_source.py` 在构建
   initramfs、W5 bootstrap 和 app build matrix 前验证 checkout 完整、revision
@@ -64,7 +96,7 @@ ub_sim 的下一次构建；两个仓库的接口面（公开头文件、wire �
 在 ub_sim 检出中（推荐，走 `MEM_SERVICE_ROOT` 契约）：
 
 ```bash
-# 默认 MEM_SERVICE_ROOT=../../../mem_service（相对 guest-linux/aarch64）；
+# 默认 MEM_SERVICE_ROOT=../../mem_service（相对 guest-linux/aarch64）；
 # 非标准布局时显式指定：
 cd <ub_sim>/guest-linux/aarch64
 make -C <mem_service>/apps/mem_service all LLM_INFER_ROOT="$PWD"

@@ -151,7 +151,7 @@ static enum mem_service_managed_state mem_service_managed_complete_retire(
     struct mem_service_managed_table *table,
     struct mem_service_managed_allocation *entry)
 {
-    if (entry->provider_backed) {
+    if (entry->provider_backed || entry->home_node_id[0] != '\0') {
         return entry->state;
     }
     if (!table->backing_registered || table->backing_ops == NULL ||
@@ -525,10 +525,10 @@ enum mem_service_managed_result mem_service_managed_retire(
         return MEM_SERVICE_MANAGED_RESULT_OK;
     case MEM_SERVICE_MANAGED_STATE_ALLOCATING:
         /*
-         * Abandon a provider-bound intent whose publish never arrived:
-         * no backing was reserved, so the identity retires directly.
+         * A remote reservation may already exist before publish arrives.
+         * Keep the identity pending until its home confirms cancellation.
          */
-        entry->state = MEM_SERVICE_MANAGED_STATE_RETIRED;
+        entry->state = MEM_SERVICE_MANAGED_STATE_RETIRING;
         table->retire_ok_count += 1U;
         mem_service_managed_fill_view(entry, view_out);
         return MEM_SERVICE_MANAGED_RESULT_OK;
@@ -581,7 +581,8 @@ enum mem_service_managed_result mem_service_managed_publish(
         table->publish_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
     }
-    if (entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE) {
+    if (entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE ||
+        (entry->state == MEM_SERVICE_MANAGED_STATE_RETIRING && entry->provider_backed)) {
         /* Idempotent replay of an identical publish. */
         if (entry->provider_backed &&
             entry->descriptor_len == descriptor_len &&
@@ -595,7 +596,8 @@ enum mem_service_managed_result mem_service_managed_publish(
         table->publish_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
-    if (entry->state != MEM_SERVICE_MANAGED_STATE_ALLOCATING) {
+    if (entry->state != MEM_SERVICE_MANAGED_STATE_ALLOCATING &&
+        entry->state != MEM_SERVICE_MANAGED_STATE_RETIRING) {
         table->publish_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
@@ -604,7 +606,8 @@ enum mem_service_managed_result mem_service_managed_publish(
     entry->address = address;
     entry->address_len = address_len;
     entry->provider_backed = true;
-    entry->state = MEM_SERVICE_MANAGED_STATE_ACTIVE;
+    if (entry->state == MEM_SERVICE_MANAGED_STATE_ALLOCATING)
+        entry->state = MEM_SERVICE_MANAGED_STATE_ACTIVE;
     table->publish_ok_count += 1U;
     mem_service_managed_fill_view(entry, view_out);
     return MEM_SERVICE_MANAGED_RESULT_OK;
@@ -654,7 +657,7 @@ enum mem_service_managed_result mem_service_managed_reclaim(
         return MEM_SERVICE_MANAGED_RESULT_OK;
     }
     if (entry->state != MEM_SERVICE_MANAGED_STATE_RETIRING ||
-        entry->holder_count != 0 || !entry->provider_backed) {
+        entry->holder_count != 0) {
         table->reclaim_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
@@ -761,7 +764,8 @@ void mem_service_managed_stats_snapshot(
             break;
         case MEM_SERVICE_MANAGED_STATE_ACTIVE:
             stats_out->live_objects += 1U;
-            stats_out->backing_allocated_bytes += entry->size_bytes;
+            stats_out->backing_allocated_bytes +=
+                entry->provider_backed ? entry->address_len : entry->size_bytes;
             stats_out->address_reserved_bytes +=
                 entry->provider_backed ? entry->address_len
                                        : entry->size_bytes;
@@ -773,10 +777,12 @@ void mem_service_managed_stats_snapshot(
         case MEM_SERVICE_MANAGED_STATE_RETIRING:
             stats_out->live_objects += 1U;
             stats_out->in_flight += 1U;
-            stats_out->backing_allocated_bytes += entry->size_bytes;
+            stats_out->backing_allocated_bytes +=
+                entry->provider_backed ? entry->address_len :
+                entry->home_node_id[0] ? 0 : entry->size_bytes;
             stats_out->address_reserved_bytes +=
                 entry->provider_backed ? entry->address_len
-                                       : entry->size_bytes;
+                : entry->home_node_id[0] ? 0 : entry->size_bytes;
             if (entry->provider_backed) {
                 stats_out->export_mappings += 1U;
             }
@@ -784,7 +790,8 @@ void mem_service_managed_stats_snapshot(
             break;
         case MEM_SERVICE_MANAGED_STATE_QUARANTINED:
             stats_out->quarantined_objects += 1U;
-            stats_out->quarantined_bytes += entry->size_bytes;
+            stats_out->quarantined_bytes +=
+                entry->provider_backed ? entry->address_len : entry->size_bytes;
             break;
         case MEM_SERVICE_MANAGED_STATE_RETIRED:
         default:

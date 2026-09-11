@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,7 +152,7 @@ static void usage(const char *argv0)
     printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
-    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read> field=value ...]");
+    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard> field=value ...]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -9373,7 +9375,7 @@ static int run_reclaim_allocation(int argc, char **argv)
 #define MEM_SERVICE_OBJECT_SESSION_PROVIDER_KIND_LEN 24U
 #define MEM_SERVICE_OBJECT_SESSION_DEFAULT_IMPORT_REGION_BYTES \
     (256ULL * 1024ULL * 1024ULL)
-#define MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS 4U
+#define MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS 8U
 #define MEM_SERVICE_OBJECT_SESSION_OBMM_REQUIRED_PEER_MAPPINGS 1U
 #define MEM_SERVICE_OBJECT_SESSION_MAX_WAIT_MS 60000U
 #define MEM_SERVICE_OBJECT_SESSION_MAX_REQUEST_TIMEOUT_MS 60000U
@@ -9396,6 +9398,10 @@ enum mem_service_object_session_action {
     MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP = 11,
     MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE = 12,
     MEM_SERVICE_OBJECT_SESSION_ACTION_READ = 13,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA = 14,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE = 15,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY = 16,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD = 17,
 };
 
 struct mem_service_object_session_field {
@@ -9452,6 +9458,10 @@ struct mem_service_object_session_config {
     bool has_provider_cna_path;
     bool has_provider_instance;
     bool has_provider_import_region_bytes;
+    uint64_t provider_node_id;
+    uint64_t provider_node_count;
+    uint64_t provider_generation;
+    unsigned provider_topology_fields;
     uint32_t op_count;
     struct mem_service_object_session_op
         ops[MEM_SERVICE_OBJECT_SESSION_MAX_OPS];
@@ -9674,6 +9684,14 @@ static const char *mem_service_object_session_action_name(uint32_t action)
         return "write";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_READ:
         return "read";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
+        return "probe_readonly";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
+        return "probe_guard";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
+        return "publish_data";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE:
+        return "wait_visible";
     default:
         return "unknown";
     }
@@ -9999,6 +10017,8 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         count = sizeof(map) / sizeof(map[0]);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
         table = unmap;
         count = sizeof(unmap) / sizeof(unmap[0]);
         break;
@@ -10007,6 +10027,8 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         count = sizeof(write) / sizeof(write[0]);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_READ:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE:
         table = read;
         count = sizeof(read) / sizeof(read[0]);
         break;
@@ -10041,6 +10063,10 @@ static bool mem_service_object_session_parse_action(const char *name,
         {"unmap", MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP},
         {"write", MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE},
         {"read", MEM_SERVICE_OBJECT_SESSION_ACTION_READ},
+        {"publish_data", MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA},
+        {"wait_visible", MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE},
+        {"probe_readonly", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY},
+        {"probe_guard", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD},
     };
     size_t i;
 
@@ -10438,6 +10464,8 @@ static int mem_service_object_session_parse_op(
         }
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
@@ -10455,6 +10483,8 @@ static int mem_service_object_session_parse_op(
         op->has_data_seed = true;
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_READ:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE:
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("offset", op->data_offset);
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("len", op->data_len);
@@ -10490,6 +10520,12 @@ static int mem_service_object_session_parse_op(
                 return 2;
             }
             op->has_expect_checksum = true;
+        }
+        if (op->action != MEM_SERVICE_OBJECT_SESSION_ACTION_READ &&
+            !op->has_data_seed && !op->has_expect_checksum) {
+            mem_service_object_session_config_error(line_no,
+                "visibility operation requires seed or expect_checksum", NULL);
+            return 2;
         }
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_STATS:
@@ -10665,6 +10701,20 @@ static int mem_service_object_session_load_config(
                 return 2;
             }
             config->has_provider_import_region_bytes = true;
+        } else if (strncmp(start, "provider_node_id=", 17) == 0 ||
+                   strncmp(start, "provider_node_count=", 20) == 0 ||
+                   strncmp(start, "provider_generation=", 20) == 0) {
+            unsigned bit = strncmp(start, "provider_node_id=", 17) == 0 ? 1U :
+                           strncmp(start, "provider_node_count=", 20) == 0 ? 2U : 4U;
+            uint64_t *target = bit == 1 ? &config->provider_node_id :
+                               bit == 2 ? &config->provider_node_count : &config->provider_generation;
+            if ((config->provider_topology_fields & bit) ||
+                !mem_service_object_session_parse_u64(strchr(start, '=') + 1, target)) {
+                mem_service_object_session_config_error(line_no, "bad provider topology", NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->provider_topology_fields |= bit;
         } else if (strncmp(start, "op=", 3) == 0) {
             if (config->op_count >= MEM_SERVICE_OBJECT_SESSION_MAX_OPS) {
                 mem_service_object_session_config_error(line_no,
@@ -10713,7 +10763,11 @@ static bool mem_service_object_session_action_is_data_plane(uint32_t action)
     return action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE ||
-           action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ;
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD;
 }
 
 static int mem_service_object_session_validate_provider(
@@ -10743,7 +10797,7 @@ static int mem_service_object_session_validate_provider(
         if (config->has_provider_device ||
             config->has_provider_cna_path ||
             config->has_provider_instance ||
-            config->has_provider_import_region_bytes) {
+            config->has_provider_import_region_bytes || config->provider_topology_fields) {
             mem_service_object_session_config_error(
                 0,
                 "provider_device/provider_cna_path/provider_instance/"
@@ -10763,6 +10817,15 @@ static int mem_service_object_session_validate_provider(
             NULL);
         return 2;
 #else
+        if (config->provider_topology_fields != 7 || !config->provider_generation ||
+            config->provider_node_count < 2 ||
+            config->provider_node_count > MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS ||
+            config->provider_node_id >= config->provider_node_count) {
+            mem_service_object_session_config_error(0,
+                "obmm requires provider_node_id, provider_node_count (2..8), provider_generation",
+                NULL);
+            return 2;
+        }
         return 0;
 #endif
     }
@@ -10803,6 +10866,40 @@ static void mem_service_object_session_print_op_line(
     printf("\n");
     (void)fflush(stdout);
 }
+
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+static int mem_service_object_session_verify_peers(
+    const struct mem_service_object_session_config *config,
+    struct mem_service_provider_obmm_endpoint *endpoint)
+{
+    struct mem_service_region region;
+    struct mem_service_provider_remote_region local;
+    struct mem_service_provider_remote_region peers[MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS];
+    uint64_t checksum;
+    uint8_t pattern[256];
+
+    if (mem_service_provider_obmm_endpoint_prepare_canary_region(endpoint,
+            config->has_provider_import_region_bytes
+                ? config->provider_import_region_bytes
+                : MEM_SERVICE_OBJECT_SESSION_DEFAULT_IMPORT_REGION_BYTES,
+            sizeof(pattern),
+            (uint8_t)(41 + config->provider_node_id),
+            &region, &local, &checksum) ||
+        mem_service_provider_obmm_endpoint_exchange_remote_regions(endpoint,
+            config->provider_node_id, config->provider_node_count, config->provider_generation,
+            &local, peers, MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS)) return -1;
+    for (uint32_t peer = 0; peer < config->provider_node_count; peer++) {
+        if (peer == config->provider_node_id) continue;
+        for (size_t i = 0; i < sizeof(pattern); i++) pattern[i] = (uint8_t)(41 + peer + i * 29U);
+        if (mem_service_provider_obmm_endpoint_verify_mapping(endpoint, &peers[peer],
+                0, sizeof(pattern), mem_service_provider_checksum64(pattern, sizeof(pattern)),
+                config->request_timeout_ms)) return -1;
+    }
+    printf("mem_service object-session: session=%s peer_canary=ok peers=%" PRIu64 "\n",
+           config->session_id, config->provider_node_count - 1);
+    return 0;
+}
+#endif
 
 /* Open the configured session provider and bind a mapping channel. */
 static int mem_service_object_session_provider_open(
@@ -10847,18 +10944,20 @@ static int mem_service_object_session_provider_open(
                 ? config->provider_import_region_bytes
                 : MEM_SERVICE_OBJECT_SESSION_DEFAULT_IMPORT_REGION_BYTES;
         obmm_config.import_pa_bias = 0;
-        obmm_config.max_remote_mappings =
-            MEM_SERVICE_OBJECT_SESSION_OBMM_MAX_REMOTE_MAPPINGS;
-        obmm_config.required_peer_mappings =
-            MEM_SERVICE_OBJECT_SESSION_OBMM_REQUIRED_PEER_MAPPINGS;
+        obmm_config.max_remote_mappings = config->provider_node_count;
+        obmm_config.required_peer_mappings = config->provider_node_count - 1;
         obmm_config.force_osync = false;
         if (mem_service_provider_obmm_endpoint_open(&state->obmm_endpoint,
                                                     &obmm_config) != 0 ||
             mem_service_provider_obmm_endpoint_registration(
                 &state->obmm_endpoint, &registration) != 0) {
+            fprintf(stderr, "object-session endpoint open failed errno=%d mappings=%u "
+                    "import_bytes=%" PRIu64 "\n", errno, obmm_config.max_remote_mappings,
+                    obmm_config.import_region_bytes);
             return -1;
         }
         state->obmm_open = true;
+        if (mem_service_object_session_verify_peers(config, &state->obmm_endpoint)) return -1;
         name = registration.name;
         instance = registration.instance;
 #else
@@ -10922,7 +11021,9 @@ static void mem_service_object_session_print_data_op_line(
                (unsigned long long)len);
     }
     if ((op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE ||
-         op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ) &&
+         op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ ||
+         op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA ||
+         op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE) &&
         note == NULL) {
         printf(" offset=%llu len=%llu",
                (unsigned long long)op->data_offset,
@@ -10977,6 +11078,57 @@ static int mem_service_object_session_finish_data_op(
  * channel). Returns 0 when the observed wire status and any expect_*
  * assertions match; 1 on mismatch or transport failure.
  */
+/* Fault probes run in the mapping-owning process: OBMM VMAs are DONTCOPY,
+ * so a fault in a forked child would not prove the parent's page protection. */
+static sigjmp_buf mem_service_probe_jump;
+static volatile sig_atomic_t mem_service_probe_armed;
+static volatile sig_atomic_t mem_service_probe_signal;
+static volatile uintptr_t mem_service_probe_address;
+
+static void mem_service_object_session_fault_handler(int signo, siginfo_t *info,
+                                                     void *context)
+{
+    (void)context;
+    if (mem_service_probe_armed && info && info->si_code > 0 &&
+        (uintptr_t)info->si_addr == mem_service_probe_address) {
+        mem_service_probe_signal = signo;
+        siglongjmp(mem_service_probe_jump, 1);
+    }
+    _exit(128 + signo);
+}
+
+static int mem_service_object_session_probe_fault(uint8_t *readable,
+                                                 uint8_t *target, bool write)
+{
+    struct sigaction action = {0}, old_segv, old_bus;
+    volatile uint8_t value = *(volatile uint8_t *)readable;
+    volatile sig_atomic_t result = -1;
+
+    action.sa_sigaction = mem_service_object_session_fault_handler;
+    action.sa_flags = SA_SIGINFO;
+    sigfillset(&action.sa_mask);
+    if (sigaction(SIGSEGV, &action, &old_segv)) return -1;
+    if (sigaction(SIGBUS, &action, &old_bus)) {
+        (void)sigaction(SIGSEGV, &old_segv, NULL);
+        return -1;
+    }
+    mem_service_probe_address = (uintptr_t)target;
+    mem_service_probe_signal = 0;
+    if (!sigsetjmp(mem_service_probe_jump, 1)) {
+        mem_service_probe_armed = 1;
+        if (write) *(volatile uint8_t *)target = value;
+        else value = *(volatile uint8_t *)target;
+        mem_service_probe_armed = 0;
+        result = -1;
+    } else {
+        mem_service_probe_armed = 0;
+        result = 0;
+    }
+    if (sigaction(SIGBUS, &old_bus, NULL)) result = -1;
+    if (sigaction(SIGSEGV, &old_segv, NULL)) result = -1;
+    return result;
+}
+
 static int mem_service_object_session_run_op(
     const struct mem_service_client *client,
     const struct mem_service_object_session_config *config,
@@ -10993,6 +11145,43 @@ static int mem_service_object_session_run_op(
 
     memset(&view, 0, sizeof(view));
     switch (op->action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD: {
+        uint64_t offset = 0;
+        bool write = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY;
+        long page = sysconf(_SC_PAGESIZE);
+        if (!state->mapped || !state->held || !state->has_view ||
+            strcmp(state->mapping.key, op->key) || strcmp(state->view.key, op->key) ||
+            !(state->mapping.flags & MEM_SERVICE_CLIENT_MAP_READ)) {
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND, "readable_mapping_required", 0, 0, 0, false);
+        }
+        if (write && (state->mapping.flags & MEM_SERVICE_CLIENT_MAP_WRITE)) {
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "readonly_mapping_required", 0, 0, 0, false);
+        }
+        if (!write) {
+            offset = state->mapping.len;
+            if (strcmp(config->provider_kind, "obmm") || page <= 0 ||
+                offset > UINT64_MAX - (uint64_t)page) {
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "guard_unavailable", 0, 0, 0, false);
+            }
+            if (offset % (uint64_t)page) offset += (uint64_t)page - offset % (uint64_t)page;
+            if (offset >= state->view.address_len) {
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "no_full_padding_page", 0, 0, 0, false);
+            }
+        }
+        rc = mem_service_object_session_probe_fault(state->mapping.base,
+            (uint8_t *)state->mapping.base + offset, write);
+        printf("mem_service object-session: session=%s cpu_fault_probe=%s offset=%llu signal=%d\n",
+               config->session_id, mem_service_object_session_action_name(op->action),
+               (unsigned long long)offset, (int)mem_service_probe_signal);
+        return mem_service_object_session_finish_data_op(config, index, op,
+            rc ? MEM_SERVICE_WIRE_STATUS_INTERNAL : MEM_SERVICE_WIRE_STATUS_OK,
+            rc ? "expected_cpu_fault_not_observed" : NULL, 0, 0, 0, false);
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE: {
         struct mem_service_client_allocate request;
 
@@ -11202,6 +11391,50 @@ static int mem_service_object_session_run_op(
             0,
             0,
             false);
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE: {
+        struct mem_service_visibility_completion completion;
+        uint64_t expected = op->expect_checksum;
+        uint64_t required = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA
+                                ? MEM_SERVICE_CLIENT_MAP_WRITE : MEM_SERVICE_CLIENT_MAP_READ;
+        if (!state->mapped || strcmp(state->mapping.key, op->key)) {
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND, "not_mapped", 0, 0, 0, false);
+        }
+        if (!(state->mapping.flags & required)) {
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "mapping_permissions", 0, 0, 0, false);
+        }
+        if (op->data_offset > state->mapping.len ||
+            op->data_len > state->mapping.len - op->data_offset) {
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED, "out_of_bounds", 0, 0, 0, false);
+        }
+        if (op->has_data_seed) {
+            uint64_t pattern = 1469598103934665603ULL;
+            for (uint64_t i = 0; i < op->data_len; i++) {
+                pattern ^= (uint8_t)(op->data_seed + i);
+                pattern *= 1099511628211ULL;
+            }
+            if (op->has_expect_checksum && expected != pattern) {
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH, "conflicting_expectations",
+                    0, 0, 0, false);
+            }
+            expected = pattern;
+        }
+        if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA) {
+            rc = mem_service_provider_channel_publish_range(&state->channel,
+                &state->mapping.binding, op->data_offset, op->data_len, expected, &completion);
+        } else {
+            rc = mem_service_provider_channel_wait_range_visible(&state->channel,
+                &state->mapping.binding, op->data_offset, op->data_len, expected,
+                config->request_timeout_ms, &completion);
+        }
+        return mem_service_object_session_finish_data_op(config, index, op,
+            rc ? MEM_SERVICE_WIRE_STATUS_INTERNAL : MEM_SERVICE_WIRE_STATUS_OK,
+            rc ? "visibility_unconfirmed" : NULL, 0, 0, expected, rc == 0);
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE: {
         uint64_t checksum = 0;
         uint8_t *base;
@@ -11558,6 +11791,7 @@ static int run_object_session(int argc, char **argv)
                 "unavailable\n",
                 config.session_id,
                 config.provider_kind);
+        mem_service_object_session_provider_close(&state);
         return 2;
     }
     mem_service_wire_client_options_init(&options);

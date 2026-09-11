@@ -325,6 +325,20 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
         finally:
             self._stop_server(proc)
 
+    def test_rounded_backing_is_counted_separately_from_logical_size(self):
+        proc = self._start_home_daemon()
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            generation = self._allocate_bound("padded", "padded-allocate")
+            published = self._publish("padded", generation, address_len=2097152)
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            self.assertEqual(self._inspect("padded").get("size_bytes"), "4096")
+            stats = self._stats()
+            self.assertEqual(stats.get("backing_allocated_bytes"), "2097152")
+            self.assertEqual(stats.get("address_reserved_bytes"), "2097152")
+        finally:
+            self._stop_server(proc)
+
     # Only the bound home provider's active incarnation may publish:
     # foreign nodes, stale incarnations and stale generations are all
     # rejected without touching the allocation.
@@ -461,9 +475,9 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
         finally:
             self._stop_server(proc)
 
-    # Retiring an unpublished ALLOCATING intent abandons it straight to
-    # RETIRED: no backing was reserved, so no reclaim is involved.
-    def test_retire_on_allocating_abandons_without_reclaim(self):
+    # Cancellation keeps the identity until the home confirms cleanup;
+    # a late publish records ownership without reopening acquisitions.
+    def test_retire_on_allocating_waits_for_cancel_confirmation(self):
         proc = self._start_home_daemon()
         try:
             self.assertEqual(self._register_home().returncode, 0)
@@ -474,13 +488,39 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
                 "--connect", self._connect,
             )
             self.assertEqual(retired.returncode, 0, retired.stderr + retired.stdout)
-            self.assertIn("state=retired", retired.stdout)
+            self.assertIn("state=retiring", retired.stdout)
 
             late_publish = self._publish("obj-7", generation)
-            self.assertIn("reason=state_conflict", late_publish.stdout)
+            self.assertEqual(late_publish.returncode, 0, late_publish.stdout + late_publish.stderr)
+            self.assertIn("state=retiring", late_publish.stdout)
+            replay = self._publish("obj-7", generation)
+            self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+            self.assertIn("state=retiring", replay.stdout)
+            self.assertEqual(self._reclaim("obj-7", generation, 1).returncode, 0)
+            self.assertEqual(self._inspect("obj-7").get("state"), "retired")
+            self.assertIn("reason=state_conflict", self._publish("obj-7", generation).stdout)
             stats = self._stats()
-            self.assertEqual(stats.get("reclaim_ok_count"), "0")
+            self.assertEqual(stats.get("reclaim_ok_count"), "1")
             self.assertEqual(stats.get("quarantined_objects"), "0")
+        finally:
+            self._stop_server(proc)
+
+    def test_cancel_before_reservation_requires_explicit_home_ack(self):
+        proc = self._start_home_daemon()
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            generation = self._allocate_bound("empty", "empty-allocate")
+            for attempt in range(2):
+                result = self._run_client("retire-object", "--key", "empty",
+                    "--idempotency-key", f"empty-cancel-{attempt}", "--connect", self._connect)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("state=retiring", result.stdout)
+            stats = self._stats()
+            self.assertEqual(stats.get("backing_allocated_bytes"), "0")
+            self.assertEqual(stats.get("address_reserved_bytes"), "0")
+            self.assertEqual(stats.get("in_flight"), "1")
+            self.assertEqual(self._reclaim("empty", generation, 1).returncode, 0)
+            self.assertEqual(self._inspect("empty").get("state"), "retired")
         finally:
             self._stop_server(proc)
 

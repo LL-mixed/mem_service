@@ -79,18 +79,47 @@ or service readiness.
 `serve-allocations --config <file>` is the managed-allocation worker, built
 with `GVA_MANAGER_ROOT` pointing to the shared platform library directory.
 Its strict config contains `connect`, `node_id`, `incarnation`,
-`readiness_generation`, and `state_file`. It requires an existing aperture
+`readiness_generation`, `state_file`, and `allocation_granularity_bytes`.
+The granularity must match the deployed OBMM pool profile (2097152 for the
+2 MiB guest profile); it is a power of two, at least the system page size.
+Logical object sizes remain unchanged. Backing and address reservations are
+rounded up to this granularity, while SDK operations remain bounded by the
+logical size. Physical capacity statistics include the rounded reservation.
+For strict GSVA mappings, the SDK requests the logical view while retaining
+the complete backing descriptor. Whole pages outside that view are protected
+with `PROT_NONE` in separately created VMAs; no `mprotect` or VMA splitting
+is used, since OBMM forbids both. Padding within the final page remains SDK-bounds-checked.
+The diagnostic `object-session` operations `probe_readonly` and `probe_guard`
+require synchronous CPU protection faults in the mapping-owning process.
+OBMM mappings are `VM_DONTCOPY`, so a child-process fault is insufficient
+evidence. A backing without a full padding page reports guard unsupported.
+It requires an existing aperture
 and active, canary-verified provider registration from infrastructure bootstrap;
 it does not create readiness by registering itself. It refreshes that same
 registration, polls its bound work, allocates/exports through gva_manager and
 publishes through the SDK. No inference process participates.
 
-This initial worker implements allocation only. Before reserving resources it
+The worker's normal-release path retains each reservation by key, generation,
+provider incarnation and the exact published descriptor. RETIRING work is
+eligible only with zero holders. It must durably record release intent, finish
+unexport and kernel segment retirement, and then confirm reclaim. Failed or
+uncertain steps stop processing and retain state for reconciliation. This
+path relies on clients unmapping before releasing their holders; forced
+revocation and recovery require separate validation. Released addresses are
+not reused during a worker session.
+
+Cancelling an unpublished allocation leaves it RETIRING until its bound home
+worker confirms cleanup. A late publish attaches the reservation to that
+RETIRING identity without making it acquirable. A running worker with no
+reservation may confirm an empty cancellation; restarting with an existing
+state file remains forbidden, so absence from a new process is never accepted
+as evidence of cleanup.
+
+Before reserving resources it
 creates and durably records an exclusive state file. Existing state prevents
 restart until reconciliation is implemented; do not delete it while resources
 may remain live. Failed or uncertain operations retain resources and stop the
-worker. RETIRING work also stops it, without unexport or address reuse. This is
-an intermediate implementation, not completed recovery, reclaim, or standalone
+worker. Normal release does not certify crash recovery or standalone
 bootstrap. One home allocator is required per address domain until global
 multi-home coordination is connected.
 
@@ -104,6 +133,28 @@ explicitly supported for existing ordinary OBMM objects; failed v2 decoding
 or import must never retry as v1. Descriptor construction is not proof of
 allocation ownership or readiness; the home worker must supply actual kernel
 allocation/export results and retain lifecycle ownership.
+
+### 受管理 GSVA 导入的版本要求
+
+严格描述符使用 simulator 私有 import v4：GSVA lease token 和物理 export
+token 分别传入内核；`0x8` 导入标志要求新内核显式支持，旧内核按未知标志拒绝。
+内核使用新增 `SIM_DEC_OP_GSVA_MAP_V2`（`0x0f`）传给 QEMU，旧映射 opcode、
+长度和 token 语义保留。失败不重试旧版导入。该路径要求匹配的平台组件；隔离
+开发快照已通过 64 KiB 双 guest 双向访问和回收，正式发布认证仍待完成。
+
+受管理导入的正常 unimport 使用既有 UNMAP opcode 的 version=2：仅释放本地
+视图，完成 fence、删除 coherence/route 和刷新 TLB，不留下对象退役 tombstone。
+实际 Retire 事件继续保留 tombstone。旧 version=1 保持原退役语义；旧 QEMU
+拒绝 version=2，内核不得转入 legacy unmap。2026-09-11 的 ub_sim r20 开发组合
+已通过两个 guest 的同代重复映射、页保护与双向共享回收；正式子仓库版本尚未发布。
+
+GSVA CPU window 使用对应 acquire/fence 操作，不调用 legacy shadow-window
+的 `SYNC_IMPORT_RANGE`。定向测试核对两种 token、旧端拒绝标志、可见性顺序、
+ioctl/error/checksum 失败以及无效范围在触发操作前被拒绝；测试不访问设备：
+
+```sh
+python3 -m unittest tests.test_mem_service_obmm_provider.MemServiceObmmProviderTest.test_gsva_import_and_visibility_boundaries
+```
 
 `tests/mem_service_obmm_provider_conformance.c` is the authoritative OBMM
 functional test. It runs inside at least two QEMU guests with `/dev/obmm`; a

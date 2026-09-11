@@ -247,7 +247,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     # Bring up a daemon holding one published, provider-backed, mappable
     # object whose home address sits inside the loopback provider's
     # strict fixed-address range, so data-plane sessions can map it.
-    def _start_active_object(self, key: str = "obj-1") -> subprocess.Popen:
+    def _start_active_object(self, key: str = "obj-1", logical_size: int = 4096) -> subprocess.Popen:
         daemon = self._start_home_daemon()
         self._register_home()
         producer = self._write_session(
@@ -255,7 +255,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self._connect,
             [
                 f"allocate key={key} idempotency_key=p-alloc-1 "
-                "size_bytes=4096 capabilities=map",
+                f"size_bytes={logical_size} capabilities=map",
             ],
         )
         provider = self._write_session(
@@ -285,8 +285,9 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     # the producer cannot retire before the consumer holds a reference
     # (it waits for barrier-1 ALLOCATING, which the consumer only
     # creates after its acquire), and the provider cannot reclaim while
-    # the consumer still holds one (it waits for barrier-1 RETIRED,
-    # which the consumer only retires after its release).
+    # the consumer still holds one (it waits for barrier-1 RETIRING,
+    # which the consumer only requests after its release). The provider
+    # explicitly confirms the unpublished barrier's cancellation.
     def test_three_session_choreography_unix(self):
         daemon = self._start_home_daemon()
         try:
@@ -311,7 +312,9 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                     f"publish key=obj-1 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
                     "generation=1 descriptor_hex=deadbeef address=4096 address_len=8192",
                     "wait_state key=obj-1 state=retiring timeout_ms=20000 poll_ms=50",
-                    "wait_state key=barrier-1 state=retired timeout_ms=20000 poll_ms=50",
+                    "wait_state key=barrier-1 state=retiring timeout_ms=20000 poll_ms=50",
+                    f"reclaim key=barrier-1 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
+                    "generation=2 confirmed=1",
                     f"reclaim key=obj-1 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
                     "generation=1 confirmed=1",
                 ],
@@ -354,10 +357,12 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("session=provider op=2 action=publish key=obj-1 "
                           "status=ok state=active generation=1",
                           provider_r.stdout)
-            self.assertIn("session=provider op=5 action=reclaim key=obj-1 "
+            self.assertIn("session=provider op=5 action=reclaim key=barrier-1 "
+                          "status=ok state=retired generation=2", provider_r.stdout)
+            self.assertIn("session=provider op=6 action=reclaim key=obj-1 "
                           "status=ok state=retired generation=1",
                           provider_r.stdout)
-            self.assertIn("session=provider result=ok ops=5", provider_r.stdout)
+            self.assertIn("session=provider result=ok ops=6", provider_r.stdout)
 
             self.assertIn("session=consumer op=2 action=acquire key=obj-1 "
                           "status=ok state=active generation=1",
@@ -366,7 +371,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                           "status=ok state=active generation=1",
                           consumer_r.stdout)
             self.assertIn("session=consumer op=7 action=retire key=barrier-1 "
-                          "status=ok state=retired generation=2",
+                          "status=ok state=retiring generation=2",
                           consumer_r.stdout)
             self.assertIn("session=consumer result=ok ops=7", consumer_r.stdout)
 
@@ -692,6 +697,9 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                     "expected_generation=1",
                     "map key=obj-1 flags=readwrite",
                     f"write key=obj-1 offset=0 len={length} seed={seed}",
+                    f"publish_data key=obj-1 offset=0 len={length} seed={seed}",
+                    f"wait_visible key=obj-1 offset=0 len={length} "
+                    f"expect_checksum=0x{checksum:016x}",
                     f"read key=obj-1 offset=0 len={length} seed={seed} "
                     f"expect_checksum=0x{checksum:016x}",
                     "unmap key=obj-1",
@@ -704,7 +712,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             result = self._run_session(consumer)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("action=map key=obj-1 status=ok "
-                          f"base=0x{DATA_MAP_ADDRESS:016x} len={DATA_MAP_LEN}",
+                          f"base=0x{DATA_MAP_ADDRESS:016x} len=4096",
                           result.stdout)
             self.assertIn("action=write key=obj-1 status=ok offset=0 "
                           f"len={length} checksum=0x{checksum:016x}",
@@ -713,7 +721,68 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                           f"len={length} checksum=0x{checksum:016x}",
                           result.stdout)
             self.assertIn("action=unmap key=obj-1 status=ok", result.stdout)
-            self.assertIn("session=consumer result=ok ops=7", result.stdout)
+            self.assertIn("action=publish_data key=obj-1 status=ok", result.stdout)
+            self.assertIn("action=wait_visible key=obj-1 status=ok", result.stdout)
+            self.assertIn("session=consumer result=ok ops=9", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    def test_cpu_readonly_probe_and_precondition_rejections(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("cpu-probes.conf", self._connect, [
+                "probe_readonly key=obj-1 expect_status=not_found",
+                "probe_guard key=obj-1 expect_status=not_found",
+                "acquire key=obj-1 idempotency_key=probe-acquire",
+                "map key=obj-1 flags=readwrite",
+                "probe_readonly key=obj-1 expect_status=unsupported",
+                "probe_guard key=obj-1 expect_status=unsupported",
+                "write key=obj-1 offset=0 len=64 seed=5",
+                "read key=obj-1 offset=0 len=64 seed=5",
+                "unmap key=obj-1",
+                "map key=obj-1 flags=read",
+                "probe_readonly key=obj-1",
+                "probe_readonly key=obj-1",
+                f"read key=obj-1 offset=0 len=64 expect_checksum=0x{_fnv1a64(bytes(64)):016x}",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=probe-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.count("cpu_fault_probe=probe_readonly"), 2)
+            self.assertRegex(result.stdout, r"cpu_fault_probe=probe_readonly offset=0 signal=(7|10|11)")
+            self.assertIn("note=readonly_mapping_required", result.stdout)
+            self.assertIn("note=guard_unavailable", result.stdout)
+            self.assertIn("result=ok ops=15", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    def test_visibility_rejects_unmapped_bounds_and_unconfirmed_bytes(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("visibility.conf", self._connect, [
+                "wait_visible key=obj-1 offset=0 len=64 seed=1 expect_status=not_found",
+                "acquire key=obj-1 idempotency_key=vis-acquire",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=64 seed=1",
+                "publish_data key=obj-1 offset=0 len=64 seed=2 expect_status=internal",
+                "wait_visible key=obj-1 offset=0 len=64 seed=2 expect_status=internal",
+                f"publish_data key=obj-1 offset={DATA_MAP_LEN} len=1 seed=1 "
+                "expect_status=capacity_exceeded",
+                "publish_data key=obj-1 offset=0 len=64 seed=1 expect_checksum=1 "
+                "expect_status=checksum_mismatch",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=vis-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("note=visibility_unconfirmed", result.stdout)
+            invalid = self._write_session("missing-checksum.conf", self._connect,
+                ["wait_visible key=obj-1 offset=0 len=64"],
+                header_extra="provider=session-loopback")
+            result = self._run_session(invalid)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("requires seed or expect_checksum", result.stderr)
         finally:
             self._stop_server(daemon)
 
@@ -903,6 +972,27 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     # Boundary semantics (plan M1.4): zero-length and oversized
     # write/read payloads are rejected at config load (exit 2) before
     # any connection; the session never starts.
+    def test_padded_backing_keeps_logical_access_bounds(self):
+        daemon = self._start_active_object(logical_size=17)
+        try:
+            config = self._write_session("padded.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=padded-acquire",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=17 seed=31",
+                "publish_data key=obj-1 offset=0 len=17 seed=31",
+                "read key=obj-1 offset=16 len=1 seed=47",
+                "write key=obj-1 offset=17 len=1 seed=31 expect_status=capacity_exceeded",
+                "read key=obj-1 offset=17 len=1 seed=31 expect_status=capacity_exceeded",
+                "publish_data key=obj-1 offset=17 len=1 seed=31 expect_status=capacity_exceeded",
+                "wait_visible key=obj-1 offset=17 len=1 seed=31 expect_status=capacity_exceeded",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=padded-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        finally:
+            self._stop_server(daemon)
+
     def test_data_plane_zero_length_rejected_at_config(self):
         over_max = 16 * 1024 * 1024 + 1
         cases = {
@@ -931,7 +1021,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     # offset+len == mapping.len with an FNV-1a checksum assertion, and
     # read the final byte at offset == len-1.
     def test_data_plane_exact_fit_and_partial_offsets(self):
-        daemon = self._start_active_object()
+        daemon = self._start_active_object(logical_size=DATA_MAP_LEN)
         half = DATA_MAP_LEN // 2
         expected = _fnv1a64(_pattern(11, half) + _pattern(77, half))
         config = self._write_session(
@@ -1525,7 +1615,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("op=6 action=publish key=obj-p status=ok "
                           "state=active generation=1", result.stdout)
             self.assertIn("op=8 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=8192 "
                           "address_reserved_bytes=8192 live_refs=0 in_flight=0 "
                           "quarantined_objects=0 quarantined_bytes=0",
                           result.stdout)
@@ -1581,22 +1671,22 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                           "live_refs=0 in_flight=1 quarantined_objects=0 "
                           "quarantined_bytes=0", result.stdout)
             self.assertIn("op=4 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=8192 "
                           "address_reserved_bytes=8192 live_refs=0 in_flight=0 "
                           "quarantined_objects=0 quarantined_bytes=0",
                           result.stdout)
             self.assertIn("op=6 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=8192 "
                           "address_reserved_bytes=8192 live_refs=1 in_flight=0 "
                           "quarantined_objects=0 quarantined_bytes=0",
                           result.stdout)
             self.assertIn("op=8 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=8192 "
                           "address_reserved_bytes=8192 live_refs=0 in_flight=0 "
                           "quarantined_objects=0 quarantined_bytes=0",
                           result.stdout)
             self.assertIn("op=10 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=8192 "
                           "address_reserved_bytes=8192 live_refs=0 in_flight=1 "
                           "quarantined_objects=0 quarantined_bytes=0",
                           result.stdout)
@@ -1648,7 +1738,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             result = self._run_session(session)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("op=1 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=16384 "
                           "address_reserved_bytes=16384 live_refs=0 "
                           "in_flight=0 quarantined_objects=0 "
                           "quarantined_bytes=0", result.stdout)
@@ -1657,7 +1747,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("op=6 action=stats status=ok live_objects=0 "
                           "backing_allocated_bytes=0 address_reserved_bytes=0 "
                           "live_refs=0 in_flight=0 quarantined_objects=1 "
-                          "quarantined_bytes=4096", result.stdout)
+                          "quarantined_bytes=16384", result.stdout)
             self.assertIn("op=7 action=acquire key=obj-1 status=stale_ref",
                           result.stdout)
             self.assertIn("op=8 action=retire key=obj-1 status=stale_ref",
@@ -1669,12 +1759,12 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("op=11 action=stats status=ok live_objects=0 "
                           "backing_allocated_bytes=0 address_reserved_bytes=0 "
                           "live_refs=0 in_flight=0 quarantined_objects=1 "
-                          "quarantined_bytes=4096", result.stdout)
+                          "quarantined_bytes=16384", result.stdout)
 
             stats = self._allocation_stats()
             self.assertEqual(stats["quarantine_events"], "1")
             self.assertEqual(stats["quarantined_objects"], "1")
-            self.assertEqual(stats["quarantined_bytes"], "4096")
+            self.assertEqual(stats["quarantined_bytes"], "16384")
             self.assertEqual(stats["reclaim_ok_count"], "2")
             self.assertEqual(stats["acquire_rejected_count"], "1")
             self.assertEqual(stats["retire_rejected_count"], "1")
@@ -1767,7 +1857,7 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("op=5 action=inspect key=obj-1 status=ok "
                           "state=retiring generation=1", checker_r.stdout)
             self.assertIn("op=6 action=stats status=ok live_objects=1 "
-                          "backing_allocated_bytes=4096 "
+                          "backing_allocated_bytes=16384 "
                           "address_reserved_bytes=16384 live_refs=1 "
                           "in_flight=1 quarantined_objects=0 "
                           "quarantined_bytes=0",

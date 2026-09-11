@@ -23,7 +23,7 @@
  *      |                     |
  *      |                     +-- reserve failed --> (slot rolled back)
  *      |                     |
- *      |                     +-- retire (abandon) --> RETIRED
+ *      |                     +-- retire (cancel) --> RETIRING
  *      |
  *   ACTIVE --retire--> RETIRING --last holder released + backing released-->
  *   RETIRED
@@ -34,8 +34,9 @@
  *   With an in-process backing (fixtures) the reserve is synchronous and
  *   ALLOCATING never persists across a request. With a provider-bound
  *   allocation (M1.2) ALLOCATING persists until the bound home provider
- *   publishes the reserved descriptor; retire on ALLOCATING abandons the
- *   intent (no resource was reserved) and retires the identity.
+ *   publishes the reserved descriptor. Retire on ALLOCATING waits for home
+ *   cancellation confirmation; a late publish remains RETIRING and records
+ *   the reservation for cleanup without permitting new references.
  * - ACTIVE accepts new holder references.
  * - RETIRING blocks new references; the last release drives backing
  *   release and the transition to RETIRED. Provider-backed objects wait

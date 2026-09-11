@@ -24,6 +24,8 @@
 #define MEM_SERVICE_OBMM_DESCRIPTOR_BYTES 48U
 #define MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_VERSION 2U
 #define MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES 96U
+/* Simulator-private opt-in bit: old kernels reject unknown import flags. */
+#define MEM_SERVICE_OBMM_IMPORT_FLAG_GSVA_V4 0x8UL
 #define MEM_SERVICE_OBMM_DEFAULT_DEVICE "/dev/obmm"
 #define MEM_SERVICE_OBMM_DEFAULT_CNA_PATH \
     "/sys/bus/ub/devices/00001/primary_cna"
@@ -515,32 +517,94 @@ static bool mem_service_obmm_descriptor_is_local(
 static int mem_service_obmm_import_gsva(
     struct mem_service_obmm_context *context,
     const struct mem_service_obmm_descriptor_v1 *d,
-    uint64_t local_pa, uint64_t *mem_id)
+    uint64_t local_pa, uint64_t *import_mem_id)
 {
-    struct obmm_gsva_segment_desc_v1 segment = {0};
+    struct {
+        struct obmm_sim_dec_import_priv_v2 gsva;
+        uint32_t gsva_token_id;
+        uint32_t reserved;
+    } priv = {0};
+    struct obmm_mem_desc *request;
+    mem_id imported;
+    int numa = 0;
 
-    segment.version = OBMM_GSVA_ABI_VERSION;
-    segment.flags = d->segment_flags;
-    segment.segment_id = d->segment_id;
-    segment.home_va = d->remote_uba;
-    segment.size = d->size;
-    segment.epoch = d->epoch;
-    segment.home_cna = d->export_cna;
-    segment.owner_node_id = d->owner_node;
-    segment.node_count = d->node_count;
-    segment.cache_policy = d->cache_policy;
-    segment.p_tag = d->p_tag;
-    segment.access_flags = d->access_flags;
-    segment.token_id = d->gsva_token_id;
-    segment.token_value = d->gsva_token_value;
-    return obmm_do_import_gsva_desc_v1(context->obmm_fd, &segment,
-                                       context->local_cna, local_pa,
-                                       d->remote_uba, mem_id);
+    /* Private import v4 preserves both identities. Older kernels reject it;
+     * never substitute either token or retry with the legacy import. */
+    priv.gsva.magic = OBMM_SIM_DEC_PRIV_MAGIC;
+    priv.gsva.version = 4;
+    priv.gsva.len = sizeof(priv);
+    priv.gsva.remote_uba = d->remote_uba;
+    priv.gsva.token_value = d->gsva_token_value;
+    priv.gsva.map_source = OBMM_SIM_DEC_MAP_SOURCE_GVA_MANAGER;
+    priv.gsva.address_profile = OBMM_SIM_DEC_ADDRESS_PROFILE_GSVA_IDENTITY;
+    priv.gsva.cache_policy = d->cache_policy;
+    priv.gsva.local_va = d->remote_uba;
+    priv.gsva.home_va = d->remote_uba;
+    priv.gsva.p_tag = d->p_tag;
+    priv.gsva.access_flags = d->access_flags;
+    priv.gsva.gva_id = d->segment_id;
+    priv.gsva.segment_id = d->segment_id;
+    priv.gsva.epoch = d->epoch;
+    priv.gsva_token_id = d->gsva_token_id;
+    request = calloc(1, sizeof(*request) + sizeof(priv));
+    if (!request) return -1;
+    request->addr = local_pa;
+    request->length = d->size;
+    request->tokenid = d->token_id;
+    request->scna = context->local_cna;
+    request->dcna = d->export_cna;
+    request->priv_len = sizeof(priv);
+    memcpy(request->priv, &priv, sizeof(priv));
+    imported = obmm_import(request, OBMM_IMPORT_FLAG_ALLOW_MMAP |
+                           MEM_SERVICE_OBMM_IMPORT_FLAG_GSVA_V4, 0, &numa);
+    free(request);
+    if (imported == OBMM_INVALID_MEMID) return -1;
+    *import_mem_id = (uint64_t)imported;
+    return 0;
+}
+
+/* OBMM forbids VMA splitting and mprotect. Create independent, contiguous
+ * VMAs with their final permissions; rollback only ranges this call owns. */
+static int mem_service_obmm_map_view(void *address, uint64_t size,
+    uint64_t offset, uint64_t len, int prot, int flags, int fd)
+{
+    long page_result = sysconf(_SC_PAGESIZE);
+    uint64_t page, bounds[4];
+    unsigned i;
+
+    if (!address || !len || page_result <= 0 || offset > size ||
+        len > size - offset || size > SIZE_MAX ||
+        size > UINTPTR_MAX - (uintptr_t)address) return -1;
+    page = (uint64_t)page_result;
+    if ((page & (page - 1)) || (uintptr_t)address % page || size % page) return -1;
+    bounds[0] = 0;
+    bounds[1] = offset & ~(page - 1);
+    bounds[2] = offset + len;
+    if (bounds[2] % page) bounds[2] += page - bounds[2] % page;
+    bounds[3] = size;
+    for (i = 0; i < 3; ++i) {
+        void *wanted = (uint8_t *)address + bounds[i];
+        uint64_t length = bounds[i + 1] - bounds[i];
+        if (!length) continue;
+        void *actual = mmap(wanted, length, i == 1 ? prot : PROT_NONE,
+                            flags, fd, (off_t)bounds[i]);
+        if (actual == MAP_FAILED || actual != wanted) {
+            if (actual != MAP_FAILED) (void)munmap(actual, length);
+            while (i) {
+                --i;
+                if (bounds[i + 1] != bounds[i])
+                    (void)munmap((uint8_t *)address + bounds[i],
+                                 bounds[i + 1] - bounds[i]);
+            }
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static int mem_service_obmm_map_strict(uint64_t mem_id,
     const struct mem_service_obmm_descriptor_v1 *d, uint32_t access,
-    bool osync, struct obmm_helpers_region *region)
+    uint64_t offset, uint64_t len, bool osync, struct obmm_helpers_region *region)
 {
     char path[128];
     int prot = 0;
@@ -553,17 +617,12 @@ static int mem_service_obmm_map_strict(uint64_t mem_id,
     region->fd = open(path, ((prot & PROT_WRITE) ? O_RDWR : O_RDONLY) |
                             (osync ? O_SYNC : 0));
     if (region->fd < 0) return -1;
-    region->addr = mmap((void *)(uintptr_t)d->remote_uba, d->size, prot,
-                        MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_GSVA,
-                        region->fd, 0);
-    if (region->addr == MAP_FAILED) {
+    region->addr = (void *)(uintptr_t)d->remote_uba;
+    if (mem_service_obmm_map_view(region->addr, d->size, offset, len, prot,
+          MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_GSVA, region->fd)) {
         close(region->fd);
         region->fd = -1;
         region->addr = NULL;
-        return -1;
-    }
-    if ((uintptr_t)region->addr != d->remote_uba) {
-        obmm_unmap_region(region);
         return -1;
     }
     return 0;
@@ -650,7 +709,8 @@ static int mem_service_obmm_provider_map_remote_region(
     slot->region.fd = -1;
     if ((descriptor.strict_gsva ?
          mem_service_obmm_map_strict(import_mem_id, &descriptor, request->flags,
-                                     map_osync, &slot->region) :
+                                     request->offset, request->len, map_osync,
+                                     &slot->region) :
          obmm_map_region_at(import_mem_id,
                            request->requested_address,
                            descriptor.size,
@@ -780,6 +840,30 @@ static int mem_service_obmm_complete_visibility(
     return 0;
 }
 
+static int mem_service_obmm_gsva_event(struct mem_service_obmm_context *context,
+    const struct mem_service_obmm_mapping_slot *slot, uint32_t sub_op)
+{
+    const struct mem_service_obmm_descriptor_v1 *d = &slot->descriptor;
+    struct obmm_cmd_gsva_event_v1 event = {0};
+
+    if (!d->strict_gsva || !slot->imported ||
+        d->cache_policy != GSVA_CACHE_POLICY_WRITE_THROUGH) return -1;
+    event.version = OBMM_GSVA_ABI_VERSION;
+    event.sub_op = sub_op;
+    event.requester_cna = context->local_cna;
+    event.token_id = d->gsva_token_id;
+    event.token_value = d->gsva_token_value;
+    event.key.version = OBMM_GSVA_ABI_VERSION;
+    event.key.segment_id = d->segment_id;
+    event.key.home_va = d->remote_uba;
+    event.key.size = d->size;
+    event.key.p_tag = d->p_tag;
+    event.key.cache_policy = d->cache_policy;
+    event.key.epoch = d->epoch;
+    return ioctl(context->obmm_fd, OBMM_CMD_GSVA_EVENT_V1, &event) == 0 &&
+           event.error == GSVA_OK ? 0 : -1;
+}
+
 static int mem_service_obmm_provider_publish_range(
     void *opaque,
     const struct mem_service_mapping_range_request *request,
@@ -792,7 +876,9 @@ static int mem_service_obmm_provider_publish_range(
                                                               request->mapping_handle)
                                                         : NULL;
 
-    if (slot == NULL) {
+    if (slot == NULL || completion_out == NULL ||
+        request->offset > slot->view_len || !request->len ||
+        request->len > slot->view_len - request->offset) {
         fprintf(stderr,
                 "[mem_service_obmm] publish failed stage=mapping-lookup\n");
         return -1;
@@ -808,6 +894,8 @@ static int mem_service_obmm_provider_publish_range(
                 errno);
         return -1;
     }
+    if (slot->descriptor.strict_gsva && slot->imported &&
+        mem_service_obmm_gsva_event(context, slot, OBMM_GSVA_EVENT_FENCE)) return -1;
     /*
      * OBMM shmdev mappings do not implement msync(2). Cacheable exporter
      * mappings publish through UPDATE_RANGE above; O_SYNC SIM_DEC mappings
@@ -836,16 +924,29 @@ static int mem_service_obmm_provider_invalidate_range(
                                                         : NULL;
     int rc;
 
-    if (slot == NULL || !slot->imported) {
+    if (slot == NULL || completion_out == NULL ||
+        request->offset > slot->view_len || !request->len ||
+        request->len > slot->view_len - request->offset) {
         return -1;
     }
-    rc = slot->map_osync
+    /* Home clients also need to invalidate after a remote writer publishes. */
+    if (slot->descriptor.strict_gsva && slot->imported) {
+        /* GSVA CPU windows are routed IO mappings, not legacy shadow
+         * windows. Their IDs belong to the GSVA namespace. */
+        rc = mem_service_obmm_gsva_event(context, slot, OBMM_GSVA_EVENT_READ_ACQUIRE);
+        if (!rc) rc = mem_service_obmm_gsva_event(context, slot, OBMM_GSVA_EVENT_FENCE);
+        if (!rc && !slot->map_osync)
+            rc = mem_service_obmm_update_range(slot, request->offset, request->len,
+                                               OBMM_SHM_CACHE_INVAL);
+    } else {
+        rc = slot->map_osync && slot->imported
              ? mem_service_obmm_sync_import_range(
                    slot, request->offset, request->len)
-             : mem_service_obmm_update_range(slot,
+             : slot->map_osync ? 0 : mem_service_obmm_update_range(slot,
                                               request->offset,
                                               request->len,
                                               OBMM_SHM_CACHE_INVAL);
+    }
     if (rc != 0) {
         return -1;
     }
@@ -1195,7 +1296,7 @@ int mem_service_provider_obmm_endpoint_exchange_remote_regions(
     }
     memset(regions_out, 0, node_count * sizeof(*regions_out));
     for (i = 0; i < node_count; ++i) {
-        struct mem_service_obmm_descriptor_v1 descriptor;
+        struct mem_service_obmm_descriptor_v1 descriptor = {0};
 
         if (!got[i]) {
             return -1;

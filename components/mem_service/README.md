@@ -1,5 +1,27 @@
 # Memory Service Component
 
+## 受管理 session 的数据可见性
+
+`object-session` 的 `publish_data` 和 `wait_visible` 操作接受 `key`、`offset`、
+`len`，以及 `seed` 或 `expect_checksum`，在客户端进程调用中立 provider 范围接口。
+写入方先调用 `publish_data`，再通知另一客户端；读取方先调用 `wait_visible`，
+再校验字节。等待预算取 session 的 `request_timeout_ms`。`publish` 仍表示 home
+provider 的分配确认。原始 `write`/`read` 保留用于可见性和 checksum 负例。
+
+OBMM session 的 `provider_node_id`、`provider_node_count`（2 至 8）和非零
+`provider_generation` 标识 peer-canary 组。参与者同时启动，使用同一 generation
+导出 canary、交换 bootstrap descriptor，并校验所有 peer 的 checksum 后绑定本地
+SDK channel。此诊断 bootstrap 不分配应用对象，也不设置服务目录的 ready 状态。
+canary 大小使用 `provider_import_region_bytes`，必须满足部署的 OBMM pool 粒度。
+受管理对象保留逻辑大小；provider 的对齐 backing 可更大，SDK 数据操作以逻辑大小
+检查边界，allocation-stats 按实际发布的 backing 地址跨度计量物理占用。
+SDK 向 provider 请求逻辑视图长度，同时单独传递 backing 的完整描述和跨度。
+严格 OBMM 映射保留完整 backing 地址区间，对视图之外的完整页设置 PROT_NONE；
+页内 padding 仍受 SDK 字节范围约束，CPU 页保护无法提供子页隔离。
+已发布 reservation 进入 quarantine 后，`quarantined_bytes` 同样包含 backing
+的对齐空间。尚未发布的取消请求保持 `in_flight`，已确认 backing/address 占用为
+零；这两个计数无法证明 home 从未创建资源，仍必须等待 home 的取消确认。
+
 ## Provider allocation work polling
 
 `poll-allocation` returns the lowest allocation generation greater than

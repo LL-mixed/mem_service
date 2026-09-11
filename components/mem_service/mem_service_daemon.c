@@ -908,6 +908,12 @@ static int mem_service_install_signal_handlers(void)
         sigaction(SIGTERM, &action, NULL) != 0) {
         return -1;
     }
+    /* A disconnected client must fail its response write, never terminate
+     * the daemon (including the metrics listener) with SIGPIPE. */
+    action.sa_handler = SIG_IGN;
+    if (sigaction(SIGPIPE, &action, NULL) != 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -7394,8 +7400,8 @@ int mem_service_run_allocation_fixture_check(void)
                 "quarantined reclaim replay not idempotent\n");
         failures -= 1;
     }
-    /* 25. Retire of a still-ALLOCATING intent abandons it directly; a
-     * late publish for the abandoned identity is a state conflict. */
+    /* 25. Cancellation waits for home cleanup; a late publish records the
+     * reservation without making the object active again. */
     request.key = "obj-pb3";
     request.idempotency_key = "alloc-pb3";
     if (mem_service_managed_allocate(&table, &request, &view) !=
@@ -7403,19 +7409,23 @@ int mem_service_run_allocation_fixture_check(void)
         view.state != MEM_SERVICE_MANAGED_STATE_ALLOCATING ||
         mem_service_managed_retire(&table, "obj-pb3", false, 0, &view) !=
             MEM_SERVICE_MANAGED_RESULT_OK ||
-        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED) {
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRING) {
         fprintf(stderr,
                 "mem_service allocation-fixtures: "
-                "allocating abandon mismatch\n");
+                "allocating cancellation mismatch\n");
         failures -= 1;
     }
     if (mem_service_managed_publish(&table, "obj-pb3", "node-a", 7U, 3U,
                                     pb_descriptor, sizeof(pb_descriptor),
                                     0x8000U, 0x1000U, &view) !=
-        MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT) {
+            MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRING ||
+        mem_service_managed_reclaim(&table, "obj-pb3", "node-a", 7U, 3U,
+                                    true, &view) != MEM_SERVICE_MANAGED_RESULT_OK ||
+        view.state != MEM_SERVICE_MANAGED_STATE_RETIRED) {
         fprintf(stderr,
                 "mem_service allocation-fixtures: "
-                "late publish on abandoned identity accepted\n");
+                "late publish cancellation cleanup mismatch\n");
         failures -= 1;
     }
     /* 26. Stats shape after the provider-backed lifecycle. */
@@ -7423,8 +7433,8 @@ int mem_service_run_allocation_fixture_check(void)
     if (stats.allocate_ok_count != 3U || stats.allocate_rejected_count != 0U ||
         stats.acquire_ok_count != 1U || stats.release_ok_count != 1U ||
         stats.retire_ok_count != 3U || stats.retire_rejected_count != 0U ||
-        stats.publish_ok_count != 3U || stats.publish_rejected_count != 7U ||
-        stats.reclaim_ok_count != 4U || stats.reclaim_rejected_count != 5U ||
+        stats.publish_ok_count != 4U || stats.publish_rejected_count != 6U ||
+        stats.reclaim_ok_count != 5U || stats.reclaim_rejected_count != 5U ||
         stats.quarantine_events != 1U || stats.quarantined_objects != 1U ||
         stats.quarantined_bytes != 4096U || stats.live_objects != 0U) {
         fprintf(stderr,

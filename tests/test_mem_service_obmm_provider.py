@@ -28,6 +28,26 @@ LIBOBMM_SRCS = [
 
 
 class MemServiceObmmProviderTest(unittest.TestCase):
+    def test_gsva_import_and_visibility_boundaries(self):
+        native = platform.system() == "Linux" and platform.machine() == "aarch64"
+        compiler = shutil.which("cc" if native else "aarch64-linux-gnu-gcc")
+        if not compiler:
+            self.skipTest("requires AArch64 compiler")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "gsva-import-test"
+            result = subprocess.run(
+                [compiler, "-O2", "-Wall", "-Wextra", "-Werror", "-pthread",
+                 "-I", str(ROOT), *LIBOBMM_INCLUDE_FLAGS,
+                 str(PROVIDERS / "mem_service_provider_obmm_test.c"),
+                 str(COMPONENT / "mem_service_provider.c"), *LIBOBMM_SRCS,
+                 "-Wl,--wrap=obmm_import", "-Wl,--wrap=ioctl", "-o", str(binary)],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if native:
+                result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("gsva_import_dual_token=pass", result.stdout)
+
     def _compile(self, compiler: str, output: pathlib.Path, linux_backend=None) -> None:
         if linux_backend is None:
             linux_backend = platform.system() == "Linux"

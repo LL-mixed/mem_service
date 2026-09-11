@@ -1822,7 +1822,8 @@ int mem_service_client_map_allocation(
         allocation->descriptor_len >
             MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN ||
         allocation->descriptor_len > MEM_SERVICE_PROVIDER_DESCRIPTOR_LEN ||
-        allocation->address == 0 || allocation->address_len == 0 ||
+        allocation->address == 0 || allocation->size_bytes == 0 ||
+        allocation->address_len == 0 ||
         allocation->address_len < allocation->size_bytes) {
         return -1;
     }
@@ -1847,7 +1848,7 @@ int mem_service_client_map_allocation(
             channel,
             &remote,
             0,
-            allocation->address_len,
+            allocation->size_bytes,
             (void *)(uintptr_t)allocation->address,
             MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS |
                 ((flags & MEM_SERVICE_CLIENT_MAP_READ) != 0
@@ -1863,7 +1864,7 @@ int mem_service_client_map_allocation(
      * UBA; anything else is torn down and reported as a failure. */
     if (mapping.binding.mapping.base !=
             (void *)(uintptr_t)allocation->address ||
-        mapping.binding.mapping.len != allocation->address_len) {
+        mapping.binding.mapping.len != allocation->size_bytes) {
         (void)mem_service_provider_channel_unmap_remote_region(channel,
                                                                &mapping.binding);
         return -1;
@@ -1871,7 +1872,9 @@ int mem_service_client_map_allocation(
     memcpy(mapping.key, allocation->key, key_len + 1);
     mapping.generation = allocation->generation;
     mapping.base = mapping.binding.mapping.base;
-    mapping.len = mapping.binding.mapping.len;
+    /* The provider owns the full aligned backing; clients own only the
+     * requested logical bytes, including when the last backing page is padded. */
+    mapping.len = allocation->size_bytes;
     mapping.flags = flags;
     *mapping_out = mapping;
     return 0;
