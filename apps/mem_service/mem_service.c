@@ -11133,8 +11133,15 @@ static void mem_service_object_session_provider_close(
     if (state->mapped) {
         /* Best-effort teardown on a failed session; the end-of-session
          * check has already flagged the leaked mapping as an error. */
-        (void)mem_service_client_unmap_allocation(&state->channel,
-                                                  &state->mapping);
+        if (mem_service_client_unmap_allocation(&state->channel,
+                                                &state->mapping) != 0) {
+            fprintf(stderr, "mem_service object-session: cleanup_pending key=%s "
+                    "generation=%llu handle=%llu\n", state->mapping.key,
+                    (unsigned long long)state->mapping.generation,
+                    (unsigned long long)state->mapping.binding.mapping.handle);
+            /* Do not destroy the endpoint while cleanup ownership remains. */
+            return;
+        }
         state->mapped = false;
     }
 #ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
@@ -11481,13 +11488,15 @@ static int mem_service_object_session_run_op(
                                               &state->view,
                                               op->map_flags,
                                               &state->mapping) != 0) {
-            memset(&state->mapping, 0, sizeof(state->mapping));
+            state->mapped = state->mapping.binding.mapped;
+            if (!state->mapped)
+                memset(&state->mapping, 0, sizeof(state->mapping));
             return mem_service_object_session_finish_data_op(
                 config,
                 index,
                 op,
                 MEM_SERVICE_WIRE_STATUS_INTERNAL,
-                "map_failed",
+                state->mapped ? "map_cleanup_required" : "map_failed",
                 0,
                 0,
                 0,

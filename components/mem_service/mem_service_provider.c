@@ -681,7 +681,8 @@ int mem_service_provider_channel_map_remote_region(
          requested_address == NULL) ||
         (channel->provider->capabilities &
          MEM_SERVICE_PROVIDER_CAP_PEER_MAPPING) == 0 ||
-        channel->provider->ops->map_remote_region == NULL) {
+        channel->provider->ops->map_remote_region == NULL ||
+        channel->provider->ops->unmap_remote_region == NULL) {
         return -1;
     }
     memset(&request, 0, sizeof(request));
@@ -697,11 +698,18 @@ int mem_service_provider_channel_map_remote_region(
             channel->provider->context, &request, &binding.mapping) != 0 ||
         binding.mapping.handle == 0 || binding.mapping.base == NULL ||
         binding.mapping.len != len ||
-        binding.mapping.memory_kind != remote->memory_kind) {
+        binding.mapping.memory_kind != remote->memory_kind ||
+        ((flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS) != 0 &&
+         binding.mapping.base != requested_address)) {
         if (binding.mapping.handle != 0 &&
-            channel->provider->ops->unmap_remote_region != NULL) {
-            (void)channel->provider->ops->unmap_remote_region(
-                channel->provider->context, binding.mapping.handle);
+            channel->provider->ops->unmap_remote_region(
+                channel->provider->context, binding.mapping.handle) != 0) {
+            binding.owner = channel->provider;
+            binding.mapped = true;
+            binding.mapping.base = NULL;
+            binding.mapping.len = 0;
+            *binding_out = binding;
+            return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
         }
         return -1;
     }
@@ -826,9 +834,13 @@ int mem_service_provider_channel_unmap_remote_region(
     if (channel == NULL || channel->provider == NULL || binding == NULL ||
         !binding->mapped || binding->owner != channel->provider ||
         channel->provider->ops == NULL ||
-        channel->provider->ops->unmap_remote_region == NULL ||
-        channel->provider->ops->unmap_remote_region(
+        channel->provider->ops->unmap_remote_region == NULL) {
+        return -1;
+    }
+    if (channel->provider->ops->unmap_remote_region(
             channel->provider->context, binding->mapping.handle) != 0) {
+        binding->mapping.base = NULL;
+        binding->mapping.len = 0;
         return -1;
     }
     memset(binding, 0, sizeof(*binding));

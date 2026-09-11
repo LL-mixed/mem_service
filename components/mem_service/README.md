@@ -2,6 +2,13 @@
 
 ## 受管理 session 的数据可见性
 
+映射失败后的清理状态不能丢失。中立 map wrapper 返回
+`MEM_SERVICE_MAPPING_CLEANUP_REQUIRED` 时，输出 binding 保留 owner/handle，
+`mapped=true` 表示仍有资源需要清理，base/len 清零以禁止访问；调用方必须保留
+binding 并重试 unmap。SDK 同时保留对象 key/generation，清零可访问地址、长度与
+权限；任何 unmap 失败也转入该不可访问状态。完成清理前不得 release holder 或
+cancel/finish 映射事务。provider 自身的 import/部分 VMA 回滚仍须按同一原则接通。
+
 映射生命周期扩展按以下契约实施：服务在 provider 建立映射前登记 pending 意图，
 分配本次服务生命周期内不复用的 mapping ID，绑定对象 generation 和 holder session。
 成功建立后确认 active，解除前进入 closing，provider 确认解除后删除记录；pending

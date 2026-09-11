@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+映射 SDK 新增失败结果 `MEM_SERVICE_MAPPING_CLEANUP_REQUIRED`，调用方必须保留
+返回的对象映射并重试 unmap；此时输出仅用于清理，base/len/flags 均为零。
+失败的 unmap 同样撤销 SDK 访问并保留 handle。完成清理前不得释放 holder。
+此规则适用于映射消费者，不改变现有 transfer provider 的 DS4 数据路径。
+
 安装 SDK 新增 `mem_service_client_mapping_transition()`，仅供受管理 CPU/memref
 映射的生命周期上报；不移动 payload，不修改 DS4 现有 transfer provider 的使用方式。
 新调用需要支持 wire `0x7d` 的服务，旧端明确返回 unsupported；不得退回无映射引用

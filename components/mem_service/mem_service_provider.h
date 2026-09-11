@@ -57,6 +57,11 @@ enum mem_service_provider_state {
     MEM_SERVICE_PROVIDER_STATE_UNAVAILABLE = 3,
 };
 
+/* Map failed and rollback is unconfirmed. Retain the returned binding and
+ * retry unmap; mapped denotes cleanup ownership, not permission to access.
+ * Cleanup-only bindings have NULL base and zero length. */
+#define MEM_SERVICE_MAPPING_CLEANUP_REQUIRED (-2)
+
 enum mem_service_memory_kind {
     MEM_SERVICE_MEMORY_HOST = 1,
     MEM_SERVICE_MEMORY_ACCELERATOR = 2,

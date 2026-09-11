@@ -647,7 +647,11 @@ int mem_service_client_provider_status(
  * closed instead of silently substituting a local VA. The opaque
  * descriptor is passed through untouched; the SDK never parses CNA/GSVA
  * fields. Mapping handles live in the client process and are never part
- * of the wire view.
+ * of the wire view. Map may return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED:
+ * preserve mapping_out (key/generation and cleanup binding) and retry unmap.
+ * Its base/len/flags are zero and may not be accessed. Failed unmap also
+ * clears access while retaining cleanup ownership; never release the holder
+ * or confirm a mapping transaction as closed until unmap succeeds.
  */
 #define MEM_SERVICE_CLIENT_MAP_READ (1ULL << 0)
 #define MEM_SERVICE_CLIENT_MAP_WRITE (1ULL << 1)

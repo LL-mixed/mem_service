@@ -10,6 +10,13 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+SDK map 返回 `MEM_SERVICE_MAPPING_CLEANUP_REQUIRED` 时须保留输出对象并重试
+unmap；输出保留 key/generation/owner/handle，访问地址、长度、权限均为零。
+unmap 失败同样保留清理归属并撤销 SDK 访问。`object-session` 报告
+`map_cleanup_required`，允许显式 unmap 重试，并继续阻止该 key 的 release。
+退出清理仍失败时报告 `cleanup_pending`，不销毁持有未确认资源的 endpoint；
+该诊断不证明进程退出后的 kernel 清理或恢复已完成。
+
 映射生命周期新增中立 `mem_service_client_mapping_transition()`（wire `0x7d`），
 诊断入口为 `mapping-transition --key <key> --session-id <session> --generation <g>
 --mapping-id <id> --action <begin|confirm|close|finish|cancel|inspect>
