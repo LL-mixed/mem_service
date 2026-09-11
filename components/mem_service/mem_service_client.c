@@ -1963,6 +1963,166 @@ int mem_service_client_unmap_allocation(
     return 0;
 }
 
+static int mem_service_client_mapping_step(
+    const struct mem_service_client *client,
+    const struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_mapping_lifecycle *lifecycle,
+    enum mem_service_client_mapping_action action,
+    enum mem_service_wire_status *status_out)
+{
+    struct mem_service_client_mapping_transaction next;
+    struct mem_service_client single_attempt;
+    char operation[96];
+    int rc;
+
+    snprintf(operation, sizeof(operation), "%s-%u", lifecycle->operation_id,
+             (unsigned)action);
+    if (action == MEM_SERVICE_CLIENT_MAPPING_BEGIN) {
+        /* A hidden retry may follow a committed-but-lost BEGIN with a
+         * readiness rejection. Preserve that uncertainty at this layer. */
+        single_attempt = *client;
+        single_attempt.wire_options.max_attempts = 1;
+        client = &single_attempt;
+    }
+    rc = mem_service_client_mapping_transition(client, mapping->key,
+        lifecycle->session_id, mapping->generation,
+        action == MEM_SERVICE_CLIENT_MAPPING_BEGIN ? 0 :
+            lifecycle->transaction.mapping_id,
+        action, operation, &next, status_out);
+    /* The typed RPC clears its output even on error. Preserve our last
+     * confirmed identity until a validated response replaces it. */
+    if (rc == 0) lifecycle->transaction = next;
+    return rc;
+}
+
+int mem_service_client_unmap_managed_allocation(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_mapping_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out)
+{
+    if (client == NULL || channel == NULL || mapping == NULL ||
+        lifecycle == NULL || !lifecycle->pending)
+        return mem_service_client_invalid(status_out);
+    /* Deny SDK access immediately, including while control is unavailable.
+     * Actual VMAs remain owned until the closing transition is confirmed. */
+    mapping->base = NULL;
+    mapping->len = 0;
+    mapping->flags = 0;
+    if (lifecycle->terminal_action != 0) goto complete;
+    if (lifecycle->transaction.mapping_id == 0 &&
+        mem_service_client_mapping_step(client, mapping, lifecycle,
+            MEM_SERVICE_CLIENT_MAPPING_BEGIN, status_out) != 0)
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    if (mem_service_client_mapping_step(client, mapping, lifecycle,
+            MEM_SERVICE_CLIENT_MAPPING_INSPECT, status_out) != 0)
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    /* An old BEGIN reply cannot grant ownership of an already active view.
+     * A completed local unmap always sets terminal_action before any RPC. */
+    if (lifecycle->transaction.state != 1 && !mapping->binding.mapped) {
+        mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    }
+    if (lifecycle->transaction.state == 2) {
+        if (mem_service_client_mapping_step(client, mapping, lifecycle,
+                MEM_SERVICE_CLIENT_MAPPING_CLOSE, status_out) != 0 ||
+            mem_service_client_mapping_step(client, mapping, lifecycle,
+                MEM_SERVICE_CLIENT_MAPPING_INSPECT, status_out) != 0)
+            return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    }
+    if (lifecycle->transaction.state != 1 && lifecycle->transaction.state != 3) {
+        mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    }
+    if (mapping->binding.mapped &&
+        mem_service_client_unmap_allocation(channel, mapping) != 0) {
+        mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    }
+    lifecycle->terminal_action = lifecycle->transaction.state == 1 ?
+        MEM_SERVICE_CLIENT_MAPPING_CANCEL : MEM_SERVICE_CLIENT_MAPPING_FINISH;
+complete:
+    /* Retry the same final operation before inspecting: a lost success can
+     * have removed the live record already. NOT_FOUND is never an ACK. */
+    if (mem_service_client_mapping_step(client, mapping, lifecycle,
+            lifecycle->terminal_action, status_out) != 0)
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    lifecycle->pending = false;
+    return 0;
+}
+
+int mem_service_client_map_managed_allocation(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    const char *session_id, const char *operation_id, uint64_t flags,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_mapping_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out)
+{
+    char validation[256] = "";
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    int rc;
+
+    if (client == NULL || channel == NULL || allocation == NULL ||
+        mapping == NULL || lifecycle == NULL || lifecycle->pending ||
+        mapping->binding.mapped || allocation->generation == 0 ||
+        !mem_service_client_has_value(session_id) ||
+        strlen(session_id) >= sizeof(lifecycle->session_id) ||
+        !mem_service_client_has_value(operation_id) ||
+        strlen(operation_id) >= sizeof(lifecycle->operation_id) ||
+        strnlen(allocation->key, sizeof(allocation->key)) == 0 ||
+        strnlen(allocation->key, sizeof(allocation->key)) == sizeof(allocation->key) ||
+        mem_service_client_append_required_string(validation, sizeof(validation),
+            "operation", operation_id) ||
+        mem_service_client_append_required_string(validation, sizeof(validation),
+            "session", session_id))
+        return mem_service_client_invalid(status_out);
+    memset(lifecycle, 0, sizeof(*lifecycle));
+    memset(mapping, 0, sizeof(*mapping));
+    snprintf(lifecycle->operation_id, sizeof(lifecycle->operation_id), "%s", operation_id);
+    snprintf(lifecycle->session_id, sizeof(lifecycle->session_id), "%s", session_id);
+    snprintf(mapping->key, sizeof(mapping->key), "%s", allocation->key);
+    mapping->generation = allocation->generation;
+    lifecycle->pending = true;
+    rc = mem_service_client_mapping_step(client, mapping, lifecycle,
+        MEM_SERVICE_CLIENT_MAPPING_BEGIN, &status);
+    if (rc != 0) {
+        /* A fresh operation's explicit rejection precedes provider work.
+         * Transport/parse failures and identity conflicts remain uncertain. */
+        if (rc == 1 && (status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND ||
+            status == MEM_SERVICE_WIRE_STATUS_STALE_REF ||
+            status == MEM_SERVICE_WIRE_STATUS_INVALID_SESSION ||
+            status == MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED ||
+            status == MEM_SERVICE_WIRE_STATUS_UNSUPPORTED))
+            lifecycle->pending = false;
+        mem_service_client_set_status(status_out, status);
+        return lifecycle->pending ? MEM_SERVICE_MAPPING_CLEANUP_REQUIRED : -1;
+    }
+    if (mem_service_client_mapping_step(client, mapping, lifecycle,
+            MEM_SERVICE_CLIENT_MAPPING_INSPECT, &status) != 0 ||
+        lifecycle->transaction.state != 1) goto failed;
+    rc = mem_service_client_map_allocation(channel, allocation, flags, mapping);
+    if (rc != 0) {
+        status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        goto failed;
+    }
+    if (mem_service_client_mapping_step(client, mapping, lifecycle,
+            MEM_SERVICE_CLIENT_MAPPING_CONFIRM, &status) != 0 ||
+        mem_service_client_mapping_step(client, mapping, lifecycle,
+            MEM_SERVICE_CLIENT_MAPPING_INSPECT, &status) != 0 ||
+        lifecycle->transaction.state != 2) goto failed;
+    mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_OK);
+    return 0;
+failed:
+    if (status == MEM_SERVICE_WIRE_STATUS_OK) status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    rc = mem_service_client_unmap_managed_allocation(client, channel, mapping,
+                                                     lifecycle, NULL);
+    mem_service_client_set_status(status_out, status);
+    return rc == 0 ? -1 : MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+}
+
 static void mem_service_client_parse_provider_directory(
     const char *response,
     struct mem_service_client_provider_directory *view_out)

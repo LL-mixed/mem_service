@@ -36,8 +36,20 @@ object-session 将关闭失败传播为非零退出码。旧 void 接口继续�
 closing 完成和 pending 取消需要已确认无残留映射。多个 mapping ID 可同时绑定同一
 holder，其他 holder 的释放不受影响。begin/confirm 要求 provider 就绪且 home 的
 当前 incarnation 等于对象绑定值，幂等重放前也执行此检查；已有事务的
-inspect/close/finish/cancel 在 readiness 丢失时仍可执行。未接入上报的旧 mapping
-入口不在该计量内；object-session 自动接线和真实 guest 计量仍待验证。
+inspect/close/finish/cancel 在 readiness 丢失时仍可执行。
+
+`object-session` 的 map/unmap 使用新增
+`mem_service_client_map_managed_allocation()` /
+`mem_service_client_unmap_managed_allocation()`，自动编排映射事务与实际 provider。
+CLI 每次 map 从系统随机源生成 128-bit operation nonce，熵源失败时拒绝映射。
+外部 SDK 调用方负责提供每次 map 唯一的 operation ID，并成对保留 mapping 与
+零初始化的 lifecycle；map 只调用一次，失败后重试同一上下文的 managed unmap。
+`lifecycle.pending` 包含控制应答不确定的状态，即使 provider handle 已解除，
+也须完成 FINISH/CANCEL 确认后才能 release。控制面暂不可达时保留实际 VMA，
+清零 SDK base/len/flags；这不证明已撤销 CPU 页权限。
+session stats 追加 `import_mappings`，表示已确认的客户端视图数，包含本地 home
+视图及远端 import 视图。未接入上报的旧 raw mapping 入口不在该计量内；该数字
+无法替代 kernel 实际资源枚举，重启恢复与故障 reconciliation 仍待实现。
 
 `object-session` 分别跟踪每个 key/generation/session 的引用，切换 inspect 对象
 不清除其他引用。成功的 acquire/release 在本次进程内按 idempotency_key 去重；

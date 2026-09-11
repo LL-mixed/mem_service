@@ -674,4 +674,34 @@ int mem_service_client_unmap_allocation(
     const struct mem_service_provider_channel *channel,
     struct mem_service_client_object_mapping *mapping);
 
+/* Single-owner, process-local lifecycle paired with exactly one mapping.
+ * Zero-initialize both outputs. Use a fresh globally unique operation_id for
+ * each map, never replay map into a new context. Map is called once; after any
+ * CLEANUP_REQUIRED result, retry managed unmap with the same two outputs.
+ * Keep the holder until pending becomes false. No restart recovery is implied.
+ * Old raw map/unmap APIs above do not update the service mapping ledger.
+ */
+struct mem_service_client_mapping_lifecycle {
+    char operation_id[80];
+    char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    struct mem_service_client_mapping_transaction transaction;
+    enum mem_service_client_mapping_action terminal_action;
+    bool pending;
+};
+
+int mem_service_client_map_managed_allocation(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    const char *session_id, const char *operation_id, uint64_t flags,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_mapping_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_unmap_managed_allocation(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_mapping_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out);
+
 #endif

@@ -18,6 +18,16 @@ release。`import_mappings` 统计已确认 active/closing 映射，pending/clos
 此扩展需要 core、wire、SDK、CLI 和真实 guest 一起验证；持久化与重启 reconciliation
 仍按恢复阶段实现，不能把进程内计量宣称为崩溃后的 kernel 资源枚举。
 
+受管理 SDK 的 map/unmap 在进程内编排上述事务和 provider 调用。每次新 map 使用
+全局唯一 operation ID；调用方将零初始化的 lifecycle 与 mapping 成对保留，禁止
+复制、并发使用或用历史应答重建该上下文。map 只调用一次，失败后通过同一上下文
+重试 unmap。BEGIN 应答不确定时保留 operation ID，清理先重放该 BEGIN 取得 ID；
+此恢复仍受服务 readiness 检查约束。BEGIN 禁用 wire 内部自动重试，防止已提交但
+丢失的应答被后续 readiness 拒绝覆盖。FINISH/CANCEL 应答不确定时重放原终结
+操作，不能把 NOT_FOUND 当作清理成功。CLOSE 或状态查询失败时撤销 SDK 访问，但保留
+实际 provider 映射，等待控制状态可确认后再清理；这不构成 CPU 页权限撤销。
+旧 raw map/unmap 接口保留供底层集成，调用它们不会自动登记服务端映射计数。
+
 `object-session` 的引用跟踪以 `(key, generation, session_id)` 为单位，独立于
 最近一次 inspect 返回的对象。切换 key 或使用显式 session_id 不得丢失尚未释放
 的引用；退出时逐项报告已知未释放的 holder，并返回失败，不自动替客户端 release。

@@ -9560,6 +9560,8 @@ struct mem_service_object_session_state {
     bool mapped;
     uint64_t mapped_backing_len;
     struct mem_service_client_object_mapping mapping;
+    struct mem_service_client_mapping_lifecycle mapping_lifecycle;
+    const struct mem_service_client *client;
     bool provider_ready;
     struct mem_service_provider_registry registry;
     struct mem_service_provider_channel channel;
@@ -11133,8 +11135,9 @@ static int mem_service_object_session_provider_close(
     if (state->mapped) {
         /* Best-effort teardown on a failed session; the end-of-session
          * check has already flagged the leaked mapping as an error. */
-        if (mem_service_client_unmap_allocation(&state->channel,
-                                                &state->mapping) != 0) {
+        if (mem_service_client_unmap_managed_allocation(state->client,
+                &state->channel, &state->mapping, &state->mapping_lifecycle,
+                NULL) != 0) {
             fprintf(stderr, "mem_service object-session: cleanup_pending key=%s "
                     "generation=%llu handle=%llu\n", state->mapping.key,
                     (unsigned long long)state->mapping.generation,
@@ -11433,7 +11436,12 @@ static int mem_service_object_session_run_op(
                                                    &view,
                                                    &status);
         break;
-    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP: {
+        unsigned char nonce[16];
+        char operation_id[48] = "sdkmap-";
+        FILE *random;
+        size_t nonce_len;
+        int random_close;
         if (!state->provider_ready) {
             return mem_service_object_session_finish_data_op(
                 config,
@@ -11488,18 +11496,30 @@ static int mem_service_object_session_run_op(
                 0,
                 false);
         }
-        if (mem_service_client_map_allocation(&state->channel,
-                                              &state->view,
-                                              op->map_flags,
-                                              &state->mapping) != 0) {
-            state->mapped = state->mapping.binding.mapped;
+        random = fopen("/dev/urandom", "rb");
+        if (random == NULL)
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_INTERNAL, "mapping_identity_unavailable",
+                0, 0, 0, false);
+        nonce_len = fread(nonce, 1, sizeof(nonce), random);
+        random_close = fclose(random);
+        if (nonce_len != sizeof(nonce) || random_close != 0)
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_INTERNAL, "mapping_identity_unavailable",
+                0, 0, 0, false);
+        for (size_t n = 0; n < sizeof(nonce); ++n)
+            snprintf(operation_id + 7 + n * 2, 3, "%02x", nonce[n]);
+        if (mem_service_client_map_managed_allocation(client, &state->channel,
+                &state->view, config->session_id, operation_id, op->map_flags,
+                &state->mapping, &state->mapping_lifecycle, &status) != 0) {
+            state->mapped = state->mapping_lifecycle.pending;
             if (!state->mapped)
                 memset(&state->mapping, 0, sizeof(state->mapping));
             return mem_service_object_session_finish_data_op(
                 config,
                 index,
                 op,
-                MEM_SERVICE_WIRE_STATUS_INTERNAL,
+                status,
                 state->mapped ? "map_cleanup_required" : "map_failed",
                 0,
                 0,
@@ -11518,6 +11538,7 @@ static int mem_service_object_session_run_op(
             state->mapping.len,
             0,
             false);
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
         if (!state->mapped ||
             strcmp(state->mapping.key, op->key) != 0) {
@@ -11532,8 +11553,8 @@ static int mem_service_object_session_run_op(
                 0,
                 false);
         }
-        if (mem_service_client_unmap_allocation(&state->channel,
-                                                &state->mapping) != 0) {
+        if (mem_service_client_unmap_managed_allocation(client, &state->channel,
+                &state->mapping, &state->mapping_lifecycle, &status) != 0) {
             return mem_service_object_session_finish_data_op(
                 config,
                 index,
@@ -11753,7 +11774,8 @@ static int mem_service_object_session_run_op(
         printf("mem_service object-session: session=%s op=%u action=stats "
                "status=%s live_objects=%llu backing_allocated_bytes=%llu "
                "address_reserved_bytes=%llu live_refs=%llu in_flight=%llu "
-               "quarantined_objects=%llu quarantined_bytes=%llu\n",
+               "quarantined_objects=%llu quarantined_bytes=%llu "
+               "import_mappings=%llu\n",
                config->session_id,
                index,
                mem_service_wire_status_name(status),
@@ -11763,7 +11785,8 @@ static int mem_service_object_session_run_op(
                (unsigned long long)stats.live_refs,
                (unsigned long long)stats.in_flight,
                (unsigned long long)stats.quarantined_objects,
-               (unsigned long long)stats.quarantined_bytes);
+               (unsigned long long)stats.quarantined_bytes,
+               (unsigned long long)stats.import_mappings);
         (void)fflush(stdout);
         if (rc != 0 || status != op->expect_status) {
             if (status == op->expect_status) {
@@ -11948,6 +11971,10 @@ static int run_object_session(int argc, char **argv)
         return 2;
     }
     memset(&state, 0, sizeof(state));
+    mem_service_wire_client_options_init(&options);
+    options.timeout_ms = config.request_timeout_ms;
+    mem_service_client_init_with_options(&client, config.connect, &options);
+    state.client = &client;
     if (mem_service_object_session_provider_open(&config, &state) != 0) {
         fprintf(stderr,
                 "mem_service object-session: session=%s provider %s "
@@ -11957,10 +11984,6 @@ static int run_object_session(int argc, char **argv)
         mem_service_object_session_provider_close(&state);
         return 2;
     }
-    mem_service_wire_client_options_init(&options);
-    options.timeout_ms = config.request_timeout_ms;
-    mem_service_client_init_with_options(&client, config.connect, &options);
-
     started_ms = mem_service_object_session_monotonic_ms();
     for (i = 0; i < config.op_count; ++i) {
         if (mem_service_object_session_run_op(&client,

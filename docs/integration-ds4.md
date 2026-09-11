@@ -15,6 +15,13 @@ endpoint，旧 void 关闭入口继续兼容并报告未完成清理。DS4 servi
 新调用需要支持 wire `0x7d` 的服务，旧端明确返回 unsupported；不得退回无映射引用
 保护的访问路径。现有 client record 与 wire header 布局保持不变。
 
+受管理映射消费者可调用 `mem_service_client_map_managed_allocation()` 和
+`mem_service_client_unmap_managed_allocation()` 自动编排事务与 provider；原始
+map/unmap API 保留。新接口增加独立的 lifecycle 结构，不改变已有 mapping 布局。
+每次 map 使用唯一 operation ID，成对保留 mapping/lifecycle，失败后仅重试
+managed unmap。`pending=false` 才允许释放 holder；不确定的应答、失败的 provider
+清理均保留上下文。该扩展不改动 DS4 当前 transfer 热路径，也不提供重启恢复。
+
 地址管理 SDK 新增 `mem_service_client_poll_allocation()`，供常驻 home provider
 查询绑定到自身 incarnation 的待分配/待回收对象。DS4 模型客户端不调用该接口，
 也不负责 backing 发布或地址 bootstrap。该接口不改变现有推理 API 或传输选择，
