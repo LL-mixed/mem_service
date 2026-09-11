@@ -42,6 +42,7 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                  str(COMPONENT / "mem_service_provider.c"), *LIBOBMM_SRCS,
                  "-Wl,--wrap=obmm_import", "-Wl,--wrap=ioctl",
                  "-Wl,--wrap=obmm_unimport", "-Wl,--wrap=obmm_unexport",
+                 "-Wl,--wrap=obmm_export",
                  "-Wl,--wrap=open", "-Wl,--wrap=close", "-Wl,--wrap=mmap",
                  "-Wl,--wrap=munmap", "-o", str(binary)],
                 capture_output=True, text=True, timeout=120)

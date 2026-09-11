@@ -24,6 +24,21 @@ struct mem_service_provider_obmm_endpoint {
     void *implementation;
 };
 
+/* Current endpoint ownership only; serialize with all endpoint operations.
+ * Remaining resources after failed cleanup stay counted. Not a kernel census.
+ */
+struct mem_service_provider_obmm_resources_v1 {
+    uint64_t export_handles, export_bytes;
+    uint64_t import_handles, import_bytes;
+    uint64_t vma_count, vma_bytes;
+    uint64_t accessible_views, accessible_bytes;
+    uint64_t cleanup_mappings;
+    bool closing, control_close_uncertain;
+};
+int mem_service_provider_obmm_endpoint_resources_v1(
+    const struct mem_service_provider_obmm_endpoint *endpoint,
+    struct mem_service_provider_obmm_resources_v1 *resources_out);
+
 struct obmm_gsva_segment_desc_v1;
 struct obmm_cmd_export;
 int mem_service_provider_obmm_encode_gsva(

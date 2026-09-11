@@ -1,5 +1,9 @@
 # ds4 使用侧适配手册
 
+OBMM 平台新增独立资源快照 API `mem_service_provider_obmm_endpoint_resources_v1()`，
+供 endpoint 运维诊断使用；其进程内资源计数不改变服务全局统计或 DS4 transfer
+热路径，既有 provider endpoint/binding 布局保持不变。
+
 映射 SDK 新增失败结果 `MEM_SERVICE_MAPPING_CLEANUP_REQUIRED`，调用方必须保留
 返回的对象映射并重试 unmap；此时输出仅用于清理，base/len/flags 均为零。
 失败的 unmap 同样撤销 SDK 访问并保留 handle。完成清理前不得释放 holder。

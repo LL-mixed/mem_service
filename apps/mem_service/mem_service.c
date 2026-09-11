@@ -11788,6 +11788,32 @@ static int mem_service_object_session_run_op(
                (unsigned long long)stats.quarantined_bytes,
                (unsigned long long)stats.import_mappings);
         (void)fflush(stdout);
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+        if (state->obmm_open) {
+            struct mem_service_provider_obmm_resources_v1 resources;
+            if (mem_service_provider_obmm_endpoint_resources_v1(
+                    &state->obmm_endpoint, &resources) != 0) {
+                fprintf(stderr, "mem_service object-session: provider_resources_unavailable\n");
+                return 1;
+            }
+            printf("mem_service provider-resources: provider=obmm scope=endpoint "
+                   "version=1 export_handles=%llu export_bytes=%llu "
+                   "import_handles=%llu import_bytes=%llu vma_count=%llu "
+                   "vma_bytes=%llu accessible_views=%llu accessible_bytes=%llu "
+                   "cleanup_mappings=%llu closing=%u control_close_uncertain=%u\n",
+                   (unsigned long long)resources.export_handles,
+                   (unsigned long long)resources.export_bytes,
+                   (unsigned long long)resources.import_handles,
+                   (unsigned long long)resources.import_bytes,
+                   (unsigned long long)resources.vma_count,
+                   (unsigned long long)resources.vma_bytes,
+                   (unsigned long long)resources.accessible_views,
+                   (unsigned long long)resources.accessible_bytes,
+                   (unsigned long long)resources.cleanup_mappings,
+                   (unsigned)resources.closing, (unsigned)resources.control_close_uncertain);
+            (void)fflush(stdout);
+        }
+#endif
         if (rc != 0 || status != op->expect_status) {
             if (status == op->expect_status) {
                 return 1;

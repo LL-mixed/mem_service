@@ -76,6 +76,13 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+endpoint 资源快照按当前进程持有的 export/import handle 与实际 VMA 归属计量，
+独立于服务端对象/映射事务计数。分别报告 export/import 字节、VMA 保留字节、
+可访问视图字节及待清理映射；失败清理的剩余资源继续计入。快照调用须与该
+endpoint 的 map/unmap/close 串行化，关闭中仍允许查询，已关闭的 endpoint
+不能伪造空快照。此接口覆盖当前 endpoint，其他进程、孤儿资源及重启后的
+kernel 全量枚举由恢复阶段核对。诊断 CLI 通过 object-session 的 stats 输出。
+
 严格映射的部分失败按每个实际创建的 VMA 记录归属；回滚仅解除这些范围，保留
 解除失败的范围、import ID 和 slot。失败结果的 handle 仅用于重试清理，任何范围
 访问均被拒绝。确认所有 VMA 已解除后才关闭映射 fd，再执行 unimport；slot 在

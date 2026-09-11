@@ -10,6 +10,12 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+OBMM 平台诊断增加 `mem_service_provider_obmm_endpoint_resources_v1()`，查询当前
+endpoint 保留的 export/import、VMA、可访问视图及待清理映射；调用须与该 endpoint
+的其他操作串行。object-session 的 `stats` 同时输出 `provider-resources`，与服务
+全局计数分开。关闭中的 endpoint 仍可查询，已关闭或不支持的平台返回失败。
+这些数字来自成功取得及尚未确认释放的本进程资源，不覆盖其他进程或 kernel 孤儿。
+
 SDK map 返回 `MEM_SERVICE_MAPPING_CLEANUP_REQUIRED` 时须保留输出对象并重试
 unmap；输出保留 key/generation/owner/handle，访问地址、长度、权限均为零。
 unmap 失败同样保留清理归属并撤销 SDK 访问。`object-session` 报告

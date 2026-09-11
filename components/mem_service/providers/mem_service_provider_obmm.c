@@ -442,7 +442,8 @@ static int mem_service_obmm_provider_register_region(
     struct obmm_helpers_meta meta;
     size_t i;
 
-    if (context == NULL || context->closing || request == NULL || region_out == NULL ||
+    if (context == NULL || context->closing || context->next_region_handle == UINT64_MAX ||
+        request == NULL || region_out == NULL ||
         request->base != NULL || request->len == 0 ||
         request->memory_kind != MEM_SERVICE_MEMORY_HOST ||
         request->flags != MEM_SERVICE_REGION_FLAG_PROVIDER_ALLOCATED) {
@@ -476,9 +477,10 @@ static int mem_service_obmm_provider_register_region(
     region_out->memory_kind = request->memory_kind;
     if (mem_service_obmm_descriptor_encode(&slot->descriptor,
                                            &region_out->descriptor) != 0) {
-        (void)obmm_do_unexport(context->obmm_fd,
-                               slot->descriptor.export_mem_id);
-        memset(slot, 0, sizeof(*slot));
+        if (obmm_do_unexport(context->obmm_fd, slot->descriptor.export_mem_id) == 0)
+            memset(slot, 0, sizeof(*slot));
+        else
+            context->closing = true;
         memset(region_out, 0, sizeof(*region_out));
         return -1;
     }
@@ -1576,6 +1578,58 @@ int mem_service_provider_obmm_endpoint_close_checked(
     return endpoint == NULL || endpoint->implementation == NULL ? 0 : -1;
 }
 #endif
+
+int mem_service_provider_obmm_endpoint_resources_v1(
+    const struct mem_service_provider_obmm_endpoint *endpoint,
+    struct mem_service_provider_obmm_resources_v1 *resources_out)
+{
+    if (resources_out == NULL) return -1;
+    memset(resources_out, 0, sizeof(*resources_out));
+#ifdef __linux__
+    const struct mem_service_obmm_context *context;
+    struct mem_service_provider_obmm_resources_v1 result = {0};
+
+    if (endpoint == NULL || endpoint->implementation == NULL) return -1;
+    context = endpoint->implementation;
+    result.closing = context->closing;
+    result.control_close_uncertain = context->close_uncertain;
+    for (size_t i = 0; i < MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS; ++i) {
+        const struct mem_service_obmm_region_slot *region = &context->regions[i];
+        const struct mem_service_obmm_mapping_slot *mapping = &context->mappings[i];
+        if (region->active) {
+            if (region->descriptor.size > UINT64_MAX - result.export_bytes) return -1;
+            ++result.export_handles;
+            result.export_bytes += region->descriptor.size;
+        }
+        if (!mapping->active) continue;
+        if (mapping->imported) {
+            if (mapping->descriptor.size > UINT64_MAX - result.import_bytes) return -1;
+            ++result.import_handles;
+            result.import_bytes += mapping->descriptor.size;
+        }
+        for (size_t part = 0; part < 3; ++part) {
+            if (!mapping->view.parts[part].owned) continue;
+            if (mapping->view.parts[part].len > UINT64_MAX - result.vma_bytes) return -1;
+            ++result.vma_count;
+            result.vma_bytes += mapping->view.parts[part].len;
+        }
+        bool accessible = !mapping->close_uncertain &&
+            mapping->view_len != 0 && mapping->region.addr != NULL;
+        if (context->closing || !accessible)
+            ++result.cleanup_mappings;
+        if (accessible) {
+            if (mapping->view_len > UINT64_MAX - result.accessible_bytes) return -1;
+            ++result.accessible_views;
+            result.accessible_bytes += mapping->view_len;
+        }
+    }
+    *resources_out = result;
+    return 0;
+#else
+    (void)endpoint;
+    return -1;
+#endif
+}
 
 void mem_service_provider_obmm_endpoint_close(
     struct mem_service_provider_obmm_endpoint *endpoint)
