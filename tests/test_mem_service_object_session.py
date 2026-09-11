@@ -727,6 +727,127 @@ class MemServiceObjectSessionTests(unittest.TestCase):
         finally:
             self._stop_server(daemon)
 
+    def _publish_second_object(self):
+        setup = self._write_session("second-object.conf", self._connect, [
+            "allocate key=obj-2 idempotency_key=second-alloc "
+            "size_bytes=4096 capabilities=map",
+            f"publish key=obj-2 node_id={HOME_NODE} "
+            f"incarnation={HOME_INCARNATION} generation=2 descriptor_hex=deadbeef "
+            f"address={DATA_MAP_ADDRESS + DATA_MAP_LEN} address_len={DATA_MAP_LEN}",
+        ])
+        result = self._run_session(setup)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cross_key_inspect_cannot_hide_unreleased_holder(self):
+        daemon = self._start_active_object()
+        try:
+            self._publish_second_object()
+            config = self._write_session("cross-key.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=cross-acquire",
+                "inspect key=obj-2 expect_holder_count=0",
+                "stats",
+            ], session_id="cross-key")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("reason=live_holder", result.stdout)
+            self.assertIn("unreleased_holder key=obj-1 generation=1 owner_session=cross-key", result.stdout)
+            self.assertEqual(self._allocation_stats()["live_refs"], "1")
+        finally:
+            self._stop_server(daemon)
+
+    def test_distinct_session_holders_are_tracked_independently(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("owners.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=owner-a",
+                "acquire key=obj-1 idempotency_key=owner-b session_id=other",
+                "release key=obj-1 idempotency_key=release-a",
+                "inspect key=obj-1 expect_holder_count=1",
+            ], session_id="owners")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("unreleased_holder key=obj-1 generation=1 owner_session=other", result.stdout)
+            self.assertEqual(self._allocation_stats()["live_refs"], "1")
+        finally:
+            self._stop_server(daemon)
+
+    def test_foreign_session_acquire_does_not_authorize_mapping(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("foreign.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=foreign-acquire session_id=other",
+                "map key=obj-1 flags=read expect_status=not_found",
+                "release key=obj-1 idempotency_key=foreign-release session_id=other",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("note=no_holder", result.stdout)
+            self.assertEqual(self._allocation_stats()["live_refs"], "0")
+        finally:
+            self._stop_server(daemon)
+
+    def test_mapping_and_holder_survive_other_object_queries(self):
+        daemon = self._start_active_object()
+        try:
+            self._publish_second_object()
+            config = self._write_session("query-switch.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=query-acquire",
+                "map key=obj-1 flags=read",
+                "inspect key=obj-2",
+                "probe_readonly key=obj-1",
+                "unmap key=obj-1",
+                "inspect key=obj-1",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=64 seed=9",
+                "read key=obj-1 offset=0 len=64 seed=9",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=query-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("cpu_fault_probe=probe_readonly", result.stdout)
+            self.assertEqual(self._allocation_stats()["live_refs"], "0")
+        finally:
+            self._stop_server(daemon)
+
+    def test_old_holder_replays_do_not_change_current_local_ownership(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("old-replays.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=replay-acquire",
+                "release key=obj-1 idempotency_key=replay-release",
+                "acquire key=obj-1 idempotency_key=replay-acquire",
+                "map key=obj-1 flags=read expect_status=not_found",
+                "acquire key=obj-1 idempotency_key=fresh-acquire",
+                "release key=obj-1 idempotency_key=replay-release",
+                "inspect key=obj-1 expect_holder_count=1",
+                "map key=obj-1 flags=read",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=fresh-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self._allocation_stats()["live_refs"], "0")
+        finally:
+            self._stop_server(daemon)
+
+    def test_aborted_session_reports_all_known_holders(self):
+        daemon = self._start_active_object()
+        try:
+            self._publish_second_object()
+            config = self._write_session("abort-holders.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=abort-acquire-1",
+                "acquire key=obj-2 idempotency_key=abort-acquire-2",
+                "inspect key=missing",
+            ])
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("unreleased_holder key=obj-1 generation=1", result.stdout)
+            self.assertIn("unreleased_holder key=obj-2 generation=2", result.stdout)
+            self.assertEqual(self._allocation_stats()["live_refs"], "2")
+        finally:
+            self._stop_server(daemon)
+
     def test_cpu_readonly_probe_and_precondition_rejections(self):
         daemon = self._start_active_object()
         try:

@@ -9486,11 +9486,23 @@ struct mem_service_object_session_loopback {
     uint64_t next_handle;
 };
 
+struct mem_service_object_session_holder {
+    bool live;
+    char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    uint64_t generation;
+};
+
 struct mem_service_object_session_state {
     bool has_view;
-    bool held;
     struct mem_service_client_allocation view;
+    struct mem_service_object_session_holder
+        holders[MEM_SERVICE_OBJECT_SESSION_MAX_OPS];
+    char holder_op_ids[MEM_SERVICE_OBJECT_SESSION_MAX_OPS]
+                      [MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    uint32_t holder_op_count;
     bool mapped;
+    uint64_t mapped_backing_len;
     struct mem_service_client_object_mapping mapping;
     bool provider_ready;
     struct mem_service_provider_registry registry;
@@ -9501,6 +9513,88 @@ struct mem_service_object_session_state {
     struct mem_service_provider_obmm_endpoint obmm_endpoint;
 #endif
 };
+
+static struct mem_service_object_session_holder *
+mem_service_object_session_find_holder(
+    struct mem_service_object_session_state *state,
+    const char *key, uint64_t generation, const char *session_id)
+{
+    for (uint32_t i = 0; i < MEM_SERVICE_OBJECT_SESSION_MAX_OPS; ++i) {
+        struct mem_service_object_session_holder *holder = &state->holders[i];
+        if (holder->live && holder->generation == generation &&
+            strcmp(holder->key, key) == 0 &&
+            strcmp(holder->session_id, session_id) == 0) {
+            return holder;
+        }
+    }
+    return NULL;
+}
+
+static int mem_service_object_session_track_holder(
+    struct mem_service_object_session_state *state,
+    const struct mem_service_object_session_op *op,
+    const struct mem_service_client_allocation *view,
+    const char *session_id)
+{
+    struct mem_service_object_session_holder *holder;
+
+    if (op->action != MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE &&
+        op->action != MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < state->holder_op_count; ++i) {
+        if (strcmp(state->holder_op_ids[i], op->idempotency_key) == 0) {
+            /* A reply replay is not a second acquire or release. */
+            return 0;
+        }
+    }
+    if (state->holder_op_count >= MEM_SERVICE_OBJECT_SESSION_MAX_OPS) {
+        return -1;
+    }
+    holder = mem_service_object_session_find_holder(
+        state, view->key, view->generation, session_id);
+    if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE) {
+        if (holder == NULL) {
+            for (uint32_t i = 0; i < MEM_SERVICE_OBJECT_SESSION_MAX_OPS; ++i) {
+                if (!state->holders[i].live) {
+                    holder = &state->holders[i];
+                    break;
+                }
+            }
+        }
+        if (holder == NULL) {
+            return -1;
+        }
+        holder->live = true;
+        holder->generation = view->generation;
+        snprintf(holder->key, sizeof(holder->key), "%s", view->key);
+        snprintf(holder->session_id, sizeof(holder->session_id), "%s", session_id);
+    } else if (holder != NULL) {
+        memset(holder, 0, sizeof(*holder));
+    }
+    snprintf(state->holder_op_ids[state->holder_op_count++],
+             MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN, "%s", op->idempotency_key);
+    return 0;
+}
+
+static bool mem_service_object_session_report_holders(
+    const struct mem_service_object_session_state *state,
+    const char *session_id)
+{
+    bool live = false;
+
+    for (uint32_t i = 0; i < MEM_SERVICE_OBJECT_SESSION_MAX_OPS; ++i) {
+        const struct mem_service_object_session_holder *holder = &state->holders[i];
+        if (holder->live) {
+            printf("mem_service object-session: session=%s unreleased_holder "
+                   "key=%s generation=%llu owner_session=%s\n",
+                   session_id, holder->key,
+                   (unsigned long long)holder->generation, holder->session_id);
+            live = true;
+        }
+    }
+    return live;
+}
 
 static int mem_service_object_session_loopback_probe(
     void *context,
@@ -11150,8 +11244,9 @@ static int mem_service_object_session_run_op(
         uint64_t offset = 0;
         bool write = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY;
         long page = sysconf(_SC_PAGESIZE);
-        if (!state->mapped || !state->held || !state->has_view ||
-            strcmp(state->mapping.key, op->key) || strcmp(state->view.key, op->key) ||
+        if (!state->mapped || strcmp(state->mapping.key, op->key) ||
+            !mem_service_object_session_find_holder(state, op->key,
+                state->mapping.generation, config->session_id) ||
             !(state->mapping.flags & MEM_SERVICE_CLIENT_MAP_READ)) {
             return mem_service_object_session_finish_data_op(config, index, op,
                 MEM_SERVICE_WIRE_STATUS_NOT_FOUND, "readable_mapping_required", 0, 0, 0, false);
@@ -11168,7 +11263,7 @@ static int mem_service_object_session_run_op(
                     MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "guard_unavailable", 0, 0, 0, false);
             }
             if (offset % (uint64_t)page) offset += (uint64_t)page - offset % (uint64_t)page;
-            if (offset >= state->view.address_len) {
+            if (offset >= state->mapped_backing_len) {
                 return mem_service_object_session_finish_data_op(config, index, op,
                     MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "no_full_padding_page", 0, 0, 0, false);
             }
@@ -11298,7 +11393,8 @@ static int mem_service_object_session_run_op(
         }
         if (!state->has_view ||
             strcmp(state->view.key, op->key) != 0 ||
-            !state->held) {
+            !mem_service_object_session_find_holder(state, op->key,
+                state->view.generation, config->session_id)) {
             return mem_service_object_session_finish_data_op(
                 config,
                 index,
@@ -11342,6 +11438,7 @@ static int mem_service_object_session_run_op(
                 false);
         }
         state->mapped = true;
+        state->mapped_backing_len = state->view.address_len;
         return mem_service_object_session_finish_data_op(
             config,
             index,
@@ -11380,6 +11477,7 @@ static int mem_service_object_session_run_op(
                 false);
         }
         state->mapped = false;
+        state->mapped_backing_len = 0;
         memset(&state->mapping, 0, sizeof(state->mapping));
         return mem_service_object_session_finish_data_op(
             config,
@@ -11676,20 +11774,16 @@ static int mem_service_object_session_run_op(
         return 1;
     }
 
-    /* Track the session's current object view and holder reference so
-     * data-plane ops key off it. Switching keys drops the tracked holder;
-     * the daemon remains the owner-of-record for live references. */
-    if (status == MEM_SERVICE_WIRE_STATUS_OK && view.state[0] != '\0') {
-        if (!state->has_view || strcmp(state->view.key, view.key) != 0) {
-            state->held = false;
+    /* Query selection must not erase references to other objects or owners. */
+    if (rc == 0 && status == MEM_SERVICE_WIRE_STATUS_OK && view.state[0] != '\0') {
+        if (mem_service_object_session_track_holder(state, op, &view, session_id)) {
+            (void)mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_INTERNAL, "holder_tracking_failed",
+                0, 0, 0, false);
+            return 1;
         }
         state->has_view = true;
         state->view = view;
-        if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE) {
-            state->held = true;
-        } else if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE) {
-            state->held = false;
-        }
     }
 
     if (status != op->expect_status) {
@@ -11805,6 +11899,7 @@ static int run_object_session(int argc, char **argv)
                                               &state,
                                               &config.ops[i],
                                               i + 1U) != 0) {
+            (void)mem_service_object_session_report_holders(&state, config.session_id);
             printf("mem_service object-session: session=%s result=failed "
                    "op=%u elapsed_ms=%llu\n",
                    config.session_id,
@@ -11821,7 +11916,9 @@ static int run_object_session(int argc, char **argv)
      * so a live mapping or holder here means the config itself leaked. */
     if (state.mapped) {
         end_failure = "active_mapping";
-    } else if (state.held) {
+    }
+    if (mem_service_object_session_report_holders(&state, config.session_id) &&
+        end_failure == NULL) {
         end_failure = "live_holder";
     }
     if (end_failure != NULL) {

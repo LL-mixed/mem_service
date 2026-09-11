@@ -2,6 +2,14 @@
 
 ## 受管理 session 的数据可见性
 
+`object-session` 的引用跟踪以 `(key, generation, session_id)` 为单位，独立于
+最近一次 inspect 返回的对象。切换 key 或使用显式 session_id 不得丢失尚未释放
+的引用；退出时逐项报告已知未释放的 holder，并返回失败，不自动替客户端 release。
+同一 session 内已成功执行的 acquire/release 幂等重放不再次改变本地引用状态。
+映射仅消费配置中 session_id 自己的引用；同一进程代其他 session 执行 acquire
+不授予本 session 映射权限。该跟踪属于 CLI 诊断，服务端仍是引用状态权威；
+它不提供跨进程同名 session 的并发协调或崩溃恢复。
+
 `object-session` 的 `publish_data` 和 `wait_visible` 操作接受 `key`、`offset`、
 `len`，以及 `seed` 或 `expect_checksum`，在客户端进程调用中立 provider 范围接口。
 写入方先调用 `publish_data`，再通知另一客户端；读取方先调用 `wait_visible`，

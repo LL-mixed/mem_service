@@ -10,6 +10,12 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+`object-session` 分别跟踪每个 key/generation/session 的引用，切换 inspect 对象
+不清除其他引用。成功的 acquire/release 在本次进程内按 idempotency_key 去重；
+旧操作重放不能重新授予或移除当前映射权限。配置中的 session_id 只能映射自己
+持有的对象。正常结束或中途失败都会输出已知未释放的 holder，CLI 不自动 release；
+服务端仍保留实际引用，跨进程同名 session 的协调及崩溃恢复需要独立实现。
+
 `object-session` 新增 `publish_data` / `wait_visible` 操作，参数为 `key`、
 `offset`、`len` 和 `seed` 或 `expect_checksum`。写入后先发布，再通过控制状态
 通知另一客户端；读取前等待指定 checksum 可见。两者使用进程内中立 provider SDK，
