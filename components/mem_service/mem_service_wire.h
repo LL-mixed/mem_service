@@ -63,6 +63,7 @@ enum mem_service_wire_operation {
     MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION = 0x7a,
     MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION = 0x7b,
     MEM_SERVICE_WIRE_OP_POLL_ALLOCATION = 0x7c,
+    MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION = 0x7d,
 };
 
 enum mem_service_wire_status {

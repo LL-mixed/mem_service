@@ -10,6 +10,22 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+映射生命周期新增中立 `mem_service_client_mapping_transition()`（wire `0x7d`），
+诊断入口为 `mapping-transition --key <key> --session-id <session> --generation <g>
+--mapping-id <id> --action <begin|confirm|close|finish|cancel|inspect>
+--idempotency-key <operation> --connect <endpoint>`。begin 使用 ID 0，其他操作使用
+返回的非零 ID；状态编码 0=closed、1=pending、2=active、3=closing。inspect 读取
+当前状态，不使用旧幂等应答；其他操作沿用现有幂等契约。旧 begin/confirm 应答只证明
+历史操作成功，调用方还须核对当前事务，不能据此重复安装映射。
+
+此接口记录 provider 操作的生命周期，不执行实际 import/unmap；确认成功只能由
+掌握 provider 完成结果的 SDK 路径发出。pending/active/closing 均阻止 holder release，
+closing 完成和 pending 取消需要已确认无残留映射。多个 mapping ID 可同时绑定同一
+holder，其他 holder 的释放不受影响。begin/confirm 要求 provider 就绪且 home 的
+当前 incarnation 等于对象绑定值，幂等重放前也执行此检查；已有事务的
+inspect/close/finish/cancel 在 readiness 丢失时仍可执行。未接入上报的旧 mapping
+入口不在该计量内；object-session 自动接线和真实 guest 计量仍待验证。
+
 `object-session` 分别跟踪每个 key/generation/session 的引用，切换 inspect 对象
 不清除其他引用。成功的 acquire/release 在本次进程内按 idempotency_key 去重；
 旧操作重放不能重新授予或移除当前映射权限。配置中的 session_id 只能映射自己

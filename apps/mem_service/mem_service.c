@@ -36,10 +36,10 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 16300U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x5905d107U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 37U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 210U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 16730U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x62fe2d5dU
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 38U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 216U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
@@ -49,7 +49,7 @@
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0xf4139152U
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x5ecfcddeU
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -62,7 +62,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x0095ab54U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x25fc9af7U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -73,12 +73,12 @@
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
 #define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x5b574449U
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0xfcd1fa26U
 #define MEM_SERVICE_COMPAT_MATRIX_STATUS_COUNT 11U
 #define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_LEN 1252U
-#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0xe74ef98aU
+#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x97a3d2daU
 #define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_LEN 1734U
-#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x38956796U
+#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x0b8fc6e0U
 #define MEM_SERVICE_CLI_STORE_MAGIC "mem_service_store_v1"
 
 static void usage(const char *argv0)
@@ -152,6 +152,7 @@ static void usage(const char *argv0)
     printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
+    printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard> field=value ...]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
@@ -377,7 +378,7 @@ static int render_wire_schema_manifest(char *manifest,
 
 static int run_wire_schema_manifest(void)
 {
-    char manifest[16384];
+    char manifest[32768];
     size_t used = 0;
 
     if (render_wire_schema_manifest(manifest, sizeof(manifest), &used) != 0) {
@@ -391,7 +392,7 @@ static int run_wire_schema_manifest(void)
 
 static int run_wire_schema_fixture_check(void)
 {
-    char manifest[16384];
+    char manifest[32768];
     size_t used = 0;
     size_t field_count = 0;
     size_t oneof_count = 0;
@@ -2407,7 +2408,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "service_version=" MEM_SERVICE_RELEASE_VERSION "\n") == NULL ||
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
-        strstr(manifest, "wire_schema_manifest_checksum=0x5905d107\n") == NULL ||
+        strstr(manifest, "wire_schema_manifest_checksum=0x62fe2d5d\n") == NULL ||
         strstr(manifest, "api_abi_policy_checksum=0x5e460a87\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
@@ -5491,6 +5492,12 @@ static int run_release_manifest(void)
            MEM_SERVICE_WIRE_OP_REGISTER_TRAINING_ARTIFACT);
     printf("operation=query_training_artifact:%u\n",
            MEM_SERVICE_WIRE_OP_QUERY_TRAINING_ARTIFACT);
+    for (uint32_t operation = MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT;
+         operation <= MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION; ++operation) {
+        const struct mem_service_wire_operation_schema *schema =
+            mem_service_wire_schema_for_operation((enum mem_service_wire_operation)operation);
+        if (schema != NULL) printf("operation=%s:%u\n", schema->name, operation);
+    }
     printf("status=ok:%u\n", MEM_SERVICE_WIRE_STATUS_OK);
     printf("status=not_found:%u\n", MEM_SERVICE_WIRE_STATUS_NOT_FOUND);
     printf("status=stale_ref:%u\n", MEM_SERVICE_WIRE_STATUS_STALE_REF);
@@ -5652,7 +5659,7 @@ static int run_release_fixture_check(void)
            "metrics_scrape_paths=1 "
            "client_retry_policies=1 "
            "client_api_profiles=2 compat_artifacts=3 "
-           "operations=37 statuses=11 "
+           "operations=38 statuses=11 "
            "schema_manifest_len=%u schema_manifest_checksum=0x%08x "
            "api_abi_policy_len=%u api_abi_policy_checksum=0x%08x "
            "admin_output_schema_len=%u "
@@ -9289,6 +9296,55 @@ static int run_provider_directory_status(int argc, char **argv)
  * 0x7a-0x7b). Only the bound home provider process invokes these; the
  * descriptor crosses as opaque hex and payload bytes never move.
  */
+static int run_mapping_transition(int argc, char **argv)
+{
+    char payload[768] = "";
+    const char *action = option_value(argc, argv, "--action");
+    static const char *actions[] = {"begin", "confirm", "close", "finish", "cancel", "inspect"};
+    const char *connect_spec;
+    struct mem_service_wire_client_options options;
+    struct mem_service_client client;
+    struct mem_service_client_mapping_transaction transaction;
+    struct mem_service_wire_payload_view view;
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    int rc;
+    size_t i;
+
+    if (action == NULL) return 2;
+    for (i = 0; i < sizeof(actions) / sizeof(actions[0]); ++i) {
+        if (strcmp(action, actions[i]) == 0) break;
+    }
+    if (i == sizeof(actions) / sizeof(actions[0]) ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--session-id", "session_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--generation", "generation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--mapping-id", "mapping_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv, "--idempotency-key", "idempotency_key") != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload), "action", i + 1) != 0) return 2;
+    view = mem_service_wire_payload_view_from_cstr(payload);
+    if (!mem_service_wire_schema_validate_payload(
+            mem_service_wire_schema_for_operation(MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION),
+            &view, NULL) ||
+        parse_socket_arg(argc, argv, "--connect", &connect_spec) != 0 ||
+        parse_client_options(argc, argv, &options) != 0) return 2;
+    mem_service_client_init_with_options(&client, connect_spec, &options);
+    rc = mem_service_client_mapping_transition(&client,
+        option_value(argc, argv, "--key"), option_value(argc, argv, "--session-id"),
+        mem_service_wire_payload_get_u64(&view, "generation", 0),
+        mem_service_wire_payload_get_u64(&view, "mapping_id", 0),
+        (enum mem_service_client_mapping_action)(i + 1),
+        option_value(argc, argv, "--idempotency-key"), &transaction, &status);
+    printf("mem_service mapping-transition: status=%s\nstatus=%s\n",
+           mem_service_wire_status_name(status), mem_service_wire_status_name(status));
+    if (rc == 0) {
+        printf("key=%s\nsession_id=%s\ngeneration=%llu\nmapping_id=%llu\nmapping_state=%u\n",
+               option_value(argc, argv, "--key"), option_value(argc, argv, "--session-id"),
+               (unsigned long long)transaction.generation,
+               (unsigned long long)transaction.mapping_id, transaction.state);
+    }
+    return rc;
+}
+
 static int run_poll_allocation(int argc, char **argv)
 {
     char payload[512] = "";
@@ -13200,6 +13256,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "poll-allocation") == 0) {
         return run_poll_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "mapping-transition") == 0) {
+        return run_mapping_transition(argc, argv);
     }
     if (strcmp(argv[1], "object-session") == 0) {
         return run_object_session(argc, argv);

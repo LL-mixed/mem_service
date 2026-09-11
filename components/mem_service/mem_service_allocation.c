@@ -226,6 +226,7 @@ void mem_service_managed_table_init(struct mem_service_managed_table *table)
     }
     memset(table, 0, sizeof(*table));
     table->next_generation = 1U;
+    table->next_mapping_id = 1U;
 }
 
 int mem_service_managed_table_register_backing(
@@ -467,6 +468,16 @@ enum mem_service_managed_result mem_service_managed_release(
     if (holder_index < 0) {
         table->release_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
+    }
+    for (size_t i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        const struct mem_service_managed_mapping *mapping = &table->mappings[i];
+        if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_NONE &&
+            mapping->generation == entry->generation &&
+            strcmp(mapping->key, key) == 0 &&
+            strcmp(mapping->session_id, session_id) == 0) {
+            table->release_rejected_count += 1U;
+            return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+        }
     }
     tail = entry->holder_count - (uint32_t)holder_index - 1U;
     if (tail > 0) {
@@ -751,6 +762,17 @@ void mem_service_managed_stats_snapshot(
         return;
     }
     stats_out->backing_registered = table->backing_registered ? 1U : 0U;
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        enum mem_service_managed_mapping_state state = table->mappings[i].state;
+        if (state == MEM_SERVICE_MANAGED_MAPPING_ACTIVE ||
+            state == MEM_SERVICE_MANAGED_MAPPING_CLOSING) {
+            stats_out->import_mappings += 1U;
+        }
+        if (state == MEM_SERVICE_MANAGED_MAPPING_PENDING ||
+            state == MEM_SERVICE_MANAGED_MAPPING_CLOSING) {
+            stats_out->in_flight += 1U;
+        }
+    }
     for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
         const struct mem_service_managed_allocation *entry = &table->entries[i];
 
@@ -811,4 +833,98 @@ void mem_service_managed_stats_snapshot(
     stats_out->reclaim_ok_count = table->reclaim_ok_count;
     stats_out->reclaim_rejected_count = table->reclaim_rejected_count;
     stats_out->quarantine_events = table->quarantine_events;
+}
+
+enum mem_service_managed_result mem_service_managed_mapping_transition(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *session_id,
+    uint64_t generation,
+    uint64_t mapping_id,
+    enum mem_service_managed_mapping_action action,
+    struct mem_service_managed_mapping *mapping_out)
+{
+    struct mem_service_managed_allocation *entry;
+    struct mem_service_managed_mapping *mapping = NULL;
+    size_t i;
+
+    if (mapping_out != NULL) memset(mapping_out, 0, sizeof(*mapping_out));
+    if (table == NULL || mapping_out == NULL || generation == 0 ||
+        !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN) ||
+        !mem_service_managed_string_valid(session_id, MEM_SERVICE_MANAGED_SESSION_ID_LEN) ||
+        action < MEM_SERVICE_MANAGED_MAPPING_BEGIN ||
+        action > MEM_SERVICE_MANAGED_MAPPING_INSPECT ||
+        ((action == MEM_SERVICE_MANAGED_MAPPING_BEGIN) != (mapping_id == 0))) {
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    entry = mem_service_managed_find(table, key);
+    if (entry == NULL) return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    if (entry->generation != generation) return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    if (mem_service_managed_find_holder(entry, session_id) < 0)
+        return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
+
+    if (action == MEM_SERVICE_MANAGED_MAPPING_BEGIN) {
+        if (entry->state != MEM_SERVICE_MANAGED_STATE_ACTIVE ||
+            !entry->provider_backed || !(entry->capabilities & MEM_SERVICE_MANAGED_CAP_MAP))
+            return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+        if (table->next_mapping_id == 0 || table->next_mapping_id == UINT64_MAX)
+            return MEM_SERVICE_MANAGED_RESULT_CAPACITY;
+        for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+            if (table->mappings[i].state == MEM_SERVICE_MANAGED_MAPPING_NONE) {
+                mapping = &table->mappings[i];
+                break;
+            }
+        }
+        if (mapping == NULL) return MEM_SERVICE_MANAGED_RESULT_CAPACITY;
+        memset(mapping, 0, sizeof(*mapping));
+        mapping->id = table->next_mapping_id++;
+        mapping->generation = generation;
+        mapping->state = MEM_SERVICE_MANAGED_MAPPING_PENDING;
+        snprintf(mapping->key, sizeof(mapping->key), "%s", key);
+        snprintf(mapping->session_id, sizeof(mapping->session_id), "%s", session_id);
+    } else {
+        for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+            if (table->mappings[i].state != MEM_SERVICE_MANAGED_MAPPING_NONE &&
+                table->mappings[i].id == mapping_id) {
+                mapping = &table->mappings[i];
+                break;
+            }
+        }
+        if (mapping == NULL) return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+        if (mapping->generation != generation || strcmp(mapping->key, key) ||
+            strcmp(mapping->session_id, session_id))
+            return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+        switch (action) {
+        case MEM_SERVICE_MANAGED_MAPPING_CONFIRM:
+            if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_PENDING ||
+                entry->state != MEM_SERVICE_MANAGED_STATE_ACTIVE)
+                return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+            mapping->state = MEM_SERVICE_MANAGED_MAPPING_ACTIVE;
+            break;
+        case MEM_SERVICE_MANAGED_MAPPING_CLOSE:
+            if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_ACTIVE)
+                return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+            mapping->state = MEM_SERVICE_MANAGED_MAPPING_CLOSING;
+            break;
+        case MEM_SERVICE_MANAGED_MAPPING_FINISH:
+            if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_CLOSING)
+                return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+            break;
+        case MEM_SERVICE_MANAGED_MAPPING_CANCEL:
+            if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_PENDING)
+                return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+            break;
+        case MEM_SERVICE_MANAGED_MAPPING_INSPECT:
+            break;
+        default:
+            return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+        }
+    }
+    *mapping_out = *mapping;
+    if (action == MEM_SERVICE_MANAGED_MAPPING_FINISH ||
+        action == MEM_SERVICE_MANAGED_MAPPING_CANCEL) {
+        mapping_out->state = MEM_SERVICE_MANAGED_MAPPING_NONE;
+        memset(mapping, 0, sizeof(*mapping));
+    }
+    return MEM_SERVICE_MANAGED_RESULT_OK;
 }

@@ -2,6 +2,15 @@
 
 ## 受管理 session 的数据可见性
 
+映射生命周期扩展按以下契约实施：服务在 provider 建立映射前登记 pending 意图，
+分配本次服务生命周期内不复用的 mapping ID，绑定对象 generation 和 holder session。
+成功建立后确认 active，解除前进入 closing，provider 确认解除后删除记录；pending
+仅在确认没有遗留 provider 资源时允许 cancel。任何尚存映射事务均阻止该 holder
+release。`import_mappings` 统计已确认 active/closing 映射，pending/closing 同时计入
+`in_flight`，pending 为零不能替代映射成功确认。服务只接收生命周期元数据。
+此扩展需要 core、wire、SDK、CLI 和真实 guest 一起验证；持久化与重启 reconciliation
+仍按恢复阶段实现，不能把进程内计量宣称为崩溃后的 kernel 资源枚举。
+
 `object-session` 的引用跟踪以 `(key, generation, session_id)` 为单位，独立于
 最近一次 inspect 返回的对象。切换 key 或使用显式 session_id 不得丢失尚未释放
 的引用；退出时逐项报告已知未释放的 holder，并返回失败，不自动替客户端 release。

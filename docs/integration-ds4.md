@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+安装 SDK 新增 `mem_service_client_mapping_transition()`，仅供受管理 CPU/memref
+映射的生命周期上报；不移动 payload，不修改 DS4 现有 transfer provider 的使用方式。
+新调用需要支持 wire `0x7d` 的服务，旧端明确返回 unsupported；不得退回无映射引用
+保护的访问路径。现有 client record 与 wire header 布局保持不变。
+
 地址管理 SDK 新增 `mem_service_client_poll_allocation()`，供常驻 home provider
 查询绑定到自身 incarnation 的待分配/待回收对象。DS4 模型客户端不调用该接口，
 也不负责 backing 发布或地址 bootstrap。该接口不改变现有推理 API 或传输选择，

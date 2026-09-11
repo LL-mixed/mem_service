@@ -427,6 +427,30 @@ struct mem_service_client_allocation_holder {
     uint64_t generation;
 };
 
+enum mem_service_client_mapping_action {
+    MEM_SERVICE_CLIENT_MAPPING_BEGIN = 1,
+    MEM_SERVICE_CLIENT_MAPPING_CONFIRM = 2,
+    MEM_SERVICE_CLIENT_MAPPING_CLOSE = 3,
+    MEM_SERVICE_CLIENT_MAPPING_FINISH = 4,
+    MEM_SERVICE_CLIENT_MAPPING_CANCEL = 5,
+    MEM_SERVICE_CLIENT_MAPPING_INSPECT = 6,
+};
+
+struct mem_service_client_mapping_transaction {
+    uint64_t mapping_id;
+    uint64_t generation;
+    /* 0=closed, 1=pending, 2=active, 3=closing. No process pointer crosses RPC. */
+    uint32_t state;
+};
+
+int mem_service_client_mapping_transition(
+    const struct mem_service_client *client,
+    const char *key, const char *session_id, uint64_t generation,
+    uint64_t mapping_id, enum mem_service_client_mapping_action action,
+    const char *idempotency_key,
+    struct mem_service_client_mapping_transaction *transaction_out,
+    enum mem_service_wire_status *status_out);
+
 struct mem_service_client_allocation {
     char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
     char state[MEM_SERVICE_CLIENT_ALLOCATION_STATE_LEN];

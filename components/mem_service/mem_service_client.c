@@ -1391,6 +1391,57 @@ static int mem_service_client_parse_allocation(
     return allocation_out->key[0] == '\0' ? -1 : 0;
 }
 
+int mem_service_client_mapping_transition(
+    const struct mem_service_client *client,
+    const char *key, const char *session_id, uint64_t generation,
+    uint64_t mapping_id, enum mem_service_client_mapping_action action,
+    const char *idempotency_key,
+    struct mem_service_client_mapping_transaction *transaction_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[768] = "", response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
+    char response_key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    char response_session[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
+    struct mem_service_wire_payload_view view;
+    struct mem_service_client_mapping_transaction transaction = {0};
+    uint64_t state;
+    int rc;
+
+    if (transaction_out != NULL) memset(transaction_out, 0, sizeof(*transaction_out));
+    if (transaction_out == NULL || generation == 0 ||
+        action < MEM_SERVICE_CLIENT_MAPPING_BEGIN || action > MEM_SERVICE_CLIENT_MAPPING_INSPECT ||
+        ((action == MEM_SERVICE_CLIENT_MAPPING_BEGIN) != (mapping_id == 0)) ||
+        mem_service_client_append_required_string(payload, sizeof(payload), "key", key) ||
+        mem_service_client_append_required_string(payload, sizeof(payload), "session_id", session_id) ||
+        mem_service_client_append_required_string(payload, sizeof(payload), "idempotency_key", idempotency_key) ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload), "generation", generation) ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload), "mapping_id", mapping_id) ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload), "action", action))
+        return mem_service_client_invalid(status_out);
+    rc = mem_service_client_send(client, MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION,
+                                 payload, response, sizeof(response), status_out);
+    if (rc != 0) return rc;
+    view = mem_service_wire_payload_view_from_cstr(response);
+    transaction.mapping_id = mem_service_wire_payload_get_u64(&view, "mapping_id", 0);
+    transaction.generation = mem_service_wire_payload_get_u64(&view, "generation", 0);
+    state = mem_service_wire_payload_get_u64(&view, "mapping_state", UINT64_MAX);
+    if (!mem_service_wire_payload_get_string(&view, "key", response_key, sizeof(response_key)) ||
+        !mem_service_wire_payload_get_string(&view, "session_id", response_session, sizeof(response_session)) ||
+        strcmp(response_key, key) || strcmp(response_session, session_id) ||
+        transaction.generation != generation || transaction.mapping_id == 0 || state > 3 ||
+        (mapping_id != 0 && mapping_id != transaction.mapping_id) ||
+        (action == MEM_SERVICE_CLIENT_MAPPING_BEGIN && state != 1) ||
+        (action == MEM_SERVICE_CLIENT_MAPPING_CONFIRM && state != 2) ||
+        (action == MEM_SERVICE_CLIENT_MAPPING_CLOSE && state != 3) ||
+        ((action == MEM_SERVICE_CLIENT_MAPPING_FINISH || action == MEM_SERVICE_CLIENT_MAPPING_CANCEL) && state != 0)) {
+        mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        return 1;
+    }
+    transaction.state = (uint32_t)state;
+    *transaction_out = transaction;
+    return 0;
+}
+
 static int mem_service_client_send_allocation(
     const struct mem_service_client *client,
     enum mem_service_wire_operation operation,

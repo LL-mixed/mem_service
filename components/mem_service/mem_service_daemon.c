@@ -103,7 +103,7 @@ static bool mem_service_status_is_fail_closed(enum mem_service_wire_status statu
 static bool mem_service_operation_mutates(enum mem_service_wire_operation operation,
                                           const char *payload);
 static bool mem_service_operation_gated_managed_data_op(
-    enum mem_service_wire_operation operation);
+    enum mem_service_wire_operation operation, const char *payload);
 static uint64_t mem_service_estimate_new_record_count(
     struct mem_service *svc,
     enum mem_service_wire_operation operation,
@@ -11685,6 +11685,73 @@ static enum mem_service_wire_status mem_service_inspect_allocation(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+static enum mem_service_wire_status mem_service_mapping_admission_gate(
+    struct mem_service *svc, const char *payload, char *response, size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    uint64_t action = 0, generation = 0, incarnation = 0;
+    struct mem_service_managed_view allocation;
+    enum mem_service_managed_result result;
+
+    if (!mem_service_managed_payload_valid(payload, MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION,
+                                           response, response_len))
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    (void)mem_service_payload_get_u64_checked(payload, "action", &action);
+    if (action != MEM_SERVICE_MANAGED_MAPPING_BEGIN &&
+        action != MEM_SERVICE_MANAGED_MAPPING_CONFIRM) return MEM_SERVICE_WIRE_STATUS_OK;
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_u64_checked(payload, "generation", &generation);
+    result = mem_service_managed_inspect(&svc->managed, key, &allocation);
+    if (result == MEM_SERVICE_MANAGED_RESULT_OK && allocation.generation != generation)
+        result = MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    if (result != MEM_SERVICE_MANAGED_RESULT_OK)
+        return mem_service_managed_finish(result, NULL, key, response, response_len);
+    if (!allocation.provider_backed)
+        return mem_service_managed_finish(MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT,
+                                          NULL, key, response, response_len);
+    if (!mem_service_provider_directory_lookup_active(&svc->provider_directory,
+            allocation.home_node_id, mem_service_monotonic_ms(), &incarnation)) {
+        snprintf(response, response_len, "status=internal\nreason=data_plane_not_ready\n");
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    if (incarnation != allocation.provider_incarnation)
+        return mem_service_managed_finish(MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH,
+                                          NULL, key, response, response_len);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static enum mem_service_wire_status mem_service_mapping_transition(
+    struct mem_service *svc, const char *payload, char *response, size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+    uint64_t generation = 0, mapping_id = 0, action = 0;
+    struct mem_service_managed_mapping mapping;
+    enum mem_service_managed_result result;
+    enum mem_service_wire_status gate;
+
+    gate = mem_service_mapping_admission_gate(svc, payload, response, response_len);
+    if (gate != MEM_SERVICE_WIRE_STATUS_OK) return gate;
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload, "session_id", session_id, sizeof(session_id));
+    (void)mem_service_payload_get_u64_checked(payload, "generation", &generation);
+    (void)mem_service_payload_get_u64_checked(payload, "mapping_id", &mapping_id);
+    (void)mem_service_payload_get_u64_checked(payload, "action", &action);
+    if (action < MEM_SERVICE_MANAGED_MAPPING_BEGIN || action > MEM_SERVICE_MANAGED_MAPPING_INSPECT)
+        return mem_service_managed_finish(MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST,
+                                          NULL, key, response, response_len);
+    result = mem_service_managed_mapping_transition(&svc->managed, key, session_id,
+        generation, mapping_id, (enum mem_service_managed_mapping_action)action, &mapping);
+    if (result != MEM_SERVICE_MANAGED_RESULT_OK)
+        return mem_service_managed_finish(result, NULL, key, response, response_len);
+    snprintf(response, response_len,
+             "status=ok\nkey=%s\nsession_id=%s\ngeneration=%" PRIu64
+             "\nmapping_id=%" PRIu64 "\nmapping_state=%u\n",
+             mapping.key, mapping.session_id, mapping.generation, mapping.id,
+             (unsigned)mapping.state);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
 static enum mem_service_wire_status mem_service_allocation_stats(
     struct mem_service *svc,
     const char *payload,
@@ -12447,6 +12514,8 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
         return mem_service_reclaim_allocation(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_POLL_ALLOCATION:
         return mem_service_poll_allocation(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION:
+        return mem_service_mapping_transition(svc, payload, response, response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -13021,7 +13090,7 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
      * Setting idempotency_handled skips dispatch below while leaving
      * pending_idempotency NULL so no outcome is recorded.
      */
-    if (mem_service_operation_gated_managed_data_op(operation) &&
+    if (mem_service_operation_gated_managed_data_op(operation, payload) &&
         !mem_service_provider_directory_data_ops_allowed(
             &svc->provider_directory,
             mem_service_monotonic_ms())) {
@@ -13029,6 +13098,11 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                  response_len,
                  "status=internal\nreason=data_plane_not_ready\n");
         status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        idempotency_handled = true;
+    } else if (operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION &&
+               (status = mem_service_mapping_admission_gate(svc, payload, response,
+                                                            response_len)) != MEM_SERVICE_WIRE_STATUS_OK) {
+        /* An old successful reply cannot authorize a replaced home instance. */
         idempotency_handled = true;
     } else {
         status = mem_service_try_idempotency_replay(svc,
@@ -13207,6 +13281,11 @@ static bool mem_service_operation_mutates(enum mem_service_wire_operation operat
                                           const char *payload)
 {
     switch (operation) {
+    case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION: {
+        uint64_t action = 0;
+        (void)mem_service_payload_get_u64_checked(payload, "action", &action);
+        return action != MEM_SERVICE_MANAGED_MAPPING_INSPECT;
+    }
     case MEM_SERVICE_WIRE_OP_RESTORE_SNAPSHOT:
         return true;
     case MEM_SERVICE_WIRE_OP_RESTORE_SNAPSHOT_PAGE: {
@@ -13240,9 +13319,16 @@ static bool mem_service_operation_mutates(enum mem_service_wire_operation operat
  * outcome of an operation that never executed.
  */
 static bool mem_service_operation_gated_managed_data_op(
-    enum mem_service_wire_operation operation)
+    enum mem_service_wire_operation operation, const char *payload)
 {
     switch (operation) {
+    case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION: {
+        uint64_t action = 0;
+        (void)mem_service_payload_get_u64_checked(payload, "action", &action);
+        /* Teardown/inspection must remain possible after readiness loss. */
+        return action == MEM_SERVICE_MANAGED_MAPPING_BEGIN ||
+               action == MEM_SERVICE_MANAGED_MAPPING_CONFIRM;
+    }
     case MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT:
     case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
     case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
@@ -13339,6 +13425,8 @@ static uint64_t mem_service_estimate_new_record_count(
     case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
         /* Managed allocations live in their own table with its own
          * capacity gate; they do not consume legacy records. */
+        return 0U;
+    case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION:
         return 0U;
     default:
         return mem_service_operation_mutates(operation, payload) ? UINT64_MAX : 0U;
@@ -14629,6 +14717,7 @@ static bool mem_service_network_operation_allowed(
     case MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION:
     case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
     case MEM_SERVICE_WIRE_OP_POLL_ALLOCATION:
+    case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION:
         return true;
     default:
         return false;

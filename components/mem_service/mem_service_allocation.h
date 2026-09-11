@@ -61,11 +61,14 @@
  * address range, and later confirms the reclaim. The control plane never
  * parses descriptor contents and never moves payload bytes. Stats
  * export mapping counts reflect provider-published ACTIVE objects;
- * import mapping counts stay 0 until provider channels report them.
+ * import mapping counts reflect confirmed mapping transactions. Pending
+ * and closing transactions also count as in-flight; no transaction may
+ * outlive its holder. Actual process mapping handles remain provider-private.
  */
 
 #define MEM_SERVICE_MANAGED_MAX_ALLOCATIONS 128U
 #define MEM_SERVICE_MANAGED_MAX_HOLDERS 8U
+#define MEM_SERVICE_MANAGED_MAX_MAPPINGS 128U
 #define MEM_SERVICE_MANAGED_KEY_LEN 96U
 #define MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN 96U
 #define MEM_SERVICE_MANAGED_SESSION_ID_LEN 64U
@@ -127,6 +130,30 @@ struct mem_service_managed_holder {
     uint64_t generation;
 };
 
+enum mem_service_managed_mapping_state {
+    MEM_SERVICE_MANAGED_MAPPING_NONE = 0,
+    MEM_SERVICE_MANAGED_MAPPING_PENDING = 1,
+    MEM_SERVICE_MANAGED_MAPPING_ACTIVE = 2,
+    MEM_SERVICE_MANAGED_MAPPING_CLOSING = 3,
+};
+
+enum mem_service_managed_mapping_action {
+    MEM_SERVICE_MANAGED_MAPPING_BEGIN = 1,
+    MEM_SERVICE_MANAGED_MAPPING_CONFIRM = 2,
+    MEM_SERVICE_MANAGED_MAPPING_CLOSE = 3,
+    MEM_SERVICE_MANAGED_MAPPING_FINISH = 4,
+    MEM_SERVICE_MANAGED_MAPPING_CANCEL = 5,
+    MEM_SERVICE_MANAGED_MAPPING_INSPECT = 6,
+};
+
+struct mem_service_managed_mapping {
+    enum mem_service_managed_mapping_state state;
+    uint64_t id;
+    uint64_t generation;
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+};
+
 struct mem_service_managed_allocation {
     bool in_use;
     enum mem_service_managed_state state;
@@ -183,6 +210,8 @@ struct mem_service_managed_table {
     const struct mem_service_managed_backing_ops *backing_ops;
     void *backing_context;
     uint64_t next_generation;
+    uint64_t next_mapping_id;
+    struct mem_service_managed_mapping mappings[MEM_SERVICE_MANAGED_MAX_MAPPINGS];
     uint64_t allocate_ok_count;
     uint64_t acquire_ok_count;
     uint64_t release_ok_count;
@@ -348,5 +377,18 @@ enum mem_service_managed_result mem_service_managed_reclaim(
 void mem_service_managed_stats_snapshot(
     const struct mem_service_managed_table *table,
     struct mem_service_managed_stats *stats_out);
+
+/* BEGIN requires mapping_id=0. Other actions require the exact issued ID.
+ * CLOSE must precede provider teardown; FINISH requires confirmed teardown.
+ * CANCEL applies only to a pending attempt with no remaining provider resource.
+ * Missing/stale IDs fail closed. Wire idempotency handles completed retries. */
+enum mem_service_managed_result mem_service_managed_mapping_transition(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *session_id,
+    uint64_t generation,
+    uint64_t mapping_id,
+    enum mem_service_managed_mapping_action action,
+    struct mem_service_managed_mapping *mapping_out);
 
 #endif
