@@ -1977,8 +1977,8 @@ int main(int argc, char **argv)
         fixtures = self._run_client("release-fixtures")
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
         self.assertIn("status=ok", fixtures.stdout)
-        self.assertIn("public_headers=11", fixtures.stdout)
-        self.assertIn("client_sources=3", fixtures.stdout)
+        self.assertIn("public_headers=14", fixtures.stdout)
+        self.assertIn("client_sources=4", fixtures.stdout)
         self.assertIn("provider_sources=2", fixtures.stdout)
         self.assertIn("examples=2", fixtures.stdout)
         self.assertIn("compat_artifacts=3", fixtures.stdout)
@@ -2022,8 +2022,8 @@ int main(int argc, char **argv)
         self.assertIn("retention_smokes=1", fixtures.stdout)
         self.assertIn("payload_gc_smokes=1", fixtures.stdout)
         self.assertIn("record_retention_smokes=1", fixtures.stdout)
-        self.assertIn("package_manifest_len=9703", fixtures.stdout)
-        self.assertIn("package_manifest_checksum=0x375851a6", fixtures.stdout)
+        self.assertIn("package_manifest_len=9814", fixtures.stdout)
+        self.assertIn("package_manifest_checksum=0x9462b0e1", fixtures.stdout)
         self.assertIn("metrics_http_listeners=1", fixtures.stdout)
         self.assertIn("metrics_scrape_paths=1", fixtures.stdout)
         self.assertIn("compat_runtime_smokes=1", fixtures.stdout)
@@ -2048,8 +2048,8 @@ int main(int argc, char **argv)
         self.assertIn("wire_version=1", version.stdout)
         self.assertIn("wire_schema_manifest_checksum=0x62fe2d5d", version.stdout)
         self.assertIn("api_abi_policy_checksum=0x5e460a87", version.stdout)
-        self.assertIn("package_manifest_len=9703", version.stdout)
-        self.assertIn("package_manifest_checksum=0x375851a6", version.stdout)
+        self.assertIn("package_manifest_len=9814", version.stdout)
+        self.assertIn("package_manifest_checksum=0x9462b0e1", version.stdout)
         self.assertIn("release_manifest_command=release-manifest", version.stdout)
         self.assertIn("package_manifest_command=package-manifest", version.stdout)
         self.assertIn("config_security_gate=config-fixtures", version.stdout)
@@ -2059,16 +2059,16 @@ int main(int argc, char **argv)
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("service_version=0.1.0", fixtures.stdout)
-        self.assertIn("package_manifest_len=9703", fixtures.stdout)
-        self.assertIn("package_manifest_checksum=0x375851a6", fixtures.stdout)
+        self.assertIn("package_manifest_len=9814", fixtures.stdout)
+        self.assertIn("package_manifest_checksum=0x9462b0e1", fixtures.stdout)
 
     def test_release_readiness_cli_reports_external_certification_blockers(self):
         readiness = self._run_client("release-readiness")
         self.assertEqual(readiness.returncode, 0, readiness.stderr + readiness.stdout)
         self.assertIn("mem_service_release_readiness_version=1", readiness.stdout)
         self.assertIn("readiness_contract=text-kv", readiness.stdout)
-        self.assertIn("package_manifest_len=9703", readiness.stdout)
-        self.assertIn("package_manifest_checksum=0x375851a6", readiness.stdout)
+        self.assertIn("package_manifest_len=9814", readiness.stdout)
+        self.assertIn("package_manifest_checksum=0x9462b0e1", readiness.stdout)
         self.assertIn(
             "installed_sdk_preflight=scripts/verify_mem_service_installed_sdk.sh --preflight",
             readiness.stdout,
@@ -2150,7 +2150,7 @@ int main(int argc, char **argv)
             "evidence_os=linux\n"
             "evidence_init=systemd\n"
             "ops_certification_policy_checksum=0xe77c644b\n"
-            "package_manifest_checksum=0x375851a6\n"
+            "package_manifest_checksum=0x9462b0e1\n"
             "linux_systemd_service_smoke=pass\n"
             "linux_systemd_host_service_smoke=pass\n"
             "prometheus_scrape_smoke=pass\n"
@@ -2165,7 +2165,7 @@ int main(int argc, char **argv)
             "transport_backend=transport-tcp-block-v1\n"
             "transport_protocol=tcp-ipv4\n"
             "transport_topology=cross-host\n"
-            "package_manifest_checksum=0x375851a6\n"
+            "package_manifest_checksum=0x9462b0e1\n"
             "source_address_non_loopback=pass\n"
             "payload_block_round_trip=pass\n"
             "payload_checksum_validation=pass\n"
@@ -2201,7 +2201,7 @@ int main(int argc, char **argv)
             "evidence_os=linux\n"
             "evidence_init=systemd\n"
             "ops_certification_policy_checksum=0xe77c644b\n"
-            "package_manifest_checksum=0x375851a6\n"
+            "package_manifest_checksum=0x9462b0e1\n"
             "linux_systemd_service_smoke=pass\n"
             "linux_systemd_host_service_smoke=pass\n"
             "prometheus_scrape_smoke=pass\n"
@@ -2216,7 +2216,7 @@ int main(int argc, char **argv)
             "transport_backend=transport-tcp-block-v1\n"
             "transport_protocol=tcp-ipv4\n"
             "transport_topology=cross-host\n"
-            "package_manifest_checksum=0x375851a6\n"
+            "package_manifest_checksum=0x9462b0e1\n"
             "source_address_non_loopback=pass\n"
             "payload_block_round_trip=pass\n"
             "payload_checksum_validation=pass\n"
@@ -2318,9 +2318,9 @@ int main(int argc, char **argv)
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
         self.assertIn("status=ok", fixtures.stdout)
         self.assertIn("package_format=installed-layout-v1", fixtures.stdout)
-        self.assertIn("manifest_len=9703", fixtures.stdout)
-        self.assertIn("manifest_checksum=0x375851a6", fixtures.stdout)
-        self.assertIn("installed_files=52", fixtures.stdout)
+        self.assertIn("manifest_len=9814", fixtures.stdout)
+        self.assertIn("manifest_checksum=0x9462b0e1", fixtures.stdout)
+        self.assertIn("installed_files=56", fixtures.stdout)
         self.assertIn("required_gates=34", fixtures.stdout)
 
         manifest = self._run_client("package-manifest")
@@ -2698,7 +2698,7 @@ int main(int argc, char **argv)
             "evidence_os=linux\n"
             "evidence_init=systemd\n"
             "ops_certification_policy_checksum=0xe77c644b\n"
-            "package_manifest_checksum=0x375851a6\n"
+            "package_manifest_checksum=0x9462b0e1\n"
             "linux_systemd_service_smoke=pass\n"
             "linux_systemd_host_service_smoke=pass\n"
             "prometheus_scrape_smoke=pass\n"
@@ -2744,7 +2744,7 @@ int main(int argc, char **argv)
             generated.stdout,
         )
         self.assertIn("ops_certification_policy_checksum=0xe77c644b", generated.stdout)
-        self.assertIn("package_manifest_checksum=0x375851a6", generated.stdout)
+        self.assertIn("package_manifest_checksum=0x9462b0e1", generated.stdout)
         self.assertIn("rpm_package_smoke=fail", generated.stdout)
 
         with tempfile.TemporaryDirectory(prefix="msvc_ops_probe_", dir=str(_tmp_parent())) as tmp:
@@ -2944,7 +2944,7 @@ int main(int argc, char **argv)
             "transport_backend=transport-tcp-block-v1\n"
             "transport_protocol=tcp-ipv4\n"
             "transport_topology=cross-host\n"
-            "package_manifest_checksum=0x375851a6\n"
+            "package_manifest_checksum=0x9462b0e1\n"
             "source_address_non_loopback=pass\n"
             "payload_block_round_trip=pass\n"
             "payload_checksum_validation=pass\n"
@@ -4671,7 +4671,7 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
                 manifest.read_text(),
             )
             self.assertIn("package_format=installed-layout-v1", manifest.read_text())
-            self.assertIn("package_manifest_checksum=0x375851a6", manifest.read_text())
+            self.assertIn("package_manifest_checksum=0x9462b0e1", manifest.read_text())
             self.assertIn(
                 "installed_sdk_preflight=scripts/verify_mem_service_installed_sdk.sh --preflight",
                 manifest.read_text(),
@@ -5033,7 +5033,7 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
                 "rpm_package_runtime=requires-linux-rpm-toolchain",
                 package_manifest.read_text(),
             )
-            self.assertIn("installed_file_count=52", package_manifest.read_text())
+            self.assertIn("installed_file_count=56", package_manifest.read_text())
             self.assertIn("pkgconfig=lib/pkgconfig/lingqu-mem-service.pc", package_manifest.read_text())
             self.assertIn("pkgconfig_name=lingqu-mem-service", package_manifest.read_text())
             self.assertIn("pkgconfig_cflags=-I${includedir}", package_manifest.read_text())
@@ -5325,6 +5325,24 @@ class MemServiceReleaseInstallTests(unittest.TestCase):
             smoke_dir = package_out / "installed-sdk-example-smoke"
             self.assertTrue((smoke_dir / "mem_service_serving_example").exists())
             self.assertTrue((smoke_dir / "mem_service_pretraining_example").exists())
+
+    def test_installed_mapping_owner_uses_public_sdk_files(self):
+        app_dir = ROOT / "apps" / "mem_service"
+        with tempfile.TemporaryDirectory(prefix="msvc_owner_install_", dir=str(_tmp_parent())) as tmp:
+            destdir, package_out = Path(tmp) / "destdir", Path(tmp) / "out"
+            result = subprocess.run(
+                ["make", "-C", str(app_dir), "CC=cc", "CFLAGS=-O2 -Wall -Wextra",
+                 f"DESTDIR={destdir}", f"PACKAGE_OUT_DIR={package_out}", "PREFIX=/usr",
+                 "installed-mapping-owner-smoke"], cwd=REPO_ROOT,
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("mapping_owner_native=pass threads=8 owners=2 callbacks=800", result.stdout)
+            pc = (destdir / "usr/lib/pkgconfig/lingqu-mem-service.pc").read_text()
+            self.assertIn("mapping_owner_sources=${sourcedir}/mem_service_mapping_owner.c", pc)
+            self.assertIn("mapping_owner_libs=-pthread", pc)
+            self.assertTrue((destdir / "usr/include/lingqu/mem_service/mem_service_mapping_owner.h").is_file())
+            self.assertTrue((destdir / "usr/src/lingqu/mem_service/mem_service_mapping_owner.c").is_file())
 
     @unittest.skipUnless(shutil.which("pkg-config"), "pkg-config is required")
     def test_installed_sdk_pkgconfig_smoke_builds_external_clients(self):

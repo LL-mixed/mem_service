@@ -10,6 +10,14 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+AM2 的统一访问 owner 采用新增中立 `mem_service_mapping_owner.h/.c`，显式链接
+该源文件及 `-pthread`。同一 provider channel 的多个 owner 共用 access domain；
+平台 setup/teardown 与域内运行分阶段，运行中不绕过 domain 调用 raw provider。
+成功 adopt 转移当前 mapping/lifecycle 及同一 holder，CPU/compute borrow 保持
+原映射。close 停止新借用，全部访问退出后才解除映射并释放 holder；失败保留句柄。
+最终 destroy 要求所有调用线程已退出。业务仍通过 SDK/compute adapter 使用对象，
+不解析 provider 身份。此为待实现的接入契约，实际并发能力以对应 guest 证据为准。
+
 PTO 平台 adapter 可通过 OBMM provider 的 mapping pin 接口借用当前 SDK 严格
 import 视图。pin 保留原 VMA/import/fd，provider 在 pin 存在时拒绝解除映射，
 PTO registration 确认注销后方可释放 pin。接口仅供平台适配层使用，模型不解析

@@ -1,5 +1,12 @@
 # ds4 使用侧适配手册
 
+新增的中立 mapping owner 模块供受管理映射消费者显式采用，安装态通过
+`mapping_owner_sources` 与 `mapping_owner_libs` 查询，后者为 `-pthread`。
+原 `sdk_sources`、已有 public record/wire 布局和 DS4 transfer 热路径保持不变。
+采用时须由单一 access domain 串行化同一 provider 的所有运行期访问，并将原
+mapping/lifecycle/holder 转交 owner；接管后的 raw 结构不可继续使用。close 与
+最终 destroy 分离，后者要求调用线程已退出。该扩展仍在 AM2 实施阶段。
+
 OBMM mapping pin 接口只供显式 opt-in 的平台 compute adapter 保留现有严格
 import 视图的归属。DS4 serving 无需调用，现有 RoCE/TCP 热路径、安装 SDK 的
 中立 binding 和 wire 布局均不变；该接口不提供跨进程或并发 holder 管理。

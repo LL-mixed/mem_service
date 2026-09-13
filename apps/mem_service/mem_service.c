@@ -61,9 +61,9 @@
 #define MEM_SERVICE_REMOTE_TRANSPORT_EVIDENCE_VERSION 1U
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x375851a6U
-#define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9814U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x9462b0e1U
+#define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 56U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
 #define MEM_SERVICE_NATIVE_DEB_NAME "linqu-mem-service_0.1.0-1_arm64.deb"
@@ -2969,6 +2969,10 @@ static int render_package_manifest(char *manifest,
                                 manifest_len,
                                 &used,
                                 "pkgconfig_sdk_sources=${sourcedir}/mem_service_client.c ${sourcedir}/mem_service_wire_client.c ${sourcedir}/mem_service_provider.c\n") != 0 ||
+        append_wire_schema_line(manifest, manifest_len, &used,
+                                "pkgconfig_mapping_owner_sources=${sourcedir}/mem_service_mapping_owner.c\n") != 0 ||
+        append_wire_schema_line(manifest, manifest_len, &used,
+                                "pkgconfig_mapping_owner_libs=-pthread\n") != 0 ||
         append_wire_schema_line(manifest,
                                 manifest_len,
                                 &used,
@@ -3221,11 +3225,11 @@ static int render_package_manifest(char *manifest,
         append_wire_schema_line(manifest,
                                 manifest_len,
                                 &used,
-                                "file_class=public_headers count=11\n") != 0 ||
+                                "file_class=public_headers count=14\n") != 0 ||
         append_wire_schema_line(manifest,
                                 manifest_len,
                                 &used,
-                                "file_class=client_sources count=3\n") != 0 ||
+                                "file_class=client_sources count=4\n") != 0 ||
         append_wire_schema_line(manifest,
                                 manifest_len,
                                 &used,
@@ -5304,6 +5308,8 @@ static int run_release_manifest(void)
     printf("pkgconfig_name=lingqu-mem-service\n");
     printf("pkgconfig_cflags=-I${includedir}\n");
     printf("pkgconfig_sdk_sources=${sourcedir}/mem_service_client.c ${sourcedir}/mem_service_wire_client.c ${sourcedir}/mem_service_provider.c\n");
+    printf("pkgconfig_mapping_owner_sources=${sourcedir}/mem_service_mapping_owner.c\n");
+    printf("pkgconfig_mapping_owner_libs=-pthread\n");
     printf("pkgconfig_payload_provider_roce_sources=${sourcedir}/mem_service_provider_roce.c\n");
     printf("pkgconfig_payload_provider_roce_libs=-lrdmacm -libverbs\n");
     printf("pkgconfig_payload_provider_tcp_sources=${sourcedir}/mem_service_provider_tcp.c\n");
@@ -5441,8 +5447,11 @@ static int run_release_manifest(void)
     printf("client_api=pretraining-refs-v1\n");
     printf("client_api=pretraining-step-commit-v1\n");
     printf("public_header=include/lingqu/mem_service/mem_service.h\n");
+    printf("public_header=include/lingqu/mem_service/mem_service_allocation.h\n");
+    printf("public_header=include/lingqu/mem_service/mem_service_provider_directory.h\n");
     printf("public_header=include/lingqu/mem_service/mem_service_core.h\n");
     printf("public_header=include/lingqu/mem_service/mem_service_client.h\n");
+    printf("public_header=include/lingqu/mem_service/mem_service_mapping_owner.h\n");
     printf("public_header=include/lingqu/mem_service/mem_service_provider.h\n");
     printf("public_header=include/lingqu/mem_service/mem_service_provider_roce.h\n");
     printf("public_header=include/lingqu/mem_service/mem_service_provider_tcp.h\n");
@@ -5452,6 +5461,7 @@ static int run_release_manifest(void)
     printf("public_header=include/lingqu/mem_service/mem_service_wire_schema.h\n");
     printf("public_header=include/lingqu/mem_service/lingqu_object_service.h\n");
     printf("client_source=src/lingqu/mem_service/mem_service_client.c\n");
+    printf("client_source=src/lingqu/mem_service/mem_service_mapping_owner.c\n");
     printf("client_source=src/lingqu/mem_service/mem_service_wire_client.c\n");
     printf("client_source=src/lingqu/mem_service/mem_service_provider.c\n");
     printf("provider_source=src/lingqu/mem_service/mem_service_provider_roce.c\n");
@@ -5576,7 +5586,7 @@ static int run_release_fixture_check(void)
     }
     if (MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN == 0U ||
         MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM == 0U ||
-        MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT != 52U ||
+        MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT != 56U ||
         MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT != 34U) {
         fprintf(stderr, "mem_service release-fixtures: package manifest fixture missing\n");
         failures -= 1;
@@ -5624,7 +5634,7 @@ static int run_release_fixture_check(void)
         return 1;
     }
     printf("mem_service release-fixtures: status=ok manifest_version=1 "
-           "public_headers=11 client_sources=3 provider_sources=2 "
+           "public_headers=14 client_sources=4 provider_sources=2 "
            "examples=2 config_artifacts=6 "
            "host_artifacts=1 "
            "package_artifacts=4 "

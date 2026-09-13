@@ -63,7 +63,40 @@ SDK 向 provider 请求逻辑视图长度，同时单独传递 backing 的完整
 的对齐空间。尚未发布的取消请求保持 `in_flight`，已确认 backing/address 占用为
 零；这两个计数无法证明 home 从未创建资源，仍必须等待 home 的取消确认。
 
-## 受管理资源的清理容量
+## 受管理访问 owner（AM2 实施契约）
+
+新增中立 SDK 模块 `mem_service_mapping_owner.h/.c`。一个 access domain 借用一个
+已就绪 provider channel，并用同一 mutex 串行化域内全部生命周期和 provider
+callback；channel、registry 和 endpoint 必须保留到 domain 销毁，域外不得并发
+操作它们。多个 mapping owner 共用该 domain，避免每对象各自加锁后仍竞争同一
+provider。该约定不把已有 raw provider 接口宣称为线程安全。
+
+owner 接管已经成功 map 的 SDK mapping/lifecycle 及其同一 holder，成功时清零
+调用方的两个原结构，失败时不改变原归属。接管前核对服务端当前 mapping 事务，
+拒绝关闭后的旧快照、域内重复 mapping/holder，不另建对象或映射。CPU borrow 与
+compute borrow 各自持有有界访问 pin；计算开始后额外计量 in-flight pin，只有
+平台确认原 operation 的 completion 才能结束。超时和取消请求不能释放该 pin。
+borrow 只保护寿命，应用仍须为重叠数据的读写建立 publish/acquire 顺序。
+
+close 先停止新 borrow，在用 pin 返回 EBUSY；已有 borrow 继续有效。最后 pin
+退出后依次执行原 managed unmap 和同一 holder 的幂等 release，失败保留 owner
+供重试。close 不释放 owner 的进程内句柄；线程退出后显式 destroy，避免与仍在
+调用的线程竞争 free。borrow 本身只由其持有线程释放，平台 callback 不得重入
+domain API。统计区分 CPU pins、compute pins、in-flight pins 和清理状态。
+
+该模块显式 opt-in，使用 pthread；旧 SDK source 集合与 wire/record ABI 不变。
+CLI 接入沿用 ub_sim 的 managed PTO 入口，先通过原生并发/故障 fixture，再要求
+真实双节点同 backing、并发在用拒绝关闭及最终资源回归。此段定义实现和验收要求，
+当前不构成已完成声明。
+
+原生并发与故障诊断入口为 `make -C apps/mem_service mapping-owner-smoke`，以及
+`python3 -m unittest tests.test_mem_service_mapping_owner`。安装态附加查询
+`pkg-config --variable=mapping_owner_sources lingqu-mem-service` 和
+`--variable=mapping_owner_libs`，与原 `sdk_sources` 一起链接；不启用该模块的
+消费者不新增 pthread 依赖。fixture 使用生产 owner、真实线程和 mutex，控制与
+provider 边界由替身承接，不能计作实际 guest 或崩溃恢复证明。
+
+## 受管理资源的清理容量（现有协议）
 
 daemon 接纳新请求时，必须在幂等结果表中预留已有资源完成正常清理所需的空间：
 每个 ALLOCATING/ACTIVE 对象保留一次 retire，每个 holder 保留一次 release，
