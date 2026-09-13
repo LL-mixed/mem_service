@@ -95,6 +95,10 @@ guest 验证；跨进程崩溃恢复仍由恢复阶段实现。
 with `GVA_MANAGER_ROOT` pointing to the shared platform library directory.
 Its strict config contains `connect`, `node_id`, `incarnation`,
 `readiness_generation`, `state_file`, and `allocation_granularity_bytes`.
+Optional `fast_allocation=0|1` defaults to 0. When enabled, the checked export
+uses only the kernel's already-cleared cached pool pages without slow-path expansion;
+pool pressure can therefore reject an allocation even when other system RAM
+is available. This provider setting is useful for bounded pool validation.
 The granularity must match the deployed OBMM pool profile (2097152 for the
 2 MiB guest profile); it is a power of two, at least the system page size.
 Logical object sizes remain unchanged. Backing and address reservations are
@@ -131,10 +135,21 @@ address overflow, or insufficient remaining aperture is a deterministic
 capacity rejection. The rejected allocation becomes RETIRED, with no
 descriptor or address; `inspect-allocation`/`object-session wait_state` expose
 that terminal state, and the worker reports `reason=address_capacity`.
-This path does not reclaim or reuse previously retired addresses. Kernel or
-export errors still require reconciliation; an errno alone does not prove
+This path does not reclaim or reuse previously retired addresses. Uncertain
+kernel/export errors still require reconciliation; an errno alone does not prove
 that no resource was created. Uncertain cancellation acknowledgements also
 stop the worker with its state file retained.
+
+Managed backing uses the platform's checked GSVA export v1 ioctl. A successful
+NO_BACKING receipt is distinct from an ioctl error: the kernel confirms that
+the pool/sgtable attempt left no export backing. The worker records this
+receipt, retires its known segment, and only then cancels and confirms the
+unpublished service object (`reason=backing_allocation`). The address cursor
+is not rewound. Failed retirement or cancellation retains the reservation.
+Old kernels reject the new ioctl; the worker never retries ordinary export.
+The kernel also pins the segment during checked export and while its export
+handle exists, preventing early segment retirement. These changes require a
+matching platform build and their own actual guest validation.
 
 Cancelling an unpublished allocation leaves it RETIRING until its bound home
 worker confirms cleanup. A late publish attaches the reservation to that

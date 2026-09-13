@@ -22,10 +22,12 @@ struct worker_config {
     uint64_t incarnation;
     uint64_t readiness_generation;
     uint64_t allocation_granularity_bytes;
+    bool fast_allocation;
 };
 
 struct worker_reservation {
     bool occupied;
+    bool export_no_backing;
     char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
     uint64_t generation;
     struct obmm_gsva_segment_desc_v1 segment;
@@ -38,6 +40,7 @@ enum worker_allocate_result {
     WORKER_ALLOCATE_OK = 0,
     /* Proven before any resource-creating ioctl or reservation mutation. */
     WORKER_ALLOCATE_CAPACITY = 1,
+    WORKER_ALLOCATE_BACKING_EMPTY = 2,
 };
 
 static volatile sig_atomic_t worker_stop;
@@ -52,7 +55,7 @@ static int read_config(const char *path, struct worker_config *config)
 {
     static const char *names[] = {
         "connect", "node_id", "state_file", "incarnation", "readiness_generation",
-        "allocation_granularity_bytes"
+        "allocation_granularity_bytes", "fast_allocation"
     };
     FILE *file = fopen(path, "r");
     char line[2048];
@@ -86,13 +89,14 @@ static int read_config(const char *path, struct worker_config *config)
             if (*value < '0' || *value > '9') goto done;
             errno = 0;
             number = strtoull(value, &end, 0);
-            if (errno || *end || !number) goto done;
+            if (errno || *end || (i != 6 && !number) || (i == 6 && number > 1)) goto done;
             if (i == 3) config->incarnation = number;
             else if (i == 4) config->readiness_generation = number;
-            else config->allocation_granularity_bytes = number;
+            else if (i == 5) config->allocation_granularity_bytes = number;
+            else config->fast_allocation = number != 0;
         }
     }
-    if (!ferror(file) && seen == 63U && config->state[0] == '/' &&
+    if (!ferror(file) && (seen & 63U) == 63U && config->state[0] == '/' &&
         !(config->allocation_granularity_bytes & (config->allocation_granularity_bytes - 1)) &&
         sysconf(_SC_PAGESIZE) > 0 &&
         config->allocation_granularity_bytes >= (uint64_t)sysconf(_SC_PAGESIZE)) result = 0;
@@ -160,6 +164,7 @@ static int allocate_work(int device, int journal,
     uint64_t granularity = config->allocation_granularity_bytes;
     uint64_t backing_size;
     long page_size = sysconf(_SC_PAGESIZE);
+    int export_result;
 
     if (strcmp(work->state, "allocating") || work->capabilities != MEM_SERVICE_MANAGED_CAP_MAP ||
         strcmp(work->home_node, config->node) ||
@@ -208,8 +213,16 @@ static int allocate_work(int device, int journal,
     if (request.desc.home_va < aperture->base ||
         request.desc.home_va - aperture->base > aperture->size ||
         request.desc.size > aperture->size - (request.desc.home_va - aperture->base)) return -1;
-    if (gva_manager_export_segment(device, &request.desc, &exported)) {
+    export_result = gva_manager_export_segment_checked(device, &request.desc,
+                                                      config->fast_allocation, &exported);
+    if (export_result) {
         reservation->exported = exported;
+        if (export_result == 1) {
+            reservation->export_no_backing = true;
+            if (record_phase(journal, work->generation, "export-no-backing",
+                             request.desc.segment_id, 0)) return -1;
+            return WORKER_ALLOCATE_BACKING_EMPTY;
+        }
         (void)record_phase(journal, work->generation, "export-unknown",
                            request.desc.segment_id, exported.mem_id);
         return -1;
@@ -298,16 +311,17 @@ static int cancel_unreserved_work(int journal, const struct worker_config *confi
     return 0;
 }
 
-static int reject_capacity_work(int journal, const struct worker_config *config,
-    const struct mem_service_client *client, const struct mem_service_client_allocation *work)
+static int cancel_unbacked_work(int journal, const struct worker_config *config,
+    const struct mem_service_client *client, const struct mem_service_client_allocation *work,
+    const char *reason)
 {
     struct mem_service_client_allocation cancelled;
     enum mem_service_wire_status status;
     char operation[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
     int length;
 
-    /* Only the no-ioctl capacity result may reach this path. Never use a
-     * provider/kernel error code as evidence that no reservation exists. */
+    /* Requires no resource-creating attempt, or a NO_BACKING receipt followed
+     * by confirmed segment retirement. An errno alone never authorizes this. */
     if (strcmp(work->state, "allocating") || work->provider_backed ||
         work->descriptor_len || work->address || work->address_len ||
         work->holder_count || work->live_refs || !work->generation ||
@@ -322,10 +336,41 @@ static int reject_capacity_work(int journal, const struct worker_config *config,
         status != MEM_SERVICE_WIRE_STATUS_OK ||
         strcmp(cancelled.key, work->key) || cancelled.generation != work->generation ||
         cancel_unreserved_work(journal, config, client, &cancelled)) return -1;
-    printf("obmm-worker generation=%" PRIu64 " state=retired reason=address_capacity "
+    printf("obmm-worker generation=%" PRIu64 " state=retired reason=%s "
            "size=%" PRIu64 " alignment=%" PRIu64 "\n",
-           work->generation, work->size_bytes, work->alignment_bytes);
+           work->generation, reason, work->size_bytes, work->alignment_bytes);
     fflush(stdout);
+    return 0;
+}
+
+static int reject_capacity_work(int journal, const struct worker_config *config,
+    const struct mem_service_client *client, const struct mem_service_client_allocation *work)
+{
+    return cancel_unbacked_work(journal, config, client, work, "address_capacity");
+}
+
+static int rollback_unbacked_work(int device, int journal, const struct worker_config *config,
+    const struct mem_service_client *client, const struct mem_service_client_allocation *work,
+    struct worker_reservation *reservation)
+{
+    struct obmm_cmd_gsva_retire_segment_v1 retire = {0};
+
+    if (strcmp(work->state, "allocating") || strcmp(work->home_node, config->node) ||
+        work->provider_incarnation != config->incarnation ||
+        !reservation->occupied || !reservation->export_no_backing ||
+        strcmp(reservation->key, work->key) || reservation->generation != work->generation ||
+        reservation->descriptor.len || reservation->exported.mem_id ||
+        reservation->exported.tokenid || reservation->exported.uba ||
+        reservation->exported.size[0]) return -1;
+    retire.version = OBMM_GSVA_ABI_VERSION;
+    retire.segment_id = reservation->segment.segment_id;
+    retire.epoch = reservation->segment.epoch;
+    retire.timeout_ms = 5000;
+    if (record_phase(journal, work->generation, "unbacked-retire-intent", retire.segment_id, 0) ||
+        gva_manager_retire_segment(device, &retire) ||
+        record_phase(journal, work->generation, "unbacked-retired", retire.segment_id, 0) ||
+        cancel_unbacked_work(journal, config, client, work, "backing_allocation")) return -1;
+    memset(reservation, 0, sizeof(*reservation));
     return 0;
 }
 
@@ -419,6 +464,9 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
                     &client, &aperture, &work, available, &next_address);
             if (allocation_result == WORKER_ALLOCATE_CAPACITY) {
                 if (available->occupied || reject_capacity_work(journal, &config, &client, &work))
+                    goto done;
+            } else if (allocation_result == WORKER_ALLOCATE_BACKING_EMPTY) {
+                if (rollback_unbacked_work(device, journal, &config, &client, &work, available))
                     goto done;
             } else if (allocation_result != WORKER_ALLOCATE_OK) goto done;
         } else if (!strcmp(work.state, "retiring")) {
