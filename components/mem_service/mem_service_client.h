@@ -679,6 +679,10 @@ int mem_service_client_unmap_allocation(
  * each map, never replay map into a new context. Map is called once; after any
  * CLEANUP_REQUIRED result, retry managed unmap with the same two outputs.
  * Keep the holder until pending becomes false. No restart recovery is implied.
+ * Before BEGIN, map checks all immutable binding fields against a fresh
+ * service snapshot. A mismatch fails with STALE_REF without reserving a
+ * transaction. BEGIN then revalidates generation/state/holder; uncertain
+ * results after BEGIN retain the same lifecycle for cleanup.
  * Old raw map/unmap APIs above do not update the service mapping ledger.
  */
 struct mem_service_client_mapping_lifecycle {

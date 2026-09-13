@@ -35,6 +35,8 @@ class MemServiceManagedMappingFaultTests(unittest.TestCase):
                                     text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("managed_mapping_faults=pass scenarios=11", result.stdout)
+            self.assertIn("managed_binding_integrity=pass mutations=108 preflight_failures=2",
+                          result.stdout)
 
 
 class MemServiceManagedMappingTests(unittest.TestCase):

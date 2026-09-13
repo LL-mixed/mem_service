@@ -2052,6 +2052,30 @@ complete:
     return 0;
 }
 
+static bool mem_service_client_allocation_binding_matches(
+    const struct mem_service_client_allocation *supplied,
+    const struct mem_service_client_allocation *current)
+{
+    /* Only immutable binding fields participate; other holders can change
+     * counts and record versions between the snapshot and mapping admission. */
+    return memchr(supplied->state, '\0', sizeof(supplied->state)) &&
+        memchr(supplied->home_node, '\0', sizeof(supplied->home_node)) &&
+        !strcmp(supplied->key, current->key) &&
+        !strcmp(supplied->state, "active") && !strcmp(current->state, "active") &&
+        supplied->generation == current->generation &&
+        supplied->size_bytes == current->size_bytes &&
+        supplied->alignment_bytes == current->alignment_bytes &&
+        supplied->capabilities == current->capabilities &&
+        supplied->provider_backed && current->provider_backed &&
+        !strcmp(supplied->home_node, current->home_node) &&
+        supplied->provider_incarnation == current->provider_incarnation &&
+        supplied->address == current->address &&
+        supplied->address_len == current->address_len &&
+        supplied->descriptor_len <= sizeof(supplied->descriptor) &&
+        supplied->descriptor_len == current->descriptor_len &&
+        !memcmp(supplied->descriptor, current->descriptor, supplied->descriptor_len);
+}
+
 int mem_service_client_map_managed_allocation(
     const struct mem_service_client *client,
     const struct mem_service_provider_channel *channel,
@@ -2062,6 +2086,7 @@ int mem_service_client_map_managed_allocation(
     enum mem_service_wire_status *status_out)
 {
     char validation[256] = "";
+    struct mem_service_client_allocation current;
     enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
     int rc;
 
@@ -2085,6 +2110,18 @@ int mem_service_client_map_managed_allocation(
     snprintf(lifecycle->session_id, sizeof(lifecycle->session_id), "%s", session_id);
     snprintf(mapping->key, sizeof(mapping->key), "%s", allocation->key);
     mapping->generation = allocation->generation;
+    /* Reject stale caller views before reserving transaction/idempotency
+     * capacity. BEGIN revalidates generation/state/holder after this read;
+     * the service never replaces an ACTIVE generation's published binding. */
+    if (mem_service_client_inspect_allocation(client, mapping->key,
+            &current, &status) != 0) {
+        mem_service_client_set_status(status_out, status);
+        return -1;
+    }
+    if (!mem_service_client_allocation_binding_matches(allocation, &current)) {
+        mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_STALE_REF);
+        return -1;
+    }
     lifecycle->pending = true;
     rc = mem_service_client_mapping_step(client, mapping, lifecycle,
         MEM_SERVICE_CLIENT_MAPPING_BEGIN, &status);
@@ -2103,7 +2140,7 @@ int mem_service_client_map_managed_allocation(
     if (mem_service_client_mapping_step(client, mapping, lifecycle,
             MEM_SERVICE_CLIENT_MAPPING_INSPECT, &status) != 0 ||
         lifecycle->transaction.state != 1) goto failed;
-    rc = mem_service_client_map_allocation(channel, allocation, flags, mapping);
+    rc = mem_service_client_map_allocation(channel, &current, flags, mapping);
     if (rc != 0) {
         status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
         goto failed;

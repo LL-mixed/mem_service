@@ -848,6 +848,49 @@ class MemServiceObjectSessionTests(unittest.TestCase):
         finally:
             self._stop_server(daemon)
 
+    def test_mapping_binding_faults_reject_without_changing_original_view(self):
+        daemon = self._start_active_object()
+        try:
+            faults = [f"fault=descriptor fault_byte={byte}" for byte in range(4)]
+            faults += [f"fault={name}" for name in (
+                "descriptor_length", "descriptor_oversize", "address", "address_len",
+                "size", "alignment", "capabilities", "home", "incarnation",
+            )]
+            config = self._write_session("binding-faults.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=binding-acquire",
+                *[f"map key=obj-1 flags=read {fault} expect_status=stale_ref"
+                  for fault in faults * 3],
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=64 seed=23",
+                "read key=obj-1 offset=0 len=64 seed=23",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=binding-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.count("status=stale_ref note=map_failed"), 39)
+            self.assertEqual(result.stdout.count("action=map key=obj-1 status=ok"), 1)
+            self.assertIn("result=ok ops=45", result.stdout)
+            stats = self._allocation_stats()
+            self.assertEqual(stats["live_refs"], "0")
+            self.assertEqual(stats["import_mappings"], "0")
+            self.assertEqual(stats["in_flight"], "0")
+        finally:
+            self._stop_server(daemon)
+
+    def test_mapping_fault_config_rejects_unknown_or_unbounded_mutations(self):
+        for fields in ("fault=unknown expect_status=stale_ref",
+                       "fault=descriptor", "fault=home expect_status=ok",
+                       "fault_byte=0 expect_status=stale_ref",
+                       "fault=home fault_byte=0 expect_status=stale_ref",
+                       "fault=descriptor fault_byte=18446744073709551615 expect_status=stale_ref",
+                       "fault=descriptor fault_byte=-1 expect_status=stale_ref"):
+            config = self._write_session("bad-map-fault.conf", "unix:/unused", [
+                f"map key=obj-1 {fields}",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
     def test_fixed_address_conflict_preserves_existing_mapping(self):
         daemon = self._start_active_object()
         try:

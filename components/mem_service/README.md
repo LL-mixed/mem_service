@@ -28,6 +28,13 @@ release。`import_mappings` 统计已确认 active/closing 映射，pending/clos
 实际 provider 映射，等待控制状态可确认后再清理；这不构成 CPU 页权限撤销。
 旧 raw map/unmap 接口保留供底层集成，调用它们不会自动登记服务端映射计数。
 
+managed map 先只读查询服务端 allocation，逐项核对不可变绑定和完整 opaque
+descriptor；差异返回 STALE_REF，查询失败直接返回错误，两者都不创建事务或占用
+幂等记录。随后 BEGIN 再检查 generation、ACTIVE 和 holder，防止查询后发生退役
+或换代；同一 ACTIVE generation 的已发布绑定禁止改写。provider 只在 pending
+确认后收到核对过的服务端快照。可变引用计数与版本统计不参与绑定比较。此查询
+只发生在建立映射时，数据访问不新增控制 RPC；BEGIN 后的不确定结果仍保留清理上下文。
+
 `object-session` 的引用跟踪以 `(key, generation, session_id)` 为单位，独立于
 最近一次 inspect 返回的对象。切换 key 或使用显式 session_id 不得丢失尚未释放
 的引用；退出时逐项报告已知未释放的 holder，并返回失败，不自动替客户端 release。

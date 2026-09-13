@@ -154,6 +154,7 @@ static void usage(const char *argv0)
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
     printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict> field=value ...]");
+    printf(" [object-session map diagnostics: fault=<descriptor|descriptor_length|descriptor_oversize|address|address_len|size|alignment|capabilities|home|incarnation> [fault_byte=N for descriptor] expect_status=stale_ref]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -9493,6 +9494,8 @@ struct mem_service_object_session_op {
     uint64_t address_len;
     bool confirmed;
     uint64_t map_flags;
+    char map_fault[32];
+    uint64_t fault_byte;
     uint64_t data_offset;
     uint64_t data_len;
     uint64_t data_seed;
@@ -10119,7 +10122,7 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         "key", "node_id", "incarnation", "generation", "confirmed",
     };
     static const char *const map[] = {
-        "key", "flags",
+        "key", "flags", "fault", "fault_byte",
     };
     static const char *const unmap[] = {
         "key",
@@ -10619,6 +10622,31 @@ static int mem_service_object_session_parse_op(
             mem_service_object_session_config_error(line_no,
                                                     "invalid flags",
                                                     value);
+            return 2;
+        }
+        value = mem_service_object_session_find_field(fields, field_count, "fault");
+        if (value != NULL) {
+            static const char *const faults[] = {
+                "descriptor", "descriptor_length", "descriptor_oversize",
+                "address", "address_len", "size", "alignment", "capabilities",
+                "home", "incarnation",
+            };
+            bool known = false;
+            for (size_t i = 0; i < sizeof(faults) / sizeof(faults[0]); ++i)
+                if (!strcmp(value, faults[i])) known = true;
+            if (!known || op->expect_status != MEM_SERVICE_WIRE_STATUS_STALE_REF ||
+                !mem_service_object_session_copy_field(op->map_fault,
+                    sizeof(op->map_fault), value)) {
+                mem_service_object_session_config_error(line_no,
+                    "map fault requires a known mutation and expect_status=stale_ref", NULL);
+                return 2;
+            }
+        }
+        value = mem_service_object_session_find_field(fields, field_count, "fault_byte");
+        if (value != NULL && (strcmp(op->map_fault, "descriptor") ||
+            !mem_service_object_session_parse_u64(value, &op->fault_byte) ||
+            op->fault_byte >= MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN)) {
+            mem_service_object_session_config_error(line_no, "invalid descriptor fault_byte", NULL);
             return 2;
         }
         break;
@@ -11216,8 +11244,39 @@ static void mem_service_object_session_print_data_op_line(
     if (note != NULL) {
         printf(" note=%s", note);
     }
+    if (op->map_fault[0]) {
+        printf(" fault=%s", op->map_fault);
+        if (!strcmp(op->map_fault, "descriptor"))
+            printf(" fault_byte=%llu", (unsigned long long)op->fault_byte);
+    }
     printf("\n");
     (void)fflush(stdout);
+}
+
+static bool mem_service_object_session_mapping_fault(
+    const struct mem_service_object_session_op *op,
+    struct mem_service_client_allocation *view)
+{
+    const char *fault = op->map_fault;
+    if (!fault[0]) return true;
+    if (!strcmp(fault, "descriptor")) {
+        if (op->fault_byte >= view->descriptor_len ||
+            view->descriptor_len > sizeof(view->descriptor)) return false;
+        view->descriptor[op->fault_byte] ^= 1;
+    } else if (!strcmp(fault, "descriptor_length")) {
+        if (!view->descriptor_len) return false;
+        --view->descriptor_len;
+    } else if (!strcmp(fault, "descriptor_oversize"))
+        view->descriptor_len = sizeof(view->descriptor) + 1;
+    else if (!strcmp(fault, "address")) view->address ^= 4096;
+    else if (!strcmp(fault, "address_len")) view->address_len ^= 4096;
+    else if (!strcmp(fault, "size")) view->size_bytes ^= 1;
+    else if (!strcmp(fault, "alignment")) view->alignment_bytes ^= 4096;
+    else if (!strcmp(fault, "capabilities")) view->capabilities ^= 1ULL << 63;
+    else if (!strcmp(fault, "home")) view->home_node[0] ^= 1;
+    else if (!strcmp(fault, "incarnation")) view->provider_incarnation ^= 1;
+    else return false;
+    return true;
 }
 
 static int mem_service_object_session_finish_data_op(
@@ -11456,6 +11515,7 @@ static int mem_service_object_session_run_op(
     case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT: {
         unsigned char nonce[16];
+        struct mem_service_client_allocation supplied = state->view;
         char operation_id[48] = "sdkmap-";
         bool conflict = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT;
         uint64_t before = 0, probe_len = 0;
@@ -11559,8 +11619,12 @@ static int mem_service_object_session_run_op(
                 0, 0, 0, false);
         for (size_t n = 0; n < sizeof(nonce); ++n)
             snprintf(operation_id + 7 + n * 2, 3, "%02x", nonce[n]);
+        if (!mem_service_object_session_mapping_fault(op, &supplied))
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "mapping_fault_unavailable",
+                0, 0, 0, false);
         rc = mem_service_client_map_managed_allocation(client, &state->channel,
-                &state->view, config->session_id, operation_id,
+                &supplied, config->session_id, operation_id,
                 conflict ? MEM_SERVICE_CLIENT_MAP_READ : op->map_flags,
                 conflict ? &state->conflict_mapping : &state->mapping,
                 conflict ? &state->conflict_lifecycle : &state->mapping_lifecycle, &status);

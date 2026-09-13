@@ -91,6 +91,25 @@ fork 子进程，因此子进程的访问故障不能用于证明原映射的保
 session 的 `provider_import_region_bytes` 同时作为 canary 大小，须满足 pool 粒度
 并覆盖对象 backing。此配置显式描述部署 profile，不代表自动探测硬件能力。
 
+受管理 map 在 BEGIN 事务创建前，通过既有只读 inspect-allocation
+查询核对服务端当前绑定：key/generation、ACTIVE、home/incarnation、size/alignment、
+capabilities、provider-backed、地址/范围和完整不透明 descriptor。任一绑定不匹配
+返回 STALE_REF；查询失败直接返回错误，均不创建 pending mapping 或幂等记录。
+BEGIN 随后检查 generation、ACTIVE 和 holder，同代 ACTIVE 绑定不可改写；查询后
+退役/换代不会使旧快照获准映射。BEGIN 后的不确定结果继续保留清理上下文。
+live_refs、holder 数量等可变统计不参与绑定比较。每次建立映射增加一次元数据
+查询，CPU 正常 load/store 不增加 RPC；raw mapping 兼容入口仍由平台调用方负责
+提供有效引用，不获得此受管理绑定核对保证。该补齐不替代 AM3 的撤销与重用协议。
+
+诊断配置可使用 `op=map key=<key> fault=<name> expect_status=stale_ref`。
+它只改动当前已 acquire 视图的临时副本，原缓存与服务记录保持不变；该副本经同一
+managed SDK 处理。`fault=descriptor fault_byte=<N>` 翻转指定字节，默认 N=0；
+其他名称为 `descriptor_length`、`descriptor_oversize`、`address`、`address_len`、
+`size`、`alignment`、`capabilities`、`home`、`incarnation`。未知名称、其他期望状态
+或对非 descriptor 使用 fault_byte 均拒绝配置；字节不在实际 descriptor 内时诊断
+失败。调用方不能通过此接口指定替代地址或 descriptor 内容。验收必须继续执行
+无 fault 的真实映射与读写，不能仅根据预期拒绝判断对象可用性。
+
 诊断操作 `op=probe_conflict key=<key>` 要求当前 session 已 acquire 且持有可读映射。
 OBMM 路径复用该映射已持有的设备句柄，经 provider 的同一严格映射实现执行
 `MAP_FIXED_NOREPLACE`；不再次 import，不注册重复 GSVA 路由。只有实际 mmap

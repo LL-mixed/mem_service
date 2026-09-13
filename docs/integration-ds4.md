@@ -23,6 +23,12 @@ endpoint，旧 void 关闭入口继续兼容并报告未完成清理。DS4 servi
 新调用需要支持 wire `0x7d` 的服务，旧端明确返回 unsupported；不得退回无映射引用
 保护的访问路径。现有 client record 与 wire header 布局保持不变。
 
+受管理 map 在 BEGIN 前新增只读服务端绑定核对，拒绝陈旧或不匹配的 descriptor、
+home/incarnation、地址和逻辑范围，返回 STALE_REF 且不创建 pending mapping。
+BEGIN 再检查 generation、ACTIVE 和 holder；同代已发布绑定不可改写。
+每次建映射增加一次元数据查询，正常数据访问不增加 RPC。此改变仅影响采用受管理
+CPU mapping 的消费者，不修改 DS4 当前 transfer 热路径、wire opcode 或公开结构布局。
+
 受管理映射消费者可调用 `mem_service_client_map_managed_allocation()` 和
 `mem_service_client_unmap_managed_allocation()` 自动编排事务与 provider；原始
 map/unmap API 保留。新接口增加独立的 lifecycle 结构，不改变已有 mapping 布局。
