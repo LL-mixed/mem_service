@@ -76,6 +76,21 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+### Compute attachment ownership
+
+平台 compute adapter 可从当前 SDK mapping binding 取得不透明 pin。provider
+核对实际 ops/context、handle、可访问视图和读写权限；只接纳已导入的严格 GSVA
+映射。pin 借用现有 control fd、mem_id 和逻辑视图，不新建 import、不复制 payload。
+这些字段仅交给平台 adapter，业务代码继续使用统一 SDK/memref。
+home 直接 export 视图及 legacy mapping 返回 `-EOPNOTSUPP`，不合成 PA 或隐式导入。
+
+pin 存在时，provider unmap 在改变任何 VMA/fd/视图归属前返回 `-EBUSY`。
+endpoint close 保留上下文并停止新接纳，已有 pin 仍可释放；所有 pin 释放后才可
+重试实际 unmap/close。adapter 必须先确认 PTO registration 注销，再释放 pin。
+调用方将 pin acquire/release 与 endpoint 的其他操作串行化；本接口不宣称
+provider 或 SDK 现有单 owner 结构已支持并发，不替代服务 holder 和 mapping 事务。
+已有 resources_v1、mapping binding、wire 布局保持不变。
+
 `object-session` 的 `op=probe_descriptor key=<key>` 诊断从当前可读映射的
 provider handle 取得真实 descriptor，向同一 provider map 实现逐项提交
 24 组格式、必填身份字段、对齐和溢出负例，不接受用户提供的 descriptor。

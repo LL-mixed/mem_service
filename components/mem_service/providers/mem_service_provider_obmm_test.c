@@ -193,6 +193,81 @@ static struct mem_service_mapping_request cleanup_request(void *base, size_t pag
     return request;
 }
 
+static void test_compute_mapping_pins(void)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    void *base = __real_mmap(NULL, page * 4, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(base != MAP_FAILED && !__real_munmap(base, page * 4));
+    struct mem_service_mapping_request request = cleanup_request(base, page);
+    struct mem_service_mapping mapping = {0};
+    struct mem_service_provider_obmm_endpoint endpoint = {0};
+    struct mem_service_obmm_context *context = cleanup_context(&endpoint, page * 4);
+    assert(!mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
+    struct mem_service_provider provider = {
+        .ops = &mem_service_obmm_provider_ops, .context = context,
+    };
+    struct mem_service_provider_channel channel = {.provider = &provider};
+    struct mem_service_provider_mapping_binding binding = {
+        .mapping = mapping, .owner = &provider, .mapped = true,
+    };
+    struct mem_service_provider_obmm_mapping_pin *first = NULL, *second = NULL, *denied = NULL;
+    struct mem_service_provider_obmm_pinned_mapping view, other;
+    struct mem_service_obmm_mapping_slot *slot = &context->mappings[0];
+    assert(!mem_service_provider_obmm_mapping_pin_acquire(&binding,
+        MEM_SERVICE_MAPPING_FLAG_READ, &first, &view));
+    assert(first && slot->compute_pins == 1 && view.base == mapping.base && view.len == page);
+    assert(view.mem_id == 31 && view.obmm_fd == context->obmm_fd &&
+           view.access_flags == MEM_SERVICE_MAPPING_FLAG_READ);
+    assert(!mem_service_provider_obmm_mapping_pin_acquire(&binding,
+        MEM_SERVICE_MAPPING_FLAG_READ, &second, &other));
+    assert(second && second != first && slot->compute_pins == 2);
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding,
+        MEM_SERVICE_MAPPING_FLAG_WRITE, &denied, &other) == -EACCES);
+    assert(!denied && !other.base && !other.len && other.obmm_fd == -1);
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding,
+        MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS, &denied, &other) == -EINVAL);
+    --binding.mapping.len;
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -ESTALE);
+    ++binding.mapping.len;
+    ++binding.mapping.handle;
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -ESTALE);
+    --binding.mapping.handle;
+    provider.ops = NULL;
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOPNOTSUPP);
+    provider.ops = &mem_service_obmm_provider_ops;
+    slot->imported = false;
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOPNOTSUPP);
+    slot->imported = true;
+    slot->descriptor.strict_gsva = false;
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOPNOTSUPP);
+    slot->descriptor.strict_gsva = true;
+    slot->compute_pins = UINT64_MAX;
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOVERFLOW);
+    slot->compute_pins = 2;
+    assert(mem_service_obmm_provider_unmap_remote_region(context, mapping.handle) == -EBUSY);
+    assert(mem_service_provider_channel_unmap_remote_region(&channel, &binding));
+    assert(binding.mapped && !binding.mapping.base && !binding.mapping.len);
+    assert(slot->region.addr == base && slot->view_len == page && slot->compute_pins == 2);
+    assert(!cleanup_unmaps && !cleanup_closes && !cleanup_unimports && cleanup_imports == 1);
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -ESTALE);
+    assert(mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(endpoint.implementation == context && context->closing && slot->compute_pins == 2);
+    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EBUSY);
+    assert(!mem_service_provider_obmm_mapping_pin_release(&first) && !first && slot->compute_pins == 1);
+    assert(!mem_service_provider_obmm_mapping_pin_release(&first));
+    assert(mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    ++second->mapping_handle;
+    assert(mem_service_provider_obmm_mapping_pin_release(&second) == -ESTALE && second);
+    --second->mapping_handle;
+    assert(!mem_service_provider_obmm_mapping_pin_release(&second) && !second && !slot->compute_pins);
+    assert(!cleanup_unmaps && !cleanup_closes && !cleanup_unimports);
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    assert(!endpoint.implementation && cleanup_unmaps == 3 && cleanup_closes == 1 && cleanup_unimports == 1);
+    cleanup_mode = false;
+    puts("obmm_compute_mapping_pins=pass no_alias=1 deferred_cleanup=1");
+}
+
 static void test_import_and_partial_view_cleanup(void)
 {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
@@ -547,6 +622,7 @@ int main(void)
     test_retained_descriptor_probe();
     test_unmap_and_endpoint_failure_retention();
     test_failed_export_encoding_retains_resources();
+    test_compute_mapping_pins();
     puts("obmm_cleanup_ownership=pass");
     puts("gsva_import_dual_token=pass gsva_visibility_fail_closed=pass page_guards=pass");
     return 0;

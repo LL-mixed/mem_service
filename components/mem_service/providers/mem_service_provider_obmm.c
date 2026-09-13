@@ -72,6 +72,8 @@ struct mem_service_obmm_mapping_slot {
     uint64_t handle;
     uint64_t view_offset;
     uint64_t view_len;
+    uint64_t view_access;
+    uint64_t compute_pins;
     struct mem_service_obmm_descriptor_v1 descriptor;
     struct obmm_helpers_region region;
     struct mem_service_obmm_view view;
@@ -100,6 +102,11 @@ struct mem_service_obmm_context {
         regions[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
     struct mem_service_obmm_mapping_slot
         mappings[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
+};
+
+struct mem_service_provider_obmm_mapping_pin {
+    struct mem_service_obmm_context *context;
+    uint64_t mapping_handle;
 };
 #endif
 
@@ -781,6 +788,8 @@ static int mem_service_obmm_provider_map_remote_region(
     }
     slot->view_offset = request->offset;
     slot->view_len = request->len;
+    slot->view_access = request->flags &
+        (MEM_SERVICE_MAPPING_FLAG_READ | MEM_SERVICE_MAPPING_FLAG_WRITE);
     memset(mapping_out, 0, sizeof(*mapping_out));
     mapping_out->handle = slot->handle;
     mapping_out->base = (uint8_t *)slot->region.addr + request->offset;
@@ -799,7 +808,11 @@ static int mem_service_obmm_provider_unmap_remote_region(
     if (slot == NULL) {
         return -1;
     }
+    if (slot->compute_pins) {
+        return -EBUSY;
+    }
     slot->view_len = 0;
+    slot->view_access = 0;
     slot->region.addr = NULL;
     if (mem_service_obmm_unmap_view(&slot->probe_view) != 0 ||
         mem_service_obmm_unmap_view(&slot->view) != 0 || slot->close_uncertain)
@@ -1586,6 +1599,77 @@ int mem_service_provider_obmm_endpoint_close_checked(
     return endpoint == NULL || endpoint->implementation == NULL ? 0 : -1;
 }
 #endif
+
+int mem_service_provider_obmm_mapping_pin_acquire(
+    const struct mem_service_provider_mapping_binding *binding,
+    uint64_t access_flags,
+    struct mem_service_provider_obmm_mapping_pin **pin_out,
+    struct mem_service_provider_obmm_pinned_mapping *view_out)
+{
+    if (!pin_out || *pin_out || !view_out) return -EINVAL;
+    memset(view_out, 0, sizeof(*view_out));
+    view_out->obmm_fd = -1;
+#ifdef __linux__
+    const uint64_t rights = MEM_SERVICE_MAPPING_FLAG_READ | MEM_SERVICE_MAPPING_FLAG_WRITE;
+    struct mem_service_obmm_context *context;
+    struct mem_service_obmm_mapping_slot *slot;
+    struct mem_service_provider_obmm_mapping_pin *pin;
+
+    if (!binding || !binding->mapped || !binding->owner || !access_flags ||
+        (access_flags & ~rights)) return -EINVAL;
+    if (binding->owner->ops != &mem_service_obmm_provider_ops) return -EOPNOTSUPP;
+    context = binding->owner->context;
+    if (!context || context->obmm_fd < 0 || context->closing) return -EBUSY;
+    slot = mem_service_obmm_find_mapping(context, binding->mapping.handle);
+    if (!slot || slot->close_uncertain || slot->region.fd < 0 || !slot->region.mem_id ||
+        !slot->region.addr || !slot->view_len) return -ESTALE;
+    if (!slot->descriptor.strict_gsva || !slot->imported) return -EOPNOTSUPP;
+    if (!mem_service_obmm_gsva_valid(&slot->descriptor) ||
+        (uintptr_t)slot->region.addr != slot->descriptor.remote_uba ||
+        slot->view_offset > slot->descriptor.size ||
+        slot->view_len > slot->descriptor.size - slot->view_offset ||
+        binding->mapping.memory_kind != MEM_SERVICE_MEMORY_HOST ||
+        binding->mapping.base != (uint8_t *)slot->region.addr + slot->view_offset ||
+        binding->mapping.len != slot->view_len) return -ESTALE;
+    if (access_flags & ~slot->view_access) return -EACCES;
+    if (slot->compute_pins == UINT64_MAX) return -EOVERFLOW;
+    pin = calloc(1, sizeof(*pin));
+    if (!pin) return -ENOMEM;
+    pin->context = context;
+    pin->mapping_handle = slot->handle;
+    ++slot->compute_pins;
+    *view_out = (struct mem_service_provider_obmm_pinned_mapping) {
+        .obmm_fd = context->obmm_fd, .mem_id = slot->region.mem_id,
+        .base = binding->mapping.base, .len = slot->view_len,
+        .access_flags = access_flags,
+    };
+    *pin_out = pin;
+    return 0;
+#else
+    (void)binding;
+    (void)access_flags;
+    return -EOPNOTSUPP;
+#endif
+}
+
+int mem_service_provider_obmm_mapping_pin_release(
+    struct mem_service_provider_obmm_mapping_pin **pin_inout)
+{
+    if (!pin_inout) return -EINVAL;
+    if (!*pin_inout) return 0;
+#ifdef __linux__
+    struct mem_service_provider_obmm_mapping_pin *pin = *pin_inout;
+    struct mem_service_obmm_mapping_slot *slot =
+        mem_service_obmm_find_mapping(pin->context, pin->mapping_handle);
+    if (!slot || !slot->compute_pins) return -ESTALE;
+    --slot->compute_pins;
+    free(pin);
+    *pin_inout = NULL;
+    return 0;
+#else
+    return -EOPNOTSUPP;
+#endif
+}
 
 int mem_service_provider_obmm_endpoint_probe_conflict(
     struct mem_service_provider_obmm_endpoint *endpoint, uint64_t mapping_handle)

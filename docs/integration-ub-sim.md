@@ -10,6 +10,13 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+PTO 平台 adapter 可通过 OBMM provider 的 mapping pin 接口借用当前 SDK 严格
+import 视图。pin 保留原 VMA/import/fd，provider 在 pin 存在时拒绝解除映射，
+PTO registration 确认注销后方可释放 pin。接口仅供平台适配层使用，模型不解析
+provider 字段；要求与 endpoint 操作串行化。home export 视图、legacy mapping
+和非 OBMM binding 明确拒绝，未提供隐式 alias。中立 SDK/wire 布局保持不变，
+实际 managed CPU/PTO 联合验证仍由 ub_sim 完成。
+
 OBMM 平台诊断 `mem_service_provider_obmm_endpoint_probe_descriptor()` 及
 `object-session` 的 `op=probe_descriptor key=<key>` 从当前可读映射的 handle
 构造 24 组必定无效的 descriptor 副本，直接检查 provider map 拒绝及资源不变。

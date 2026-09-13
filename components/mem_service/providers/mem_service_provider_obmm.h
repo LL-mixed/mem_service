@@ -24,6 +24,29 @@ struct mem_service_provider_obmm_endpoint {
     void *implementation;
 };
 
+/* Platform-private attachment to an already mapped strict import. Serialize
+ * with all endpoint operations. The fields are borrowed until pin release;
+ * callers must never close the fd or unmap this view directly. Initialize
+ * *pin_out to NULL; acquire errors return no new pin or usable view. Rights
+ * use MEM_SERVICE_MAPPING_FLAG_READ/WRITE, without FIXED_ADDRESS. */
+struct mem_service_provider_obmm_mapping_pin;
+struct mem_service_provider_obmm_pinned_mapping {
+    int obmm_fd;
+    uint64_t mem_id;
+    void *base;
+    uint64_t len;
+    uint64_t access_flags;
+};
+int mem_service_provider_obmm_mapping_pin_acquire(
+    const struct mem_service_provider_mapping_binding *binding,
+    uint64_t access_flags,
+    struct mem_service_provider_obmm_mapping_pin **pin_out,
+    struct mem_service_provider_obmm_pinned_mapping *view_out);
+/* Release only after execution has drained and registration is unregistered.
+ * Success clears *pin; failure retains it. Allowed while endpoint is closing. */
+int mem_service_provider_obmm_mapping_pin_release(
+    struct mem_service_provider_obmm_mapping_pin **pin);
+
 /* Current endpoint ownership only; serialize with all endpoint operations.
  * Remaining resources after failed cleanup stay counted. Not a kernel census.
  */

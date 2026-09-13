@@ -1,5 +1,9 @@
 # ds4 使用侧适配手册
 
+OBMM mapping pin 接口只供显式 opt-in 的平台 compute adapter 保留现有严格
+import 视图的归属。DS4 serving 无需调用，现有 RoCE/TCP 热路径、安装 SDK 的
+中立 binding 和 wire 布局均不变；该接口不提供跨进程或并发 holder 管理。
+
 OBMM 平台诊断新增 `mem_service_provider_obmm_endpoint_probe_descriptor()` 和
 object-session `probe_descriptor` 操作，仅检查当前持有映射的畸形 descriptor
 拒绝及资源保留。DS4 serving 无需调用；RoCE/TCP 数据路径、SDK/wire 布局不变。
