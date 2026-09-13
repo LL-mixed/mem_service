@@ -75,6 +75,7 @@ struct mem_service_obmm_mapping_slot {
     struct mem_service_obmm_descriptor_v1 descriptor;
     struct obmm_helpers_region region;
     struct mem_service_obmm_view view;
+    struct mem_service_obmm_view probe_view;
 };
 
 struct mem_service_obmm_context {
@@ -800,7 +801,8 @@ static int mem_service_obmm_provider_unmap_remote_region(
     }
     slot->view_len = 0;
     slot->region.addr = NULL;
-    if (mem_service_obmm_unmap_view(&slot->view) != 0 || slot->close_uncertain)
+    if (mem_service_obmm_unmap_view(&slot->probe_view) != 0 ||
+        mem_service_obmm_unmap_view(&slot->view) != 0 || slot->close_uncertain)
         return -1;
     if (slot->region.fd >= 0) {
         int fd = slot->region.fd;
@@ -1585,6 +1587,40 @@ int mem_service_provider_obmm_endpoint_close_checked(
 }
 #endif
 
+int mem_service_provider_obmm_endpoint_probe_conflict(
+    struct mem_service_provider_obmm_endpoint *endpoint, uint64_t mapping_handle)
+{
+#ifdef __linux__
+    struct mem_service_obmm_context *context;
+    struct mem_service_obmm_mapping_slot *slot;
+    int rc, map_errno;
+
+    if (!endpoint || !(context = endpoint->implementation) || context->closing)
+        return -1;
+    slot = mem_service_obmm_find_mapping(context, mapping_handle);
+    if (!slot || !slot->descriptor.strict_gsva || slot->close_uncertain ||
+        slot->region.fd < 0 || !slot->region.addr || !slot->view_len)
+        return -1;
+    for (unsigned i = 0; i < 3; ++i)
+        if (slot->probe_view.parts[i].owned) return -1;
+    errno = 0;
+    rc = mem_service_obmm_map_view(slot->region.addr, slot->descriptor.size,
+        slot->view_offset, slot->view_len, PROT_READ,
+        MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_GSVA, slot->region.fd,
+        &slot->probe_view);
+    map_errno = errno;
+    if (mem_service_obmm_unmap_view(&slot->probe_view) != 0) {
+        context->closing = true;
+        return -1;
+    }
+    return rc == -1 && map_errno == EEXIST ? 0 : -1;
+#else
+    (void)endpoint;
+    (void)mapping_handle;
+    return -1;
+#endif
+}
+
 int mem_service_provider_obmm_endpoint_resources_v1(
     const struct mem_service_provider_obmm_endpoint *endpoint,
     struct mem_service_provider_obmm_resources_v1 *resources_out)
@@ -1613,11 +1649,16 @@ int mem_service_provider_obmm_endpoint_resources_v1(
             ++result.import_handles;
             result.import_bytes += mapping->descriptor.size;
         }
-        for (size_t part = 0; part < 3; ++part) {
-            if (!mapping->view.parts[part].owned) continue;
-            if (mapping->view.parts[part].len > UINT64_MAX - result.vma_bytes) return -1;
-            ++result.vma_count;
-            result.vma_bytes += mapping->view.parts[part].len;
+        const struct mem_service_obmm_view *views[] = {
+            &mapping->view, &mapping->probe_view,
+        };
+        for (size_t view = 0; view < 2; ++view) {
+            for (size_t part = 0; part < 3; ++part) {
+                if (!views[view]->parts[part].owned) continue;
+                if (views[view]->parts[part].len > UINT64_MAX - result.vma_bytes) return -1;
+                ++result.vma_count;
+                result.vma_bytes += views[view]->parts[part].len;
+            }
         }
         bool accessible = !mapping->close_uncertain &&
             mapping->view_len != 0 && mapping->region.addr != NULL;

@@ -92,13 +92,18 @@ session 的 `provider_import_region_bytes` 同时作为 canary 大小，须满�
 并覆盖对象 backing。此配置显式描述部署 profile，不代表自动探测硬件能力。
 
 诊断操作 `op=probe_conflict key=<key>` 要求当前 session 已 acquire 且持有可读映射。
-它保留该映射，通过原 managed mapping SDK 再次请求同一对象、同一 VA 的只读
-视图。只有 SDK 明确失败、第二次请求没有未完成清理且原映射首个逻辑页的 checksum
-保持不变才返回 OK；原映射仍由后续显式操作解除。失败时两份映射上下文分别保留，
-退出先清理探针的请求，再清理原映射。缺少有效 holder/映射时拒绝探针。
+OBMM 路径复用该映射已持有的设备句柄，经 provider 的同一严格映射实现执行
+`MAP_FIXED_NOREPLACE`；不再次 import，不注册重复 GSVA 路由。只有实际 mmap
+返回 EEXIST、探针没有未完成清理且原映射首个逻辑页的 checksum 保持不变才返回
+OK。若 mmap 意外创建了 VMA，只清理新创建的范围；清理失败时保留范围、停止
+接收新工作，并在资源统计中计入，原句柄要等探针 VMA 清理确认后才能关闭。
+session-loopback 仅用重复 managed SDK 请求验证 fixture，不能证明 OBMM 行为。
+原映射仍由后续显式操作解除；缺少有效 holder/映射时拒绝探针。
 GSVA aperture 拒绝普通匿名映射，此探针不尝试在 aperture 中创建匿名页。
 真实 OBMM 验收还须核对 provider 的 `obmm-map` mmap 失败记录、errno=EEXIST、
-随后完整对象数据校验和资源回收。该 CLI 探针不新增 SDK API 或 wire opcode，
+随后完整对象数据校验和资源回收。平台诊断入口
+`mem_service_provider_obmm_endpoint_probe_conflict()` 只接受当前 endpoint 的映射
+handle，须与 endpoint 操作串行化；它不新增业务 SDK API 或 wire opcode，
 不作为 DS4 serving 的调用入口，也不接受调用方提供的地址或 descriptor。
 
 取消 ALLOCATING 对象会进入 RETIRING，等待 home 清理确认；迟到 publish 只登记

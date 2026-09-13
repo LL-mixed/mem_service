@@ -1,5 +1,9 @@
 # ds4 使用侧适配手册
 
+OBMM 平台诊断新增 `mem_service_provider_obmm_endpoint_probe_conflict()`，用于
+当前映射的固定地址冲突验收。它复用已持有的设备句柄，不改变 import、路由或
+业务映射 API；DS4 serving 无需调用，RoCE/TCP 的数据路径和配置保持不变。
+
 OBMM 平台新增独立资源快照 API `mem_service_provider_obmm_endpoint_resources_v1()`，
 供 endpoint 运维诊断使用；其进程内资源计数不改变服务全局统计或 DS4 transfer
 热路径，既有 provider endpoint/binding 布局保持不变。

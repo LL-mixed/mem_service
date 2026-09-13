@@ -52,6 +52,7 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("gsva_import_dual_token=pass", result.stdout)
                 self.assertIn("obmm_cleanup_ownership=pass", result.stdout)
+                self.assertIn("retained_handle_conflict=pass", result.stdout)
                 self.assertRegex(result.stderr, r"obmm-map: result=failed stage=mmap "
                                  r"fixed_va=0x[0-9a-f]+ len=[0-9]+ errno=17\b")
 

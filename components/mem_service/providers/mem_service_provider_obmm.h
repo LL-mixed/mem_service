@@ -39,6 +39,13 @@ int mem_service_provider_obmm_endpoint_resources_v1(
     const struct mem_service_provider_obmm_endpoint *endpoint,
     struct mem_service_provider_obmm_resources_v1 *resources_out);
 
+/* Diagnostic only; serialize with endpoint operations. Succeeds only on an
+ * actual EEXIST using an already-owned strict mapping's fd, without import.
+ * Unexpected VMAs remain owned until cleanup; cleanup failure closes admission.
+ */
+int mem_service_provider_obmm_endpoint_probe_conflict(
+    struct mem_service_provider_obmm_endpoint *endpoint, uint64_t mapping_handle);
+
 struct obmm_gsva_segment_desc_v1;
 struct obmm_cmd_export;
 int mem_service_provider_obmm_encode_gsva(

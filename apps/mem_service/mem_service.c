@@ -11528,6 +11528,24 @@ static int mem_service_object_session_run_op(
                 0,
                 false);
         }
+#ifdef MEM_SERVICE_OBJECT_SESSION_OBMM
+        if (conflict && state->obmm_open) {
+            rc = mem_service_provider_obmm_endpoint_probe_conflict(
+                &state->obmm_endpoint, state->mapping.binding.mapping.handle);
+            if (rc != 0 ||
+                mem_service_provider_checksum64(state->mapping.base, probe_len) != before)
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_INTERNAL, "conflict_probe_failed",
+                    0, 0, 0, false);
+            printf("mem_service object-session: session=%s cpu_conflict_probe=pass "
+                   "key=%s base=0x%016llx len=%llu preserved=1 cleanup_pending=0 "
+                   "source=retained_handle\n", config->session_id, op->key,
+                   (unsigned long long)(uintptr_t)state->mapping.base,
+                   (unsigned long long)probe_len);
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_OK, NULL, 0, 0, 0, false);
+        }
+#endif
         random = fopen("/dev/urandom", "rb");
         if (random == NULL)
             return mem_service_object_session_finish_data_op(config, index, op,
