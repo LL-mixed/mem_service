@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+daemon 幂等接纳新增受管理资源清理预留：普通请求不能耗尽已有对象、holder 和
+mapping 后续清理所需的应答位置，容量不足返回 `CAPACITY_EXCEEDED`。
+`allocation-stats` 增加幂等容量/已用/清理预留/可用/缺口文本字段；安装 SDK
+的已有结构和 DS4 transfer 热路径保持不变。此保护不实现幂等历史的无限回收。
+
 OBMM 平台诊断新增 `mem_service_provider_obmm_endpoint_probe_conflict()`，用于
 当前映射的固定地址冲突验收。它复用已持有的设备句柄，不改变 import、路由或
 业务映射 API；DS4 serving 无需调用，RoCE/TCP 的数据路径和配置保持不变。

@@ -63,6 +63,23 @@ SDK 向 provider 请求逻辑视图长度，同时单独传递 backing 的完整
 的对齐空间。尚未发布的取消请求保持 `in_flight`，已确认 backing/address 占用为
 零；这两个计数无法证明 home 从未创建资源，仍必须等待 home 的取消确认。
 
+## 受管理资源的清理容量
+
+daemon 接纳新请求时，必须在幂等结果表中预留已有资源完成正常清理所需的空间：
+每个 ALLOCATING/ACTIVE 对象保留一次 retire，每个 holder 保留一次 release，
+pending/active/closing 映射分别保留 3/2/1 次后续状态迁移。新 allocate/acquire
+按最多增加一条义务估算，BEGIN 按三条估算，并另计本次请求的幂等结果。
+普通请求不能使用这些预留位置；有效的清理迁移释放相应义务后，才可将应答写入。
+无效或未推进状态的清理请求不能消耗最后的清理空间，返回可重试的
+`CAPACITY_EXCEEDED reason=cleanup_capacity_reserved`，不缓存该临时拒绝。
+
+已缓存的精确重放和只读查询继续可用，既有 readiness/代际检查仍生效。保留历史
+结果，禁止通过任意淘汰旧 BEGIN 来腾出位置。已有 managed identity（含 retired
+记录）时禁止 snapshot restore 覆盖幂等历史；通用记录保留策略也不能删除 managed
+请求的结果。`allocation-stats` 暴露容量、已用量、清理预留量、非预留可用量及
+预留缺口。此契约只约束单次 daemon 生命周期内的新接纳；历史超额状态、重启恢复、
+幂等历史的可回收协议和连续运行容量仍需独立完成，不能据此宣布长期容量问题解决。
+
 ## Provider allocation work polling
 
 `poll-allocation` returns the lowest allocation generation greater than

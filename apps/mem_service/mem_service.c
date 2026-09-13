@@ -45,11 +45,11 @@
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
 #define MEM_SERVICE_DEPLOYMENT_SMOKE_VERSION 1U
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_VERSION 1U
-#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7055U
-#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x4f63a749U
+#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7411U
+#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x5272af77U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x5ecfcddeU
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x06a074b3U
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -62,7 +62,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9703U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x25fc9af7U
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x375851a6U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 52U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -7731,6 +7731,13 @@ static int render_admin_output_schema(char *schema, size_t schema_len, size_t *u
                                 schema_len,
                                 &used,
                                 "admin_command=restore-snapshot-page operation=restore_snapshot_page response=text-kv\n") != 0 ||
+        append_wire_schema_line(schema, schema_len, &used,
+                                "admin_command=allocation-stats operation=allocation_stats response=text-kv\n"
+                                "allocation_stats_field=idempotency_capacity type=u32\n"
+                                "allocation_stats_field=idempotency_used type=u64\n"
+                                "allocation_stats_field=idempotency_cleanup_reserved type=u64\n"
+                                "allocation_stats_field=idempotency_available type=u64\n"
+                                "allocation_stats_field=idempotency_reservation_deficit type=u64\n") != 0 ||
         append_wire_schema_line(schema,
                                 schema_len,
                                 &used,
@@ -8163,6 +8170,8 @@ static int run_admin_output_fixture_check(void)
         strstr(schema, "snapshot_page_field=store_schema_version type=u32\n") ==
             NULL ||
         strstr(schema, "snapshot_page_field=next_index type=u64\n") == NULL ||
+        strstr(schema, "allocation_stats_field=idempotency_cleanup_reserved type=u64\n") == NULL ||
+        strstr(schema, "allocation_stats_field=idempotency_reservation_deficit type=u64\n") == NULL ||
         strstr(schema, "fail_closed_status=checksum_mismatch\n") == NULL) {
         fprintf(stderr, "mem_service admin-output-fixtures: required schema missing\n");
         failures -= 1;
@@ -8184,7 +8193,7 @@ static int run_admin_output_fixture_check(void)
         return 1;
     }
     printf("mem_service admin-output-fixtures: status=ok schema_version=%u "
-           "schema_len=%u schema_checksum=0x%08x admin_commands=13 "
+           "schema_len=%u schema_checksum=0x%08x admin_commands=16 "
            "metric_fields=55 prometheus_prefix=lingqu_mem_service_\n",
            MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_VERSION,
            MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN,

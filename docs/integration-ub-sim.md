@@ -10,6 +10,15 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+daemon 的幂等表为已接纳的对象、holder 和 mapping 预留后续清理应答容量。
+新工作可能在物理表尚有空位时返回 `CAPACITY_EXCEEDED`；调用方应完成已有生命周期，
+不能以新 operation ID 无限重试。有效 teardown 使用预留容量，无效 teardown
+不能消耗该容量。只读 `allocation-stats` 提供 `idempotency_capacity`、
+`idempotency_used`、`idempotency_cleanup_reserved`、`idempotency_available`、
+`idempotency_reservation_deficit`。这些附加文本字段不改变既有 client record ABI；
+旧 SDK 可忽略。已有 managed identity 时 snapshot restore 被拒绝，以保留重放历史。
+此接纳保护不提供无限幂等历史、重启恢复或资源强制撤销。
+
 OBMM 平台诊断增加 `mem_service_provider_obmm_endpoint_resources_v1()`，查询当前
 endpoint 保留的 export/import、VMA、可访问视图及待清理映射；调用须与该 endpoint
 的其他操作串行。object-session 的 `stats` 同时输出 `provider-resources`，与服务

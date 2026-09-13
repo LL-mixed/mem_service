@@ -48,6 +48,12 @@ class MemServiceManagedMappingTests(unittest.TestCase):
         self.fixture.tearDown()
 
     def test_live_process_mapping_is_counted_and_blocks_external_release(self):
+        self._live_process_mapping(capacity_pressure=False)
+
+    def test_live_process_mapping_cleans_up_at_idempotency_capacity(self):
+        self._live_process_mapping(capacity_pressure=True)
+
+    def _live_process_mapping(self, capacity_pressure):
         fixture = self.fixture
         daemon = fixture._start_active_object()
         process = None
@@ -88,6 +94,21 @@ class MemServiceManagedMappingTests(unittest.TestCase):
                 )
                 self.assertNotEqual(release.returncode, 0, release.stdout + release.stderr)
                 self.assertEqual(fixture._allocation_stats()["live_refs"], "1")
+                if capacity_pressure:
+                    for attempt in range(80):
+                        pressure = fixture._run_client(
+                            "retire-object", "--connect", fixture._connect,
+                            "--key", "missing-capacity-object", "--expected-generation", "1",
+                            "--idempotency-key", f"capacity-pressure-{attempt}",
+                        )
+                        self.assertNotEqual(pressure.returncode, 0,
+                                            pressure.stdout + pressure.stderr)
+                        reply = session_fixture._parse_kv(pressure.stdout)
+                        if reply.get("status") == "capacity_exceeded":
+                            break
+                        self.assertEqual(reply.get("status"), "not_found", reply)
+                    else:
+                        self.fail("bounded pressure never reached idempotency capacity")
                 retire = fixture._write_session(
                     "retire-observer.conf", fixture._connect,
                     ["retire key=obj-1 idempotency_key=observer-retire expected_generation=1"],
@@ -98,6 +119,10 @@ class MemServiceManagedMappingTests(unittest.TestCase):
             stats = fixture._allocation_stats()
             self.assertEqual(stats["import_mappings"], "0", stats)
             self.assertEqual(stats["live_refs"], "0", stats)
+            if capacity_pressure:
+                self.assertEqual(stats["idempotency_cleanup_reserved"], "0", stats)
+                self.assertEqual(stats["idempotency_reservation_deficit"], "0", stats)
+                self.assertEqual(stats["idempotency_used"], stats["idempotency_capacity"], stats)
         finally:
             if process is not None and process.poll() is None:
                 process.terminate()

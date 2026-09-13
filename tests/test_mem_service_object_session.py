@@ -247,8 +247,9 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     # Bring up a daemon holding one published, provider-backed, mappable
     # object whose home address sits inside the loopback provider's
     # strict fixed-address range, so data-plane sessions can map it.
-    def _start_active_object(self, key: str = "obj-1", logical_size: int = 4096) -> subprocess.Popen:
-        daemon = self._start_home_daemon()
+    def _start_active_object(self, key: str = "obj-1", logical_size: int = 4096,
+                             extra_config: str = "") -> subprocess.Popen:
+        daemon = self._start_home_daemon(extra_config)
         self._register_home()
         producer = self._write_session(
             "producer.conf",
@@ -1343,25 +1344,19 @@ class MemServiceObjectSessionTests(unittest.TestCase):
         finally:
             self._stop_server(daemon)
 
-    # Idempotency store exhaustion (64 records, no eviction): the 65th
-    # mutating op with a fresh idempotency key is rejected with
-    # capacity_exceeded no matter the operation, while a replay of an
-    # already-recorded key still succeeds (it needs no new slot) and
-    # non-mutating ops are unaffected. The idempotency store is the
-    # tighter bound: the 128-slot managed table can never be filled
-    # from the wire because every mutating op requires an idempotency
-    # key.
+    # Each allocation needs its response plus one reserved retirement
+    # response. Admission stops at 32, while all accepted reservations
+    # can still be cancelled/reclaimed and old replies remain replayable.
     def test_idempotency_store_exhaustion(self):
         daemon = self._start_home_daemon()
         try:
             self._register_home()
-            # A session config caps at 64 ops, so the 64 allocations
-            # are split across two sessions sharing one daemon.
+            # Exercise two independent sessions sharing one admission budget.
             for chunk in range(2):
                 fill_ops = [
                     f"allocate key=fill-{n} idempotency_key=fill-{n}-alloc "
                     "size_bytes=4096 capabilities=map"
-                    for n in range(chunk * 32, chunk * 32 + 32)
+                    for n in range(chunk * 16, chunk * 16 + 16)
                 ]
                 fill = self._write_session(
                     f"fill-{chunk}.conf", self._connect, fill_ops,
@@ -1379,8 +1374,8 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                     "size_bytes=4096 capabilities=map "
                     "expect_status=capacity_exceeded",
                     "retire key=fill-0 idempotency_key=ov-ret "
-                    "expected_generation=1 expect_status=capacity_exceeded",
-                    "inspect key=fill-0 expect_state=allocating "
+                    "expected_generation=1",
+                    "inspect key=fill-0 expect_state=retiring "
                     "expect_generation=1 expect_holder_count=0",
                     "stats",
                 ],
@@ -1392,12 +1387,17 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("op=1 action=allocate key=overflow "
                           "status=capacity_exceeded", overflow_r.stdout)
             self.assertIn("op=2 action=retire key=fill-0 "
-                          "status=capacity_exceeded", overflow_r.stdout)
+                          "status=ok", overflow_r.stdout)
             self.assertIn("op=3 action=inspect key=fill-0 status=ok",
                           overflow_r.stdout)
-            self.assertIn("op=4 action=stats status=ok live_objects=64 ",
+            self.assertIn("op=4 action=stats status=ok live_objects=32 ",
                           overflow_r.stdout)
-            self.assertIn("in_flight=64 ", overflow_r.stdout)
+            self.assertIn("in_flight=32 ", overflow_r.stdout)
+            stats = self._allocation_stats()
+            self.assertEqual(stats["idempotency_used"], "33", stats)
+            self.assertEqual(stats["idempotency_cleanup_reserved"], "31", stats)
+            self.assertEqual(stats["idempotency_available"], "0", stats)
+            self.assertEqual(stats["idempotency_reservation_deficit"], "0", stats)
 
             # Identical payload (same session_id, same fields) replays
             # the recorded response instead of needing a fresh record.
@@ -1416,8 +1416,28 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                              replay_r.stderr + replay_r.stdout)
             self.assertIn("op=1 action=allocate key=fill-0 status=ok "
                           "state=allocating", replay_r.stdout)
-            self.assertIn("op=2 action=stats status=ok live_objects=64 ",
+            self.assertIn("op=2 action=stats status=ok live_objects=32 ",
                           replay_r.stdout)
+            cleanup_ops = [
+                f"retire key=fill-{n} idempotency_key=cancel-{n} "
+                f"expected_generation={n + 1}" for n in range(1, 32)
+            ] + [
+                f"reclaim key=fill-{n} node_id={HOME_NODE} "
+                f"incarnation={HOME_INCARNATION} generation={n + 1} confirmed=1"
+                for n in range(32)
+            ] + ["stats"]
+            cleanup = self._write_session("capacity-cleanup.conf", self._connect, cleanup_ops)
+            cleanup_r = self._run_session(cleanup)
+            self.assertEqual(cleanup_r.returncode, 0, cleanup_r.stdout + cleanup_r.stderr)
+            # Even after every identity retired, late ALLOCATE is still a
+            # historical reply and cannot allocate a replacement generation.
+            replay_r = self._run_session(replay)
+            self.assertEqual(replay_r.returncode, 0, replay_r.stdout + replay_r.stderr)
+            stats = self._allocation_stats()
+            for field in ("live_objects", "in_flight", "live_refs", "backing_allocated_bytes",
+                          "idempotency_cleanup_reserved", "idempotency_reservation_deficit"):
+                self.assertEqual(stats[field], "0", stats)
+            self.assertEqual(stats["idempotency_used"], "64", stats)
         finally:
             self._stop_server(daemon)
 

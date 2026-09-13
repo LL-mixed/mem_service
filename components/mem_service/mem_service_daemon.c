@@ -10531,6 +10531,21 @@ static enum mem_service_wire_status mem_service_export_snapshot_page(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+static bool mem_service_has_managed_identity(const struct mem_service *svc)
+{
+    size_t i;
+
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        if (svc->managed.entries[i].in_use)
+            return true;
+    }
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        if (svc->managed.mappings[i].state != MEM_SERVICE_MANAGED_MAPPING_NONE)
+            return true;
+    }
+    return false;
+}
+
 static enum mem_service_wire_status mem_service_restore_snapshot(struct mem_service *svc,
                                                                  const char *payload,
                                                                  char *response,
@@ -10538,6 +10553,11 @@ static enum mem_service_wire_status mem_service_restore_snapshot(struct mem_serv
 {
     struct mem_service restored;
 
+    if (mem_service_has_managed_identity(svc)) {
+        snprintf(response, response_len,
+                 "status=version_conflict\nreason=managed_history_in_use\n");
+        return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+    }
     if (payload == NULL || payload[0] == '\0' ||
         mem_service_init(&restored,
                          svc->control_plane_ready,
@@ -10652,6 +10672,11 @@ static enum mem_service_wire_status mem_service_restore_snapshot_page_commit(
     char *response,
     size_t response_len)
 {
+    if (mem_service_has_managed_identity(svc)) {
+        snprintf(response, response_len,
+                 "status=version_conflict\nreason=managed_history_in_use\n");
+        return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+    }
     if (!mem_service_restore_snapshot_stage.active) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
@@ -11045,7 +11070,12 @@ static void mem_service_prune_idempotency_for_record_key(struct mem_service *svc
         struct mem_service_idempotency_record *idem = &svc->idempotency_records[i];
         char response_key[96];
 
-        if (!idem->in_use) {
+        if (!idem->in_use ||
+            idem->operation == MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT ||
+            idem->operation == MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT ||
+            idem->operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
+            idem->operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT ||
+            idem->operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION) {
             continue;
         }
         response_key[0] = '\0';
@@ -11752,6 +11782,59 @@ static enum mem_service_wire_status mem_service_mapping_transition(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+/* Fixed-table admission must preserve replayable completion of accepted work. */
+static uint64_t mem_service_idempotency_used(const struct mem_service *svc)
+{
+    uint64_t used = 0;
+    size_t i;
+
+    for (i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i)
+        used += svc->idempotency_records[i].in_use ? 1U : 0U;
+    return used;
+}
+
+static uint64_t mem_service_cleanup_reservations(const struct mem_service *svc)
+{
+    uint64_t reserved = 0;
+    size_t i;
+
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        const struct mem_service_managed_allocation *entry = &svc->managed.entries[i];
+
+        if (!entry->in_use)
+            continue;
+        reserved += entry->holder_count;
+        if (entry->state == MEM_SERVICE_MANAGED_STATE_ALLOCATING ||
+            entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE)
+            reserved += 1U; /* RETIRE */
+    }
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        switch (svc->managed.mappings[i].state) {
+        case MEM_SERVICE_MANAGED_MAPPING_PENDING:
+            reserved += 3U; /* CONFIRM, CLOSE, FINISH; CANCEL needs less. */
+            break;
+        case MEM_SERVICE_MANAGED_MAPPING_ACTIVE:
+            reserved += 2U; /* CLOSE, FINISH */
+            break;
+        case MEM_SERVICE_MANAGED_MAPPING_CLOSING:
+            reserved += 1U; /* FINISH */
+            break;
+        default:
+            break;
+        }
+    }
+    return reserved;
+}
+
+static uint64_t mem_service_idempotency_available(const struct mem_service *svc)
+{
+    uint64_t committed = mem_service_idempotency_used(svc) +
+                         mem_service_cleanup_reservations(svc);
+
+    return committed < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS ?
+           MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS - committed : 0U;
+}
+
 static enum mem_service_wire_status mem_service_allocation_stats(
     struct mem_service *svc,
     const char *payload,
@@ -11759,6 +11842,8 @@ static enum mem_service_wire_status mem_service_allocation_stats(
     size_t response_len)
 {
     struct mem_service_managed_stats stats;
+    uint64_t used = mem_service_idempotency_used(svc);
+    uint64_t reserved = mem_service_cleanup_reservations(svc);
 
     (void)payload;
     mem_service_managed_stats_snapshot(&svc->managed, &stats);
@@ -11787,7 +11872,12 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              "publish_rejected_count=%" PRIu64 "\n"
              "reclaim_ok_count=%" PRIu64 "\n"
              "reclaim_rejected_count=%" PRIu64 "\n"
-             "quarantine_events=%" PRIu64 "\n",
+             "quarantine_events=%" PRIu64 "\n"
+             "idempotency_capacity=%u\n"
+             "idempotency_used=%" PRIu64 "\n"
+             "idempotency_cleanup_reserved=%" PRIu64 "\n"
+             "idempotency_available=%" PRIu64 "\n"
+             "idempotency_reservation_deficit=%" PRIu64 "\n",
              stats.backing_registered,
              stats.live_objects,
              stats.backing_allocated_bytes,
@@ -11810,7 +11900,11 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              stats.publish_rejected_count,
              stats.reclaim_ok_count,
              stats.reclaim_rejected_count,
-             stats.quarantine_events);
+             stats.quarantine_events,
+             MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS,
+             used, reserved, mem_service_idempotency_available(svc),
+             used + reserved > MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS ?
+             used + reserved - MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS : 0U);
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
@@ -12817,6 +12911,38 @@ static uint32_t mem_service_idempotency_request_checksum(const char *payload)
     return mem_service_wire_checksum(payload != NULL ? payload : "", payload_len);
 }
 
+static uint64_t mem_service_new_cleanup_reservations(
+    enum mem_service_wire_operation operation, const char *payload)
+{
+    uint64_t action = 0;
+
+    if (operation == MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT)
+        return 1U;
+    if (operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION &&
+        mem_service_payload_get_u64_checked(payload, "action", &action) &&
+        action == MEM_SERVICE_MANAGED_MAPPING_BEGIN)
+        return 3U;
+    return 0U;
+}
+
+static bool mem_service_can_use_cleanup_reservation(
+    enum mem_service_wire_operation operation, const char *payload)
+{
+    uint64_t action = 0;
+
+    if (operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT)
+        return true;
+    if (operation != MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION ||
+        !mem_service_payload_get_u64_checked(payload, "action", &action))
+        return false;
+    return action == MEM_SERVICE_MANAGED_MAPPING_CONFIRM ||
+           action == MEM_SERVICE_MANAGED_MAPPING_CLOSE ||
+           action == MEM_SERVICE_MANAGED_MAPPING_FINISH ||
+           action == MEM_SERVICE_MANAGED_MAPPING_CANCEL;
+}
+
 static enum mem_service_wire_status mem_service_try_idempotency_replay(
     struct mem_service *svc,
     enum mem_service_wire_operation operation,
@@ -12824,11 +12950,14 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
     char *response,
     size_t response_len,
     struct mem_service_idempotency_record **pending_record_out,
-    bool *handled_out)
+    bool *handled_out,
+    bool *cleanup_reserved_out)
 {
     char key[MEM_SERVICE_IDEMPOTENCY_KEY_LEN];
     uint32_t request_checksum;
     struct mem_service_idempotency_record *record;
+    bool has_key;
+    uint64_t required;
 
     if (pending_record_out != NULL) {
         *pending_record_out = NULL;
@@ -12836,16 +12965,38 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
     if (handled_out != NULL) {
         *handled_out = false;
     }
-    if (!mem_service_operation_mutates(operation, payload) ||
-        !mem_service_payload_get_idempotency_key(payload, key, sizeof(key))) {
+    *cleanup_reserved_out = false;
+    if (!mem_service_operation_mutates(operation, payload)) {
         return MEM_SERVICE_WIRE_STATUS_OK;
     }
+    has_key = mem_service_payload_get_idempotency_key(payload, key, sizeof(key));
 
     request_checksum = mem_service_idempotency_request_checksum(payload);
-    record = mem_service_find_idempotency_record(svc, key);
+    record = has_key ? mem_service_find_idempotency_record(svc, key) : NULL;
     if (record == NULL) {
-        record = mem_service_alloc_idempotency_record(svc);
-        if (record == NULL) {
+        required = mem_service_new_cleanup_reservations(operation, payload) +
+                   (has_key ? 1U : 0U);
+        record = has_key ? mem_service_alloc_idempotency_record(svc) : NULL;
+        if (required > mem_service_idempotency_available(svc)) {
+            if (record != NULL &&
+                mem_service_idempotency_used(svc) +
+                    mem_service_cleanup_reservations(svc) <=
+                    MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS &&
+                mem_service_can_use_cleanup_reservation(operation, payload)) {
+                /* Dispatch performs identity/state validation. A reserved
+                 * result may be committed only after an obligation is freed. */
+                *cleanup_reserved_out = true;
+            } else {
+                if (handled_out != NULL)
+                    *handled_out = true;
+                snprintf(response, response_len,
+                         "status=capacity_exceeded\n"
+                         "reason=cleanup_capacity_reserved\nidempotency_key=%s\n",
+                         has_key ? key : "-");
+                return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
+            }
+        }
+        if (has_key && record == NULL) {
             if (handled_out != NULL) {
                 *handled_out = true;
             }
@@ -13075,6 +13226,7 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
     struct mem_service_idempotency_record *pending_idempotency = NULL;
     const struct mem_service_audit_event *audit_event = NULL;
     bool idempotency_handled = false;
+    bool cleanup_reserved = false;
     bool audit_appended = false;
     bool audit_retention_pruned = false;
     bool checkpoint_retention_pruned = false;
@@ -13111,7 +13263,8 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                                                     response,
                                                     response_len,
                                                     &pending_idempotency,
-                                                    &idempotency_handled);
+                                                    &idempotency_handled,
+                                                    &cleanup_reserved);
     }
 
     if (!idempotency_handled) {
@@ -13164,6 +13317,16 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                         storage_root,
                         NULL);
             }
+        }
+        if (cleanup_reserved &&
+            mem_service_idempotency_available(svc) == 0U) {
+            /* A rejected/no-op cleanup cannot consume another resource's
+             * acknowledgement slot. No replay record is written for this
+             * transient admission refusal. */
+            pending_idempotency = NULL;
+            status = MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
+            snprintf(response, response_len,
+                     "status=capacity_exceeded\nreason=cleanup_capacity_reserved\n");
         }
         /*
          * Never record a transient data_plane_not_ready failure as the
