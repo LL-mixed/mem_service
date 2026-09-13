@@ -153,7 +153,7 @@ static void usage(const char *argv0)
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
     printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
-    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard> field=value ...]");
+    printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict> field=value ...]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -9458,6 +9458,7 @@ enum mem_service_object_session_action {
     MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE = 15,
     MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY = 16,
     MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD = 17,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT = 18,
 };
 
 struct mem_service_object_session_field {
@@ -9559,6 +9560,8 @@ struct mem_service_object_session_state {
     uint32_t holder_op_count;
     bool mapped;
     uint64_t mapped_backing_len;
+    struct mem_service_client_object_mapping conflict_mapping;
+    struct mem_service_client_mapping_lifecycle conflict_lifecycle;
     struct mem_service_client_object_mapping mapping;
     struct mem_service_client_mapping_lifecycle mapping_lifecycle;
     const struct mem_service_client *client;
@@ -9840,6 +9843,8 @@ static const char *mem_service_object_session_action_name(uint32_t action)
         return "probe_readonly";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
         return "probe_guard";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
+        return "probe_conflict";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
         return "publish_data";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE:
@@ -10171,6 +10176,7 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
         table = unmap;
         count = sizeof(unmap) / sizeof(unmap[0]);
         break;
@@ -10219,6 +10225,7 @@ static bool mem_service_object_session_parse_action(const char *name,
         {"wait_visible", MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE},
         {"probe_readonly", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY},
         {"probe_guard", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD},
+        {"probe_conflict", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT},
     };
     size_t i;
 
@@ -10618,6 +10625,7 @@ static int mem_service_object_session_parse_op(
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
@@ -10919,7 +10927,8 @@ static bool mem_service_object_session_action_is_data_plane(uint32_t action)
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY ||
-           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD;
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT;
 }
 
 static int mem_service_object_session_validate_provider(
@@ -11132,6 +11141,14 @@ static int mem_service_object_session_provider_open(
 static int mem_service_object_session_provider_close(
     struct mem_service_object_session_state *state)
 {
+    if (state->conflict_lifecycle.pending || state->conflict_mapping.binding.mapped) {
+        if (mem_service_client_unmap_managed_allocation(state->client,
+                &state->channel, &state->conflict_mapping, &state->conflict_lifecycle,
+                NULL)) {
+            fprintf(stderr, "mem_service object-session: conflict_mapping_cleanup_pending\n");
+            return -1;
+        }
+    }
     if (state->mapped) {
         /* Best-effort teardown on a failed session; the end-of-session
          * check has already flagged the leaked mapping as an error. */
@@ -11436,9 +11453,12 @@ static int mem_service_object_session_run_op(
                                                    &view,
                                                    &status);
         break;
-    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP: {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT: {
         unsigned char nonce[16];
         char operation_id[48] = "sdkmap-";
+        bool conflict = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT;
+        uint64_t before = 0, probe_len = 0;
         FILE *random;
         size_t nonce_len;
         int random_close;
@@ -11454,7 +11474,7 @@ static int mem_service_object_session_run_op(
                 0,
                 false);
         }
-        if (state->mapped) {
+        if ((state->mapped && !conflict) || state->conflict_lifecycle.pending) {
             return mem_service_object_session_finish_data_op(
                 config,
                 index,
@@ -11465,6 +11485,18 @@ static int mem_service_object_session_run_op(
                 0,
                 0,
                 false);
+        }
+        if (conflict) {
+            long page = sysconf(_SC_PAGESIZE);
+            if (!state->mapped || !state->mapping.base || page <= 0 ||
+                !(state->mapping.flags & MEM_SERVICE_CLIENT_MAP_READ) ||
+                strcmp(state->mapping.key, op->key))
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_NOT_FOUND, "readable_mapping_required",
+                    0, 0, 0, false);
+            probe_len = state->mapping.len < (uint64_t)page ? state->mapping.len :
+                        (uint64_t)page;
+            before = mem_service_provider_checksum64(state->mapping.base, probe_len);
         }
         if (!state->has_view ||
             strcmp(state->view.key, op->key) != 0 ||
@@ -11509,9 +11541,33 @@ static int mem_service_object_session_run_op(
                 0, 0, 0, false);
         for (size_t n = 0; n < sizeof(nonce); ++n)
             snprintf(operation_id + 7 + n * 2, 3, "%02x", nonce[n]);
-        if (mem_service_client_map_managed_allocation(client, &state->channel,
-                &state->view, config->session_id, operation_id, op->map_flags,
-                &state->mapping, &state->mapping_lifecycle, &status) != 0) {
+        rc = mem_service_client_map_managed_allocation(client, &state->channel,
+                &state->view, config->session_id, operation_id,
+                conflict ? MEM_SERVICE_CLIENT_MAP_READ : op->map_flags,
+                conflict ? &state->conflict_mapping : &state->mapping,
+                conflict ? &state->conflict_lifecycle : &state->mapping_lifecycle, &status);
+        if (conflict) {
+            bool rejected = rc != 0 && status == MEM_SERVICE_WIRE_STATUS_INTERNAL;
+            if (rc == 0 || state->conflict_lifecycle.pending ||
+                state->conflict_mapping.binding.mapped)
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_INTERNAL, "conflict_mapping_not_drained",
+                    0, 0, 0, false);
+            memset(&state->conflict_mapping, 0, sizeof(state->conflict_mapping));
+            if (!rejected ||
+                mem_service_provider_checksum64(state->mapping.base, probe_len) != before)
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_INTERNAL, "conflict_probe_failed",
+                    0, 0, 0, false);
+            printf("mem_service object-session: session=%s cpu_conflict_probe=pass "
+                   "key=%s base=0x%016llx len=%llu preserved=1 cleanup_pending=0\n",
+                   config->session_id, op->key,
+                   (unsigned long long)(uintptr_t)state->mapping.base,
+                   (unsigned long long)probe_len);
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_OK, NULL, 0, 0, 0, false);
+        }
+        if (rc != 0) {
             state->mapped = state->mapping_lifecycle.pending;
             if (!state->mapped)
                 memset(&state->mapping, 0, sizeof(state->mapping));

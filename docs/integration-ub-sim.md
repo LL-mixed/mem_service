@@ -91,6 +91,16 @@ fork 子进程，因此子进程的访问故障不能用于证明原映射的保
 session 的 `provider_import_region_bytes` 同时作为 canary 大小，须满足 pool 粒度
 并覆盖对象 backing。此配置显式描述部署 profile，不代表自动探测硬件能力。
 
+诊断操作 `op=probe_conflict key=<key>` 要求当前 session 已 acquire 且持有可读映射。
+它保留该映射，通过原 managed mapping SDK 再次请求同一对象、同一 VA 的只读
+视图。只有 SDK 明确失败、第二次请求没有未完成清理且原映射首个逻辑页的 checksum
+保持不变才返回 OK；原映射仍由后续显式操作解除。失败时两份映射上下文分别保留，
+退出先清理探针的请求，再清理原映射。缺少有效 holder/映射时拒绝探针。
+GSVA aperture 拒绝普通匿名映射，此探针不尝试在 aperture 中创建匿名页。
+真实 OBMM 验收还须核对 provider 的 `obmm-map` mmap 失败记录、errno=EEXIST、
+随后完整对象数据校验和资源回收。该 CLI 探针不新增 SDK API 或 wire opcode，
+不作为 DS4 serving 的调用入口，也不接受调用方提供的地址或 descriptor。
+
 取消 ALLOCATING 对象会进入 RETIRING，等待 home 清理确认；迟到 publish 只登记
 待清理 reservation，不重新开放 acquire。当前 worker 重启遇到已有 state 文件时
 拒绝运行，地址不重用，异常资源保留待核对。该限制不能视为恢复与强制撤销已完成。

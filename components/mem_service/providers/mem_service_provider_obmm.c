@@ -628,8 +628,14 @@ static int mem_service_obmm_map_view(void *address, uint64_t size,
             view->parts[i].owned = true;
         }
         if (actual == MAP_FAILED || actual != wanted) {
-            return mem_service_obmm_unmap_view(view) == 0 ? -1 :
-                   MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+            int map_errno = actual == MAP_FAILED ? errno : EADDRNOTAVAIL;
+            int cleanup_result;
+            fprintf(stderr, "mem_service obmm-map: result=failed stage=mmap "
+                    "fixed_va=0x%016" PRIxPTR " len=%" PRIu64 " errno=%d\n",
+                    (uintptr_t)wanted, length, map_errno);
+            cleanup_result = mem_service_obmm_unmap_view(view);
+            errno = map_errno;
+            return cleanup_result == 0 ? -1 : MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
         }
     }
     return 0;
