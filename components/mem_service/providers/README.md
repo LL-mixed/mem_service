@@ -123,6 +123,19 @@ path relies on clients unmapping before releasing their holders; forced
 revocation and recovery require separate validation. Released addresses are
 not reused during a worker session.
 
+Capacity rejection before the first kernel allocation uses the existing
+generation-checked retire and home reclaim confirmations. The worker records
+`capacity-reject-intent`, cancels the unpublished request, confirms that no
+reservation exists, and continues serving. A rounded-size overflow, aligned
+address overflow, or insufficient remaining aperture is a deterministic
+capacity rejection. The rejected allocation becomes RETIRED, with no
+descriptor or address; `inspect-allocation`/`object-session wait_state` expose
+that terminal state, and the worker reports `reason=address_capacity`.
+This path does not reclaim or reuse previously retired addresses. Kernel or
+export errors still require reconciliation; an errno alone does not prove
+that no resource was created. Uncertain cancellation acknowledgements also
+stop the worker with its state file retained.
+
 Cancelling an unpublished allocation leaves it RETIRING until its bound home
 worker confirms cleanup. A late publish attaches the reservation to that
 RETIRING identity without making it acquirable. A running worker with no

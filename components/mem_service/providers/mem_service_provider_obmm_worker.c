@@ -33,6 +33,13 @@ struct worker_reservation {
     struct mem_service_provider_descriptor descriptor;
 };
 
+enum worker_allocate_result {
+    WORKER_ALLOCATE_ERROR = -1,
+    WORKER_ALLOCATE_OK = 0,
+    /* Proven before any resource-creating ioctl or reservation mutation. */
+    WORKER_ALLOCATE_CAPACITY = 1,
+};
+
 static volatile sig_atomic_t worker_stop;
 
 static void stop_worker(int signal_number)
@@ -157,21 +164,27 @@ static int allocate_work(int device, int journal,
     if (strcmp(work->state, "allocating") || work->capabilities != MEM_SERVICE_MANAGED_CAP_MAP ||
         strcmp(work->home_node, config->node) ||
         work->provider_incarnation != config->incarnation || reservation->occupied ||
-        !work->generation || !work->key[0] || page_size <= 0) return -1;
+        !work->generation || !work->key[0] || page_size <= 0 ||
+        work->provider_backed || work->descriptor_len || work->address || work->address_len ||
+        work->holder_count || work->live_refs || !aperture->base || !aperture->size ||
+        aperture->size > UINT64_MAX - aperture->base || *next_address < aperture->base ||
+        *next_address - aperture->base > aperture->size) return WORKER_ALLOCATE_ERROR;
     if (!granularity || (granularity & (granularity - 1)) ||
-        granularity < (uint64_t)page_size || !work->size_bytes ||
-        work->size_bytes > UINT64_MAX - (granularity - 1)) return -1;
+        granularity < (uint64_t)page_size || !work->size_bytes)
+        return WORKER_ALLOCATE_ERROR;
+    if (work->size_bytes > UINT64_MAX - (granularity - 1))
+        return WORKER_ALLOCATE_CAPACITY;
     backing_size = (work->size_bytes + granularity - 1) & ~(granularity - 1);
     if (alignment && (alignment & (alignment - 1))) return -1;
     if (alignment < granularity) alignment = granularity;
-    if (alignment < (uint64_t)page_size ||
-        *next_address > UINT64_MAX - (alignment - 1)) return -1;
+    if (*next_address > UINT64_MAX - (alignment - 1))
+        return WORKER_ALLOCATE_CAPACITY;
     request.requested_home_va = (*next_address + alignment - 1) & ~(alignment - 1);
     if (request.requested_home_va < aperture->base ||
         request.requested_home_va - aperture->base > aperture->size ||
         backing_size > UINT64_MAX - request.requested_home_va ||
         backing_size > aperture->size - (request.requested_home_va - aperture->base))
-        return -1;
+        return WORKER_ALLOCATE_CAPACITY;
     if (record_phase(journal, work->generation, "reserve-intent", 0, 0)) return -1;
     reservation->occupied = true;
     strcpy(reservation->key, work->key);
@@ -285,6 +298,37 @@ static int cancel_unreserved_work(int journal, const struct worker_config *confi
     return 0;
 }
 
+static int reject_capacity_work(int journal, const struct worker_config *config,
+    const struct mem_service_client *client, const struct mem_service_client_allocation *work)
+{
+    struct mem_service_client_allocation cancelled;
+    enum mem_service_wire_status status;
+    char operation[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    int length;
+
+    /* Only the no-ioctl capacity result may reach this path. Never use a
+     * provider/kernel error code as evidence that no reservation exists. */
+    if (strcmp(work->state, "allocating") || work->provider_backed ||
+        work->descriptor_len || work->address || work->address_len ||
+        work->holder_count || work->live_refs || !work->generation ||
+        strcmp(work->home_node, config->node) ||
+        work->provider_incarnation != config->incarnation) return -1;
+    length = snprintf(operation, sizeof(operation), "obmm-capacity-%" PRIu64 "-%" PRIu64,
+                      config->incarnation, work->generation);
+    if (length < 0 || (size_t)length >= sizeof(operation) ||
+        record_phase(journal, work->generation, "capacity-reject-intent", 0, 0) ||
+        mem_service_client_retire_object(client, work->key, operation, true,
+                                        work->generation, &cancelled, &status) ||
+        status != MEM_SERVICE_WIRE_STATUS_OK ||
+        strcmp(cancelled.key, work->key) || cancelled.generation != work->generation ||
+        cancel_unreserved_work(journal, config, client, &cancelled)) return -1;
+    printf("obmm-worker generation=%" PRIu64 " state=retired reason=address_capacity "
+           "size=%" PRIu64 " alignment=%" PRIu64 "\n",
+           work->generation, work->size_bytes, work->alignment_bytes);
+    fflush(stdout);
+    return 0;
+}
+
 int mem_service_provider_obmm_serve_allocations(const char *config_path)
 {
     struct worker_config config;
@@ -369,8 +413,14 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
             }
         }
         if (!strcmp(work.state, "allocating")) {
-            if (owned || !available || allocate_work(device, journal, &config,
-                    &client, &aperture, &work, available, &next_address)) goto done;
+            int allocation_result;
+            if (owned || !available) goto done;
+            allocation_result = allocate_work(device, journal, &config,
+                    &client, &aperture, &work, available, &next_address);
+            if (allocation_result == WORKER_ALLOCATE_CAPACITY) {
+                if (available->occupied || reject_capacity_work(journal, &config, &client, &work))
+                    goto done;
+            } else if (allocation_result != WORKER_ALLOCATE_OK) goto done;
         } else if (!strcmp(work.state, "retiring")) {
             if (owned ? reclaim_work(device, journal, &config, &client, &work, owned)
                       : cancel_unreserved_work(journal, &config, &client, &work)) goto done;
