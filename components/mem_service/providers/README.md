@@ -76,6 +76,17 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+`object-session` 的 `op=probe_descriptor key=<key>` 诊断从当前可读映射的
+provider handle 取得真实 descriptor，向同一 provider map 实现逐项提交
+24 组格式、必填身份字段、对齐和溢出负例，不接受用户提供的 descriptor。
+探针要求 endpoint 可用且仍有空闲 slot，避免把容量拒绝误计作格式校验。
+每项必须在 handle 分配前失败，保留原映射及 endpoint 资源计数；异常结果
+将 endpoint 标记为 closing，已取得资源继续由原有 cleanup 路径持有。
+此操作与 endpoint 的其他操作串行化，不发送有效 map 请求，不创建服务映射
+事务，也不改变 holder。CLI 还核对原映射首个逻辑页的 checksum，实际验收须
+继续完整读写及最终 kernel 资源核对。该负例集不验证合法格式的旧身份、
+动态 token 轮换或 consumer kernel 的拒绝时点。
+
 endpoint 资源快照按当前进程持有的 export/import handle 与实际 VMA 归属计量，
 独立于服务端对象/映射事务计数。分别报告 export/import 字节、VMA 保留字节、
 可访问视图字节及待清理映射；失败清理的剩余资源继续计入。快照调用须与该

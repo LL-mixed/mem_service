@@ -46,6 +46,13 @@ int mem_service_provider_obmm_endpoint_resources_v1(
 int mem_service_provider_obmm_endpoint_probe_conflict(
     struct mem_service_provider_obmm_endpoint *endpoint, uint64_t mapping_handle);
 
+/* Diagnostic only; serialize with endpoint operations. Submit only malformed
+ * copies of an owned strict descriptor. Unexpected resources remain owned and
+ * close admission. Does not certify rejection of well-formed stale identities.
+ */
+int mem_service_provider_obmm_endpoint_probe_descriptor(
+    struct mem_service_provider_obmm_endpoint *endpoint, uint64_t mapping_handle);
+
 struct obmm_gsva_segment_desc_v1;
 struct obmm_cmd_export;
 int mem_service_provider_obmm_encode_gsva(

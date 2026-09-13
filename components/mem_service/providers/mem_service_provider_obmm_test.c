@@ -13,6 +13,7 @@ static uint32_t last_event;
 static bool cleanup_mode, open_fails, unimport_fails, unexport_fails, close_fails;
 static unsigned cleanup_imports, cleanup_unimports, cleanup_unexports, cleanup_closes;
 static unsigned cleanup_unmaps;
+static unsigned cleanup_opens, cleanup_maps;
 static void *failed_unmap_address;
 static int mapping_fd = -1;
 static unsigned cleanup_exports;
@@ -26,6 +27,7 @@ int __real_munmap(void *address, size_t len);
 int __wrap_open(const char *path, int flags, ...)
 {
     if (cleanup_mode && !strncmp(path, "/dev/obmm_shmdev", 16)) {
+        ++cleanup_opens;
         if (open_fails) { errno = ENOENT; return -1; }
         mapping_fd = __real_open("/dev/null", O_RDONLY);
         return mapping_fd;
@@ -43,6 +45,7 @@ int __wrap_open(const char *path, int flags, ...)
 void *__wrap_mmap(void *address, size_t len, int prot, int flags, int fd, off_t offset)
 {
     if (cleanup_mode && fd == mapping_fd && fd >= 0) {
+        ++cleanup_maps;
         if (mapping_error) { errno = mapping_error; return MAP_FAILED; }
         if (unexpected_mapping) {
             void *actual = __real_mmap(NULL, len, prot,
@@ -155,6 +158,7 @@ static struct mem_service_obmm_context *cleanup_context(
     open_fails = unimport_fails = unexport_fails = close_fails = false;
     cleanup_imports = cleanup_unimports = cleanup_unexports = cleanup_closes = 0;
     cleanup_unmaps = 0;
+    cleanup_opens = cleanup_maps = 0;
     failed_unmap_address = NULL;
     mapping_error = 0;
     unexpected_mapping = false;
@@ -317,6 +321,38 @@ static void test_failed_export_encoding_retains_resources(void)
         unexport_fails = false;
         assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
     }
+}
+
+static void test_retained_descriptor_probe(void)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    void *base = __real_mmap(NULL, page * 4, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(base != MAP_FAILED && !__real_munmap(base, page * 4));
+    struct mem_service_mapping_request request = cleanup_request(base, page);
+    struct mem_service_mapping mapping = {0};
+    struct mem_service_provider_obmm_endpoint endpoint = {0};
+    struct mem_service_obmm_context *context = cleanup_context(&endpoint, page * 4);
+    assert(!mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
+    assert(mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
+    context->max_remote_mappings = 2;
+    context->import_pas[1] = 0xa0000000;
+    unsigned opens = cleanup_opens, maps = cleanup_maps, events = event_calls;
+    assert(!mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
+    assert(!mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
+    assert(cleanup_imports == 1 && !cleanup_unimports && !cleanup_unmaps && !cleanup_closes);
+    assert(cleanup_opens == opens && cleanup_maps == maps && event_calls == events);
+    assert(context->next_mapping_handle == mapping.handle && context->mappings[0].active);
+    assert(!context->mappings[1].active && !context->closing);
+    assert(!*(const uint8_t *)mapping.base);
+    assert(mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle + 1));
+    context->closing = true;
+    assert(mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
+    context->closing = false;
+    context->next_mapping_handle = UINT64_MAX;
+    assert(mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    puts("retained_descriptor_probe=pass checks=24 device_operations=0");
 }
 
 static void test_unmap_and_endpoint_failure_retention(void)
@@ -508,6 +544,7 @@ int main(void)
     test_logical_view_page_guards();
     test_import_and_partial_view_cleanup();
     test_retained_handle_conflict_probe();
+    test_retained_descriptor_probe();
     test_unmap_and_endpoint_failure_retention();
     test_failed_export_encoding_retains_resources();
     puts("obmm_cleanup_ownership=pass");

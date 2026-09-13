@@ -1621,6 +1621,109 @@ int mem_service_provider_obmm_endpoint_probe_conflict(
 #endif
 }
 
+int mem_service_provider_obmm_endpoint_probe_descriptor(
+    struct mem_service_provider_obmm_endpoint *endpoint, uint64_t mapping_handle)
+{
+#ifdef __linux__
+    static const struct {
+        const char *name;
+        unsigned offset, width;
+        uint64_t value;
+    } mutations[] = {
+        {"magic", 0, 4, 0}, {"version", 4, 4, 0}, {"length", 8, 4, 0},
+        {"reserved", 12, 4, 1}, {"export_id", 16, 8, 0},
+        {"uba", 24, 8, 0}, {"size", 32, 8, 0}, {"export_token", 40, 4, 0},
+        {"home_cna", 44, 4, 0}, {"segment", 48, 8, 0}, {"epoch", 56, 8, 0},
+        {"segment_flags", 64, 4, 0}, {"owner", 68, 4, UINT32_MAX},
+        {"nodes", 72, 4, 0}, {"cache", 76, 4, UINT32_MAX},
+        {"access_empty", 84, 4, 0}, {"access_unknown", 84, 4, 4},
+        {"segment_token_id", 88, 4, 0}, {"segment_token_value", 92, 4, 0},
+    };
+    const unsigned field_count = sizeof(mutations) / sizeof(mutations[0]);
+    const char *const extra_names[] = {
+        "short_descriptor", "long_descriptor", "unaligned_uba",
+        "unaligned_size", "range_overflow",
+    };
+    struct mem_service_obmm_context *context;
+    struct mem_service_obmm_mapping_slot *slot;
+    struct mem_service_mapping_request original = {0};
+    struct mem_service_provider_obmm_resources_v1 before, after;
+    bool available = false;
+    uint64_t next_handle;
+
+    if (!endpoint || !(context = endpoint->implementation) || context->closing ||
+        context->next_mapping_handle == UINT64_MAX) return -1;
+    slot = mem_service_obmm_find_mapping(context, mapping_handle);
+    if (!slot || !slot->descriptor.strict_gsva || slot->close_uncertain ||
+        slot->region.fd < 0 || !slot->region.addr || !slot->view_len ||
+        !(slot->descriptor.access_flags & OBMM_GSVA_ACCESS_READ)) return -1;
+    for (size_t i = 0; i < context->max_remote_mappings; ++i)
+        if (!context->mappings[i].active) available = true;
+    if (!available || slot->descriptor.size > context->import_region_bytes ||
+        slot->view_offset > slot->descriptor.size ||
+        slot->view_len > slot->descriptor.size - slot->view_offset ||
+        mem_service_obmm_descriptor_encode(&slot->descriptor, &original.remote_descriptor) ||
+        mem_service_provider_obmm_endpoint_resources_v1(endpoint, &before)) return -1;
+    original.remote_region_len = slot->descriptor.size;
+    original.offset = slot->view_offset;
+    original.len = slot->view_len;
+    original.memory_kind = MEM_SERVICE_MEMORY_HOST;
+    original.flags = MEM_SERVICE_MAPPING_FLAG_READ;
+    next_handle = context->next_mapping_handle;
+    for (unsigned i = 0; i < field_count + 5; ++i) {
+        struct mem_service_mapping_request request = original;
+        struct mem_service_mapping mapping = {0};
+        const char *name;
+        int rc;
+        if (i < field_count) {
+            name = mutations[i].name;
+            uint8_t *field = request.remote_descriptor.bytes + mutations[i].offset;
+            if (mutations[i].width == 8)
+                mem_service_obmm_put_u64(field, mutations[i].value);
+            else
+                mem_service_obmm_put_u32(field, (uint32_t)mutations[i].value);
+        } else {
+            unsigned extra = i - field_count;
+            name = extra_names[extra];
+            if (extra < 2) request.remote_descriptor.len =
+                MEM_SERVICE_OBMM_GSVA_DESCRIPTOR_BYTES + (extra ? 1 : -1);
+            else if (extra == 2)
+                mem_service_obmm_put_u64(request.remote_descriptor.bytes + 24,
+                                        slot->descriptor.remote_uba | 1U);
+            else if (extra == 3)
+                mem_service_obmm_put_u64(request.remote_descriptor.bytes + 32,
+                                        slot->descriptor.size | 1U);
+            else
+                mem_service_obmm_put_u64(request.remote_descriptor.bytes + 24,
+                                        UINT64_MAX & ~UINT64_C(4095));
+        }
+        /* This is the production provider callback, without SDK prevalidation. */
+        rc = mem_service_obmm_provider_map_remote_region(context, &request, &mapping);
+        if (rc != -1 || mapping.handle || context->next_mapping_handle != next_handle ||
+            mem_service_provider_obmm_endpoint_resources_v1(endpoint, &after) ||
+            before.export_handles != after.export_handles || before.export_bytes != after.export_bytes ||
+            before.import_handles != after.import_handles || before.import_bytes != after.import_bytes ||
+            before.vma_count != after.vma_count || before.vma_bytes != after.vma_bytes ||
+            before.accessible_views != after.accessible_views ||
+            before.accessible_bytes != after.accessible_bytes ||
+            before.cleanup_mappings != after.cleanup_mappings || before.closing != after.closing ||
+            before.control_close_uncertain != after.control_close_uncertain) {
+            context->closing = true;
+            fprintf(stderr, "obmm-descriptor-probe: result=fail field=%s rc=%d\n", name, rc);
+            return -1;
+        }
+        fprintf(stderr, "obmm-descriptor-probe: field=%s rejected=1 preserved=1\n", name);
+    }
+    fprintf(stderr, "obmm-descriptor-probe: result=pass checks=%u source=retained_handle\n",
+            field_count + 5);
+    return 0;
+#else
+    (void)endpoint;
+    (void)mapping_handle;
+    return -1;
+#endif
+}
+
 int mem_service_provider_obmm_endpoint_resources_v1(
     const struct mem_service_provider_obmm_endpoint *endpoint,
     struct mem_service_provider_obmm_resources_v1 *resources_out)

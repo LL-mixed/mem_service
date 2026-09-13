@@ -919,13 +919,39 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self._stop_server(daemon)
 
     def test_conflict_probe_rejects_manual_address_descriptor_and_flags(self):
-        for extra in ("address=0x400000000", "descriptor_hex=00", "flags=read"):
-            config = self._write_session("bad-conflict-probe.conf", "unix:/unused", [
-                f"probe_conflict key=obj-1 {extra}",
+        for action in ("probe_conflict", "probe_descriptor"):
+            for extra in ("address=0x400000000", "descriptor_hex=00", "flags=read"):
+                config = self._write_session("bad-conflict-probe.conf", "unix:/unused", [
+                    f"{action} key=obj-1 {extra}",
+                ], header_extra="provider=session-loopback")
+                result = self._run_session(config)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("op field not allowed for action", result.stderr)
+
+    def test_descriptor_probe_requires_held_obmm_mapping(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("descriptor-probe.conf", self._connect, [
+                "probe_descriptor key=obj-1 expect_status=not_found",
+                "acquire key=obj-1 idempotency_key=descriptor-acquire",
+                "probe_descriptor key=obj-1 expect_status=not_found",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=64 seed=19",
+                "probe_descriptor key=obj-1 expect_status=unsupported",
+                "read key=obj-1 offset=0 len=64 seed=19",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=descriptor-release",
             ], header_extra="provider=session-loopback")
             result = self._run_session(config)
-            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-            self.assertIn("op field not allowed for action", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("status=unsupported note=obmm_mapping_required", result.stdout)
+            self.assertNotIn("descriptor_probe=pass", result.stdout)
+            self.assertIn("result=ok ops=9", result.stdout)
+            stats = self._allocation_stats()
+            self.assertEqual(stats["live_refs"], "0")
+            self.assertEqual(stats["import_mappings"], "0")
+        finally:
+            self._stop_server(daemon)
 
     def test_cpu_readonly_probe_and_precondition_rejections(self):
         daemon = self._start_active_object()

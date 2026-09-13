@@ -10,6 +10,13 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+OBMM 平台诊断 `mem_service_provider_obmm_endpoint_probe_descriptor()` 及
+`object-session` 的 `op=probe_descriptor key=<key>` 从当前可读映射的 handle
+构造 24 组必定无效的 descriptor 副本，直接检查 provider map 拒绝及资源不变。
+调用须与 endpoint 操作串行；CLI 要求有效 holder 和当前映射。它不接受外部
+descriptor，不改变业务 SDK/wire，不提供动态身份轮换验收。非 OBMM endpoint
+返回 UNSUPPORTED，不能用 loopback fixture 计作实际 OBMM 通过。
+
 daemon 的幂等表为已接纳的对象、holder 和 mapping 预留后续清理应答容量。
 新工作可能在物理表尚有空位时返回 `CAPACITY_EXCEEDED`；调用方应完成已有生命周期，
 不能以新 operation ID 无限重试。有效 teardown 使用预留容量，无效 teardown
