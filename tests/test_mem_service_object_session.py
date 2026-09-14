@@ -1,6 +1,7 @@
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -89,12 +90,13 @@ class MemServiceObjectSessionTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def _compile_host_binary(self):
+    def _compile_host_binary(self, extra_flags=()):
         cmd = [
             "cc",
             "-O2",
             "-Wall",
             "-Wextra",
+            *extra_flags,
             f"-I{ROOT}",
             f"-I{ROOT / 'libs' / 'obmm_queue'}",
             str(CLI_SOURCE),
@@ -981,6 +983,97 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             self.assertIn("note=readonly_mapping_required", result.stdout)
             self.assertIn("note=guard_unavailable", result.stdout)
             self.assertIn("result=ok ops=15", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    def test_unmapped_cpu_probe_requires_mapping_and_survives_remap(self):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("unmapped-probe.conf", self._connect, [
+                "unmap key=obj-1 probe_unmapped=1 expect_status=not_found",
+                "acquire key=obj-1 idempotency_key=unmapped-acquire",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=64 seed=9",
+                "unmap key=wrong probe_unmapped=1 expect_status=not_found",
+                "read key=obj-1 offset=0 len=64 seed=9",
+                "unmap key=obj-1 probe_unmapped=1",
+                "unmap key=obj-1 probe_unmapped=1 expect_status=not_found",
+                "map key=obj-1 flags=read",
+                f"read key=obj-1 offset=0 len=64 expect_checksum=0x{_fnv1a64(bytes(64)):016x}",
+                "unmap key=obj-1 probe_unmapped=1",
+                "release key=obj-1 idempotency_key=unmapped-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.count("cpu_unmapped_probe=pass"), 2)
+            self.assertRegex(result.stdout, r"address=0x0000000400000000 signal=(7|10|11) ")
+            self.assertEqual(result.stdout.count("read_before_unmap=1 unmap_confirmed=1"), 2)
+            self.assertNotIn("cpu_unmapped_probe=fail", result.stdout)
+            self.assertEqual(self._allocation_stats()["import_mappings"], "0")
+            self.assertEqual(self._allocation_stats()["live_refs"], "0")
+        finally:
+            self._stop_server(daemon)
+
+    def test_unmapped_cpu_probe_config_is_explicit_and_scoped(self):
+        for operation in (
+            "unmap key=obj-1 probe_unmapped=0",
+            "unmap key=obj-1 probe_unmapped=true",
+            "unmap key=obj-1 probe_unmapped=2",
+            "unmap key=obj-1 probe_unmapped=1 address=0x400000000",
+            "map key=obj-1 probe_unmapped=1",
+            "probe_readonly key=obj-1 probe_unmapped=1",
+        ):
+            with self.subTest(operation=operation):
+                config = self._write_session("bad-unmapped.conf", "unix:/unused",
+                    [operation], header_extra="provider=session-loopback")
+                result = self._run_session(config)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertNotIn("cpu_unmapped_probe=pass", result.stdout)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires GNU link wrapping")
+    def test_unmapped_cpu_probe_detects_provider_unmap_noop(self):
+        self._compile_host_binary((
+            str(ROOT / "tests" / "mem_service_object_session_unmap_fault.c"),
+            "-Wl,--wrap=munmap",
+        ))
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("unmapped-noop.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=noop-acquire",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=0 len=64 seed=9",
+                "unmap key=obj-1 probe_unmapped=1",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("cpu_unmapped_probe=fail", result.stdout)
+            self.assertIn("signal=0", result.stdout)
+            self.assertIn("note=expected_cpu_fault_not_observed", result.stdout)
+            self.assertNotIn("cpu_unmapped_probe=pass", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires GNU link wrapping")
+    def test_unmapped_cpu_probe_does_not_access_failed_cleanup(self):
+        self._compile_host_binary((
+            str(ROOT / "tests" / "mem_service_object_session_unmap_fault.c"),
+            "-DSESSION_TEST_UNMAP_FAIL_ONCE", "-Wl,--wrap=munmap",
+        ))
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("unmapped-failure.conf", self._connect, [
+                "acquire key=obj-1 idempotency_key=failed-acquire",
+                "map key=obj-1 flags=readwrite",
+                "unmap key=obj-1 probe_unmapped=1 expect_status=internal",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=failed-release",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("note=unmap_failed", result.stdout)
+            self.assertNotIn("cpu_unmapped_probe=", result.stdout)
+            self.assertEqual(self._allocation_stats()["import_mappings"], "0")
+            self.assertEqual(self._allocation_stats()["live_refs"], "0")
         finally:
             self._stop_server(daemon)
 

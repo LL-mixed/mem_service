@@ -1,5 +1,14 @@
 # Memory Service Component
 
+## 解除映射后的 CPU 诊断契约
+
+`object-session` 的 `unmap key=<key> probe_unmapped=1` 显式启用同进程
+CPU 探针。它要求当前可读映射，先读取原地址，再完成原 managed unmap，
+最后读取保存的地址并要求同步目标地址故障。unmap 失败保持清理上下文且
+不执行探针；默认 unmap 不增加 CPU 访问。探针不接收外部地址，不复制
+mapping/holder 归属，不改变 SDK/wire。它只验证新映射建立前的不可访问性，
+旧身份拒绝、强制撤销及同址新映射后的访问隔离仍须独立验收。
+
 ## 幂等历史批量归档约定
 
 既有 `serve --store` 的缓存归档使用有界批量接口，一批最多等于幂等缓存

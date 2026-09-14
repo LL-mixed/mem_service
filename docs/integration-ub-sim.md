@@ -176,6 +176,13 @@ fork 子进程，因此子进程的访问故障不能用于证明原映射的保
 session 的 `provider_import_region_bytes` 同时作为 canary 大小，须满足 pool 粒度
 并覆盖对象 backing。此配置显式描述部署 profile，不代表自动探测硬件能力。
 
+诊断 `op=unmap key=<key> probe_unmapped=1` 在当前可读映射仍有效时读取首字节，
+保存原地址；确认 managed unmap 完成后，在同一进程重新读取该地址，要求目标
+地址发生同步 SIGSEGV/SIGBUS。仅解除映射成功且实际故障被捕获才通过；清理
+失败时不执行探针，保留原清理归属。未指定选项时原 unmap 行为不变。loopback
+结果只证明 CLI 探针机制，真实 OBMM 必须独立运行。该探针覆盖解除映射后、
+新映射建立前的 CPU 访问，不证明同址新映射建立后的裸指针隔离或旧 token 拒绝。
+
 受管理 map 在 BEGIN 事务创建前，通过既有只读 inspect-allocation
 查询核对服务端当前绑定：key/generation、ACTIVE、home/incarnation、size/alignment、
 capabilities、provider-backed、地址/范围和完整不透明 descriptor。任一绑定不匹配

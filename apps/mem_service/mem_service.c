@@ -156,6 +156,7 @@ static void usage(const char *argv0)
     printf(" [reference-transition --action <begin|stage|seal|resolve|acquire|map-begin> --key <key> [--session-id <id> --idempotency-key <id>] [--generation <u64> --version <u64>] [--reference-hex <512hex>] [--access <1|2|3>]]");
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict|probe_descriptor> field=value ...]");
     printf(" [object-session map diagnostics: fault=<descriptor|descriptor_length|descriptor_oversize|address|address_len|size|alignment|capabilities|home|incarnation> [fault_byte=N for descriptor] expect_status=stale_ref]");
+    printf(" [object-session unmap diagnostic: unmap key=<key> probe_unmapped=1 # require same-process CPU fault after confirmed unmap]");
     printf(" [object-session V2 writer: begin_reference key=<allocation> generation=N version=N idempotency_key=<id>; publish_reference key=<logical> offset=N len=N kind=N owner=N producer=N idempotency_key=<id>; unmap then seal_reference key=<allocation> generation=N version=N idempotency_key=<id>]");
     printf(" [object-session V2 reader: acquire_reference key=<logical> idempotency_key=<id>; map_reference key=<allocation>; unmap then release]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
@@ -9596,6 +9597,7 @@ struct mem_service_object_session_op {
     uint64_t address_len;
     bool confirmed;
     uint64_t map_flags;
+    bool probe_unmapped;
     char map_fault[32];
     uint64_t fault_byte;
     uint64_t data_offset;
@@ -10271,6 +10273,9 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         "key", "flags", "fault", "fault_byte",
     };
     static const char *const unmap[] = {
+        "key", "probe_unmapped",
+    };
+    static const char *const key_only[] = {
         "key",
     };
     static const char *const write[] = {
@@ -10339,13 +10344,16 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         count = sizeof(map) / sizeof(map[0]);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+        table = unmap;
+        count = sizeof(unmap) / sizeof(unmap[0]);
+        break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR:
-        table = unmap;
-        count = sizeof(unmap) / sizeof(unmap[0]);
+        table = key_only;
+        count = sizeof(key_only) / sizeof(key_only[0]);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
         table = write;
@@ -10847,6 +10855,17 @@ static int mem_service_object_session_parse_op(
         }
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        value = mem_service_object_session_find_field(fields, field_count, "probe_unmapped");
+        if (value != NULL) {
+            if (strcmp(value, "1")) {
+                mem_service_object_session_config_error(line_no,
+                    "probe_unmapped requires 1", NULL);
+                return 2;
+            }
+            op->probe_unmapped = true;
+        }
+        break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
@@ -12027,7 +12046,10 @@ static int mem_service_object_session_run_op(
             0,
             false);
     }
-    case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP: {
+        uintptr_t old_address = 0;
+        uint64_t old_generation = 0;
+        uint8_t readable = 0;
         if (!state->mapped ||
             strcmp(state->mapping.key, op->key) != 0) {
             return mem_service_object_session_finish_data_op(
@@ -12040,6 +12062,19 @@ static int mem_service_object_session_run_op(
                 0,
                 0,
                 false);
+        }
+        if (op->probe_unmapped) {
+            if (!state->mapping.base || !state->mapping.len ||
+                !(state->mapping.flags & MEM_SERVICE_CLIENT_MAP_READ) ||
+                !mem_service_object_session_find_holder(state, op->key,
+                    state->mapping.generation, config->session_id)) {
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "readable_mapping_required",
+                    0, 0, 0, false);
+            }
+            old_address = (uintptr_t)state->mapping.base;
+            old_generation = state->mapping.generation;
+            readable = *(volatile uint8_t *)state->mapping.base;
         }
         if (mem_service_object_session_unmap(state, &status) != 0) {
             return mem_service_object_session_finish_data_op(
@@ -12056,6 +12091,19 @@ static int mem_service_object_session_run_op(
         state->mapped = false;
         state->mapped_backing_len = 0;
         memset(&state->mapping, 0, sizeof(state->mapping));
+        if (op->probe_unmapped) {
+            rc = mem_service_object_session_probe_fault(&readable,
+                (uint8_t *)old_address, false);
+            printf("mem_service object-session: session=%s cpu_unmapped_probe=%s "
+                   "key=%s generation=%llu address=0x%016llx signal=%d "
+                   "read_before_unmap=1 unmap_confirmed=1\n",
+                   config->session_id, rc ? "fail" : "pass", op->key,
+                   (unsigned long long)old_generation,
+                   (unsigned long long)old_address, (int)mem_service_probe_signal);
+            return mem_service_object_session_finish_data_op(config, index, op,
+                rc ? MEM_SERVICE_WIRE_STATUS_INTERNAL : MEM_SERVICE_WIRE_STATUS_OK,
+                rc ? "expected_cpu_fault_not_observed" : NULL, 0, 0, 0, false);
+        }
         return mem_service_object_session_finish_data_op(
             config,
             index,
@@ -12066,6 +12114,7 @@ static int mem_service_object_session_run_op(
             0,
             0,
             false);
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE: {
         struct mem_service_visibility_completion completion;
