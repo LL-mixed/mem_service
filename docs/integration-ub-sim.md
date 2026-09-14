@@ -10,6 +10,15 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+V2 reader 新增 `mem_service_client_map_managed_reference()` 与配套 unmap，
+使用独立 reference lifecycle 保留引用和不确定的 BEGIN。客户端先 resolve、
+acquire，再发起只读映射；服务在 `map-begin` 中核对完整登记引用、封存版本、
+实际 holder 和活动 home。映射采用 allocation-relative 子区间，原 raw 入口
+仍拒绝封存 V2。`object-session` 提供 `acquire_reference key=<logical-key>
+idempotency_key=<id>`、`map_reference key=<allocation-key>`；后续读、可见性、
+unmap/release 沿用既有操作。该接入不改变 gitlink/lock 发布要求，也不构成
+实际 guest 的 V2 发布/读取或 W5 验收证明。
+
 严格 OBMM 固定地址映射允许非零 allocation-relative offset：中立 provider
 请求的 requested_address 必须等于 backing 基址加 offset，返回精确视图 base/len。
 整个 backing 地址空间继续保留，视图外完整页不可访问，子页边界仍由 SDK 检查。
@@ -20,7 +29,7 @@ V2 的服务 core 增加 begin/stage/seal、resolve/acquire 元数据状态机�
 record table 的专用 managed-view kind。写入前推进 content version；封存后按
 登记的完整视图及当前 allocation 核对引用。core record/allocation 内存结构新增
 字段，不能混用不同版本的 core 编译产物；旧 V1 投影明确拒绝 managed-view。
-此阶段尚无新 wire/SDK 入口，V2 reader mapping 与 W5 接入仍待实现；ub_sim
+V2 的 wire/SDK 入口已显式接入，实际 guest 与 W5 接入仍待验证；ub_sim
 不得直接调用 core 绕过统一 SDK 或消费未提交、未锁定的子仓库源码。
 
 全局引用新增 opt-in 的 256-byte V2 编码，位于既有公开头
@@ -329,8 +338,8 @@ generation、content version、home incarnation 检查发生在缓存回执返�
 也不能获得当前引用。BEGIN 为首次 STAGE 和 SEAL 预留回执容量，ACQUIRE
 为 RELEASE 预留容量；通用 record retention 不回收受管理引用。
 
-本接口当前覆盖 daemon 生命周期内的控制协议。reader 的 V2 映射接入、
-provider 可见性闭环、W5 V2 实际数据链路和跨 daemon 重启验证仍需完成；
+本接口当前覆盖 daemon 生命周期内的控制协议及 reader SDK 映射编排。
+实际跨 guest provider 可见性闭环、W5 V2 数据链路和跨 daemon 重启验证仍需完成；
 不能将上述 metadata 测试计入这些验收项。下游消费仍遵守 clean commit、
 远端可获取、gitlink 与 lock 一致的原有要求。
 

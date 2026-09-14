@@ -1,12 +1,18 @@
 # ds4 使用侧适配手册
 
+可选 V2 reader SDK 增加独立 reference lifecycle、只读 map/unmap 与返回 pending
+事务的 `mem_service_client_reference_map_begin()`。已有 reference result、mapping、
+lifecycle 和 client record 布局保持不变；原通用 reference-transition SDK 不接纳
+map-begin，避免调用方丢失新事务的清理责任。显式采用新 reader API 前先持有
+对应 allocation；失败须保留上下文并重试配套 unmap。DS4 默认路径保持不变。
+
 严格 OBMM provider 的固定地址子区间请求现在按视图首字节核对地址，允许合法
 非零 offset，并保留只读权限与视图外整页保护。此实现不改变中立 SDK 结构、
 RoCE/TCP 路径或 DS4 默认行为；它不提供 V2 reader 的服务端准入或模型验收结果。
 
 V2 服务端引用目录新增 core 发布/解析状态机，沿用同一 record table 与 managed
 allocation。它改变 core 内存结构，未改变安装态 client/provider SDK 的既有
-结构与调用路径；本阶段不提供新的 wire/SDK 接入，也未接通 V2 reader mapping。
+结构与默认调用路径；控制协议与 V2 reader 使用独立的 opt-in wire/SDK 接口。
 DS4 继续使用当前安装 SDK，不能把 core metadata 测试计作推理或数据面认证。
 
 安装 SDK 的既有 `lingqu_object_service.h` 增加 header-only V2 引用编解码，
@@ -334,7 +340,7 @@ allocation generation、内容 version、home incarnation 与完整 V2 引用；
 `acquire` 成功后仍需 `release-object` 归还 holder。
 
 DS4 当前推理/KV 路径不因此自动切换到 V2。控制回执不代表 payload 已完成
-发布或可读；V2 reader mapping、模型数据链路和重启恢复仍是独立验收项。
+发布或可读；reader 的真实 provider 数据链路、模型集成和重启恢复仍是独立验收项。
 安装边界可使用 `make -C apps/mem_service installed-reference-protocol-smoke`
 验证，该目标编译安装目录中的公开头和 client/provider 源码。
 

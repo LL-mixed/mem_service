@@ -25,6 +25,8 @@ class ReferenceProtocolTests(unittest.TestCase):
             run = subprocess.run([str(binary), "--self-test"], capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("malformed_replies=17 output_preserved=1 scope=mock-wire", run.stdout)
+            self.assertIn("reference_map_begin_client=pass malformed_replies=6 legacy_result_abi=preserved",
+                          run.stdout)
 
     def test_strict_roundtrip_and_unchanged_failure_outputs(self):
         compiler = shutil.which("cc")
@@ -41,7 +43,7 @@ class ReferenceProtocolTests(unittest.TestCase):
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(binary), "--self-test"], capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertIn("actions=5 invalid_requests=16 hex_truncations=512 scope=codec-only", run.stdout)
+            self.assertIn("actions=6 invalid_requests=17 hex_truncations=512 scope=codec-only", run.stdout)
             for args in ([], ["--unknown"], ["--self-test", "extra"]):
                 run = subprocess.run([str(binary), *args], capture_output=True, timeout=5)
                 self.assertEqual(run.returncode, 2)

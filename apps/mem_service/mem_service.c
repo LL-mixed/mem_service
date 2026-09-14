@@ -153,7 +153,7 @@ static void usage(const char *argv0)
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
     printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
-    printf(" [reference-transition --action <begin|stage|seal|resolve|acquire> --key <key> [--session-id <id> --idempotency-key <id>] [--generation <u64> --version <u64>] [--reference-hex <512hex>] [--access <1|2|3>]]");
+    printf(" [reference-transition --action <begin|stage|seal|resolve|acquire|map-begin> --key <key> [--session-id <id> --idempotency-key <id>] [--generation <u64> --version <u64>] [--reference-hex <512hex>] [--access <1|2|3>]]");
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict|probe_descriptor> field=value ...]");
     printf(" [object-session map diagnostics: fault=<descriptor|descriptor_length|descriptor_oversize|address|address_len|size|alignment|capabilities|home|incarnation> [fault_byte=N for descriptor] expect_status=stale_ref]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
@@ -9369,7 +9369,7 @@ static int run_mapping_transition(int argc, char **argv)
 
 static int run_reference_transition(int argc, char **argv)
 {
-    static const char *actions[] = {"begin", "stage", "seal", "resolve", "acquire"};
+    static const char *actions[] = {"begin", "stage", "seal", "resolve", "acquire", "map-begin"};
     static const char *options[] = {"--action", "--key", "--session-id", "--generation",
         "--version", "--reference-hex", "--access", "--idempotency-key", "--connect",
         "--timeout-ms", "--max-attempts", "--retry-backoff-ms"};
@@ -9380,6 +9380,7 @@ static int run_reference_transition(int argc, char **argv)
     const char *connect_spec;
     struct mem_service_reference_request request;
     struct mem_service_client_reference_result result;
+    struct mem_service_client_mapping_transaction mapping;
     struct mem_service_client client;
     struct mem_service_wire_client_options client_options;
     enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
@@ -9404,7 +9405,9 @@ static int run_reference_transition(int argc, char **argv)
         parse_socket_arg(argc, argv, "--connect", &connect_spec) ||
         parse_client_options(argc, argv, &client_options)) goto invalid;
     mem_service_client_init_with_options(&client, connect_spec, &client_options);
-    rc = mem_service_client_reference_transition(&client, &request, &result, &status);
+    rc = request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN ?
+        mem_service_client_reference_map_begin(&client, &request, &result, &mapping, &status) :
+        mem_service_client_reference_transition(&client, &request, &result, &status);
     printf("mem_service reference-transition: status=%s\nstatus=%s\n",
            mem_service_wire_status_name(status), mem_service_wire_status_name(status));
     if (!rc) {
@@ -9414,10 +9417,13 @@ static int run_reference_transition(int argc, char **argv)
                result.allocation.generation, result.allocation.version,
                result.allocation.home_node, result.allocation.provider_incarnation);
         if (request.action == MEM_SERVICE_REFERENCE_STAGE || request.action == MEM_SERVICE_REFERENCE_RESOLVE ||
-            request.action == MEM_SERVICE_REFERENCE_ACQUIRE) {
+            request.action == MEM_SERVICE_REFERENCE_ACQUIRE || request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN) {
             if (mem_service_reference_encode_hex(&result.reference, hex, sizeof(hex))) return 1;
             printf("reference_hex=%s\n", hex);
         }
+        if (request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN)
+            printf("mapping_id=%" PRIu64 "\nmapping_state=%u\nsession_id=%s\n",
+                   mapping.mapping_id, mapping.state, request.session_id);
     }
     return rc;
 invalid:
@@ -9540,6 +9546,8 @@ enum mem_service_object_session_action {
     MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD = 17,
     MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT = 18,
     MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR = 19,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE = 20,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE = 21,
 };
 
 struct mem_service_object_session_field {
@@ -9618,6 +9626,8 @@ struct mem_service_object_session_loopback_mapping {
     uint64_t handle;
     void *base;
     uint64_t len;
+    void *view_base;
+    uint64_t view_len;
 };
 
 struct mem_service_object_session_loopback {
@@ -9647,6 +9657,10 @@ struct mem_service_object_session_state {
     struct mem_service_client_mapping_lifecycle conflict_lifecycle;
     struct mem_service_client_object_mapping mapping;
     struct mem_service_client_mapping_lifecycle mapping_lifecycle;
+    bool has_reference;
+    bool mapped_reference;
+    struct lingqu_object_ref_wire_v2 reference;
+    struct mem_service_client_reference_lifecycle reference_lifecycle;
     const struct mem_service_client *client;
     bool provider_ready;
     struct mem_service_provider_registry registry;
@@ -9683,6 +9697,7 @@ static int mem_service_object_session_track_holder(
     struct mem_service_object_session_holder *holder;
 
     if (op->action != MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE &&
+        op->action != MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE &&
         op->action != MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE) {
         return 0;
     }
@@ -9697,7 +9712,8 @@ static int mem_service_object_session_track_holder(
     }
     holder = mem_service_object_session_find_holder(
         state, view->key, view->generation, session_id);
-    if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE) {
+    if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE ||
+        op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE) {
         if (holder == NULL) {
             for (uint32_t i = 0; i < MEM_SERVICE_OBJECT_SESSION_MAX_OPS; ++i) {
                 if (!state->holders[i].live) {
@@ -9759,6 +9775,9 @@ static int mem_service_object_session_loopback_map(
     struct mem_service_object_session_loopback *loopback = context;
     void *base;
     int prot = 0;
+    long page = sysconf(_SC_PAGESIZE);
+    uintptr_t backing, view_page;
+    uint64_t view_bytes;
     size_t i;
 
     if (loopback == NULL || request == NULL || mapping_out == NULL ||
@@ -9770,9 +9789,18 @@ static int mem_service_object_session_loopback_map(
         (request->flags & (MEM_SERVICE_MAPPING_FLAG_READ |
                            MEM_SERVICE_MAPPING_FLAG_WRITE)) == 0 ||
         (request->flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS) == 0 ||
-        request->requested_address == NULL || request->offset != 0) {
+        request->requested_address == NULL || page <= 0 ||
+        ((uint64_t)page & ((uint64_t)page - 1)) ||
+        request->offset > (uintptr_t)request->requested_address ||
+        loopback->next_handle == UINT64_MAX) {
         return -1;
     }
+    backing = (uintptr_t)request->requested_address - request->offset;
+    if (!backing || backing % (uint64_t)page ||
+        request->remote_region_len > UINTPTR_MAX - backing ||
+        request->remote_region_len > SIZE_MAX) return -1;
+    view_page = (uintptr_t)request->requested_address & ~((uintptr_t)page - 1);
+    view_bytes = (uintptr_t)request->requested_address - view_page + request->len;
     for (i = 0; i < MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS; ++i) {
         if (!loopback->mappings[i].active) {
             break;
@@ -9790,27 +9818,31 @@ static int mem_service_object_session_loopback_map(
     /* No MAP_FIXED: the kernel honors the hint only when the range is
      * free, so a live mapping can never be clobbered; any other returned
      * address is a strict-address failure and is torn down at once. */
-    base = mmap(request->requested_address,
-                request->len,
-                prot,
+    base = mmap((void *)backing,
+                request->remote_region_len,
+                PROT_NONE,
                 MAP_PRIVATE | MAP_ANONYMOUS,
                 -1,
                 0);
     if (base == MAP_FAILED) {
         return -1;
     }
-    if (base != request->requested_address) {
-        (void)munmap(base, request->len);
-        return -1;
-    }
     loopback->next_handle += 1U;
     loopback->mappings[i].active = true;
     loopback->mappings[i].handle = loopback->next_handle;
     loopback->mappings[i].base = base;
-    loopback->mappings[i].len = request->len;
+    loopback->mappings[i].len = request->remote_region_len;
     memset(mapping_out, 0, sizeof(*mapping_out));
     mapping_out->handle = loopback->next_handle;
-    mapping_out->base = base;
+    if (base != (void *)backing || mprotect((void *)view_page, view_bytes, prot)) {
+        /* Keep the real reservation and handle until the neutral wrapper
+         * confirms teardown; no inaccessible view may escape on failure. */
+        mapping_out->memory_kind = request->memory_kind;
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    }
+    loopback->mappings[i].view_base = request->requested_address;
+    loopback->mappings[i].view_len = request->len;
+    mapping_out->base = request->requested_address;
     mapping_out->len = request->len;
     mapping_out->memory_kind = request->memory_kind;
     return 0;
@@ -9860,10 +9892,10 @@ static int mem_service_object_session_loopback_range(
     for (i = 0; i < MEM_SERVICE_OBJECT_SESSION_LOOPBACK_MAX_MAPPINGS; ++i) {
         if (loopback->mappings[i].active &&
             loopback->mappings[i].handle == request->mapping_handle) {
-            base = loopback->mappings[i].base;
-            if (request->offset > loopback->mappings[i].len ||
+            base = loopback->mappings[i].view_base;
+            if (request->offset > loopback->mappings[i].view_len ||
                 request->len >
-                    loopback->mappings[i].len - request->offset) {
+                    loopback->mappings[i].view_len - request->offset) {
                 return -1;
             }
             break;
@@ -9900,6 +9932,10 @@ static const char *mem_service_object_session_action_name(uint32_t action)
         return "allocate";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
         return "acquire";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE:
+        return "acquire_reference";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
+        return "map_reference";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
         return "release";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE:
@@ -10231,6 +10267,7 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE:
         table = holder;
         count = sizeof(holder) / sizeof(holder[0]);
         break;
@@ -10259,6 +10296,7 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         count = sizeof(map) / sizeof(map[0]);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
@@ -10296,6 +10334,8 @@ static bool mem_service_object_session_parse_action(const char *name,
     } actions[] = {
         {"allocate", MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE},
         {"acquire", MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE},
+        {"acquire_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE},
+        {"map_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE},
         {"release", MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE},
         {"retire", MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE},
         {"inspect", MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT},
@@ -10516,6 +10556,7 @@ static int mem_service_object_session_parse_op(
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE:
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key",
                                                    op->idempotency_key);
@@ -10735,6 +10776,7 @@ static int mem_service_object_session_parse_op(
         }
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
@@ -11034,6 +11076,7 @@ static int mem_service_object_session_load_config(
 static bool mem_service_object_session_action_is_data_plane(uint32_t action)
 {
     return action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_READ ||
@@ -11252,6 +11295,16 @@ static int mem_service_object_session_provider_open(
     return 0;
 }
 
+static int mem_service_object_session_unmap(
+    struct mem_service_object_session_state *state, enum mem_service_wire_status *status)
+{
+    return state->mapped_reference ?
+        mem_service_client_unmap_managed_reference(state->client, &state->channel,
+            &state->mapping, &state->reference_lifecycle, status) :
+        mem_service_client_unmap_managed_allocation(state->client, &state->channel,
+            &state->mapping, &state->mapping_lifecycle, status);
+}
+
 static int mem_service_object_session_provider_close(
     struct mem_service_object_session_state *state)
 {
@@ -11266,9 +11319,7 @@ static int mem_service_object_session_provider_close(
     if (state->mapped) {
         /* Best-effort teardown on a failed session; the end-of-session
          * check has already flagged the leaked mapping as an error. */
-        if (mem_service_client_unmap_managed_allocation(state->client,
-                &state->channel, &state->mapping, &state->mapping_lifecycle,
-                NULL) != 0) {
+        if (mem_service_object_session_unmap(state, NULL) != 0) {
             fprintf(stderr, "mem_service object-session: cleanup_pending key=%s "
                     "generation=%llu handle=%llu\n", state->mapping.key,
                     (unsigned long long)state->mapping.generation,
@@ -11310,7 +11361,8 @@ static void mem_service_object_session_print_data_op_line(
            mem_service_object_session_action_name(op->action),
            op->key[0] != '\0' ? op->key : "-",
            mem_service_wire_status_name(status));
-    if (op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP && note == NULL) {
+    if ((op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP ||
+         op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE) && note == NULL) {
         printf(" base=0x%016llx len=%llu",
                (unsigned long long)address,
                (unsigned long long)len);
@@ -11494,7 +11546,12 @@ static int mem_service_object_session_run_op(
                 return mem_service_object_session_finish_data_op(config, index, op,
                     MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "guard_unavailable", 0, 0, 0, false);
             }
-            if (offset % (uint64_t)page) offset += (uint64_t)page - offset % (uint64_t)page;
+            uintptr_t end = (uintptr_t)state->mapping.base + state->mapping.len;
+            if (end > UINTPTR_MAX - (uint64_t)page)
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "guard_unavailable", 0, 0, 0, false);
+            if (end % (uint64_t)page) end += (uint64_t)page - end % (uint64_t)page;
+            offset = end - (uintptr_t)state->mapping.base;
             if (offset >= state->mapped_backing_len) {
                 return mem_service_object_session_finish_data_op(config, index, op,
                     MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "no_full_padding_page", 0, 0, 0, false);
@@ -11523,6 +11580,34 @@ static int mem_service_object_session_run_op(
                                                 &request,
                                                 &view,
                                                 &status);
+        break;
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE: {
+        struct mem_service_reference_request request = {0};
+        struct mem_service_client_reference_result result;
+        request.action = MEM_SERVICE_REFERENCE_RESOLVE;
+        snprintf(request.key, sizeof(request.key), "%s", op->key);
+        rc = mem_service_client_reference_transition(client, &request, &result, &status);
+        if (rc) break;
+        if (op->has_expected_generation && result.reference.allocation_generation != op->expected_generation) {
+            rc = -1; status = MEM_SERVICE_WIRE_STATUS_STALE_REF;
+            break;
+        }
+        /* Resolve names may be longer than allocation keys; canonical
+         * fixed-width fields must not retain bytes from the prior request. */
+        memset(&request, 0, sizeof(request));
+        request.action = MEM_SERVICE_REFERENCE_ACQUIRE;
+        request.reference = result.reference;
+        request.access = LINGQU_OBJECT_REF_V2_READ;
+        snprintf(request.key, sizeof(request.key), "%s", request.reference.allocation_key);
+        snprintf(request.session_id, sizeof(request.session_id), "%s", session_id);
+        snprintf(request.idempotency_key, sizeof(request.idempotency_key), "%s", op->idempotency_key);
+        rc = mem_service_client_reference_transition(client, &request, &result, &status);
+        if (!rc) {
+            state->reference = result.reference;
+            state->has_reference = true;
+            view = result.allocation;
+        }
         break;
     }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
@@ -11599,6 +11684,7 @@ static int mem_service_object_session_run_op(
                                                    &status);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR: {
         unsigned char nonce[16];
@@ -11607,6 +11693,7 @@ static int mem_service_object_session_run_op(
         bool conflict = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT;
         bool descriptor_probe = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR;
         bool probe = conflict || descriptor_probe;
+        bool reference_map = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE;
         uint64_t before = 0, probe_len = 0;
         FILE *random;
         size_t nonce_len;
@@ -11647,7 +11734,8 @@ static int mem_service_object_session_run_op(
                         (uint64_t)page;
             before = mem_service_provider_checksum64(state->mapping.base, probe_len);
         }
-        if (!state->has_view ||
+        if ((reference_map && (!state->has_reference || strcmp(state->reference.allocation_key, op->key))) ||
+            !state->has_view ||
             strcmp(state->view.key, op->key) != 0 ||
             !mem_service_object_session_find_holder(state, op->key,
                 state->view.generation, config->session_id)) {
@@ -11726,7 +11814,11 @@ static int mem_service_object_session_run_op(
             return mem_service_object_session_finish_data_op(config, index, op,
                 MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "mapping_fault_unavailable",
                 0, 0, 0, false);
-        rc = mem_service_client_map_managed_allocation(client, &state->channel,
+        if (!probe) state->mapped_reference = reference_map;
+        rc = reference_map ?
+            mem_service_client_map_managed_reference(client, &state->channel, &state->reference,
+                config->session_id, operation_id, &state->mapping, &state->reference_lifecycle, &status) :
+            mem_service_client_map_managed_allocation(client, &state->channel,
                 &supplied, config->session_id, operation_id,
                 conflict ? MEM_SERVICE_CLIENT_MAP_READ : op->map_flags,
                 conflict ? &state->conflict_mapping : &state->mapping,
@@ -11753,7 +11845,8 @@ static int mem_service_object_session_run_op(
                 MEM_SERVICE_WIRE_STATUS_OK, NULL, 0, 0, 0, false);
         }
         if (rc != 0) {
-            state->mapped = state->mapping_lifecycle.pending;
+            state->mapped = reference_map ? state->reference_lifecycle.mapping.pending :
+                                            state->mapping_lifecycle.pending;
             if (!state->mapped)
                 memset(&state->mapping, 0, sizeof(state->mapping));
             return mem_service_object_session_finish_data_op(
@@ -11768,7 +11861,8 @@ static int mem_service_object_session_run_op(
                 false);
         }
         state->mapped = true;
-        state->mapped_backing_len = state->view.address_len;
+        state->mapped_backing_len = state->view.address_len -
+            (reference_map ? state->reference.object.payload_offset : 0);
         return mem_service_object_session_finish_data_op(
             config,
             index,
@@ -11794,8 +11888,7 @@ static int mem_service_object_session_run_op(
                 0,
                 false);
         }
-        if (mem_service_client_unmap_managed_allocation(client, &state->channel,
-                &state->mapping, &state->mapping_lifecycle, &status) != 0) {
+        if (mem_service_object_session_unmap(state, &status) != 0) {
             return mem_service_object_session_finish_data_op(
                 config,
                 index,

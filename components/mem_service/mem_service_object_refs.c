@@ -225,3 +225,18 @@ enum mem_service_managed_result mem_service_reference_acquire(
     return mem_service_managed_acquire_published(&svc->managed, ref->allocation_key,
         session_id, ref->allocation_generation, ref->object.object_version, allocation_out);
 }
+
+enum mem_service_managed_result mem_service_reference_map_begin(
+    struct mem_service *svc, const struct lingqu_object_ref_wire_v2 *ref,
+    const char *session_id, uint32_t requested_access,
+    struct mem_service_managed_mapping *mapping_out)
+{
+    struct mem_service_managed_view current;
+    enum mem_service_managed_result result;
+    if (!mapping_out || requested_access != LINGQU_OBJECT_REF_V2_READ)
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    result = mem_service_reference_validate(svc, ref, session_id, requested_access, &current);
+    if (result) return result;
+    return mem_service_managed_mapping_begin_published(&svc->managed, ref->allocation_key,
+        session_id, ref->allocation_generation, ref->object.object_version, mapping_out);
+}

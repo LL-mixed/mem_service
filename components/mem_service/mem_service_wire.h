@@ -73,6 +73,7 @@ enum mem_service_wire_reference_action {
     MEM_SERVICE_REFERENCE_SEAL = 3,
     MEM_SERVICE_REFERENCE_RESOLVE = 4,
     MEM_SERVICE_REFERENCE_ACQUIRE = 5,
+    MEM_SERVICE_REFERENCE_MAP_BEGIN = 6,
 };
 
 enum mem_service_wire_status {

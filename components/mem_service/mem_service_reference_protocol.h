@@ -125,10 +125,13 @@ static inline int mem_service_reference_parse_request(
         required = 1U | 2U;
         break;
     case MEM_SERVICE_REFERENCE_ACQUIRE:
+    case MEM_SERVICE_REFERENCE_MAP_BEGIN:
         required = 1U | 2U | 4U | 32U | 64U | 128U;
         if (!request.access || request.access > 3 ||
             (request.access & ~request.reference.access) ||
             strcmp(request.key, request.reference.allocation_key)) return -EINVAL;
+        if (request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN &&
+            request.access != LINGQU_OBJECT_REF_V2_READ) return -EINVAL;
         break;
     default: return -EINVAL;
     }
@@ -158,11 +161,12 @@ static inline int mem_service_reference_format_request(
         if (mem_service_wire_payload_append_u64(payload, sizeof(payload), "generation", request->generation) ||
             mem_service_wire_payload_append_u64(payload, sizeof(payload), "version", request->version)) return -EINVAL;
     }
-    if (request->action == MEM_SERVICE_REFERENCE_STAGE || request->action == MEM_SERVICE_REFERENCE_ACQUIRE) {
+    if (request->action == MEM_SERVICE_REFERENCE_STAGE || request->action == MEM_SERVICE_REFERENCE_ACQUIRE ||
+        request->action == MEM_SERVICE_REFERENCE_MAP_BEGIN) {
         if (mem_service_reference_encode_hex(&request->reference, hex, sizeof(hex)) ||
             mem_service_wire_payload_append_field(payload, sizeof(payload), "reference_hex", hex)) return -EINVAL;
     }
-    if (request->action == MEM_SERVICE_REFERENCE_ACQUIRE &&
+    if ((request->action == MEM_SERVICE_REFERENCE_ACQUIRE || request->action == MEM_SERVICE_REFERENCE_MAP_BEGIN) &&
         mem_service_wire_payload_append_u64(payload, sizeof(payload), "access", request->access)) return -EINVAL;
     if (mem_service_reference_parse_request(payload, &checked) || strlen(payload) >= capacity) return -EINVAL;
     memcpy(output, payload, strlen(payload) + 1);

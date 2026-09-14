@@ -73,6 +73,49 @@ static void self_test(void)
     assert(mem_service_client_reference_transition(&client, &request, &result, &status) == 2);
     assert(calls == before && !memcmp(&saved, &result, sizeof(result)));
     printf("reference_client=pass malformed_replies=%u output_preserved=1 scope=mock-wire\n", rejected);
+
+    transport_rc = 0;
+    request.action = MEM_SERVICE_REFERENCE_MAP_BEGIN;
+    request.access = 1;
+    request.reference = (struct lingqu_object_ref_wire_v2){
+        .object = {.magic = LINGQU_OBJECT_REF_MAGIC, .layout_version = 2, .object_kind = 5,
+            .state = LINGQU_OBJECT_STATE_COMMITTED_WIRE, .object_version = 2,
+            .payload_offset = 128, .payload_bytes = 512},
+        .wire_bytes = 256, .access = 1, .allocation_generation = 1,
+        .provider_incarnation = 7, .allocation_bytes = 4096,
+        .allocation_key = "allocation-1", .home_node = "home-1",
+    };
+    request.reference.object.key_hash = lingqu_object_ref_key_hash("allocation-1", 12);
+    char hex[513], valid_mapping[4096];
+    assert(!mem_service_reference_encode_hex(&request.reference, hex, sizeof(hex)));
+    snprintf(valid_mapping, sizeof(valid_mapping),
+        "%sreference_hex=%s\nsession_id=owner\nmapping_id=11\nmapping_state=1\n", valid, hex);
+    strstr(valid_mapping, "action=1")[7] = '6';
+    struct mem_service_client_mapping_transaction transaction, saved_transaction;
+    strcpy(reply, valid_mapping);
+    assert(!mem_service_client_reference_map_begin(&client, &request, &result, &transaction, &status));
+    assert(transaction.mapping_id == 11 && transaction.state == 1 && transaction.generation == 1);
+    memset(&result, 0xa5, sizeof(result)); saved = result;
+    memset(&transaction, 0xa5, sizeof(transaction)); saved_transaction = transaction;
+    const char *mapping_fields[] = {"mapping_id=11", "mapping_state=1", "session_id=owner"};
+    for (unsigned i = 0; i < 6; ++i) {
+        strcpy(reply, valid_mapping);
+        if (i < 3) {
+            char *field = strstr(reply, mapping_fields[i]);
+            strchr(field, '=')[1] = i == 0 ? '-' : '0';
+        } else {
+            size_t length = strlen(reply);
+            snprintf(reply + length, sizeof(reply) - length, "%s\n", mapping_fields[i - 3]);
+        }
+        assert(mem_service_client_reference_map_begin(&client, &request, &result, &transaction, &status));
+        assert(status == MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        assert(!memcmp(&saved, &result, sizeof(result)));
+        assert(!memcmp(&saved_transaction, &transaction, sizeof(transaction)));
+    }
+    before = calls;
+    assert(mem_service_client_reference_transition(&client, &request, &result, &status) == 2);
+    assert(calls == before);
+    puts("reference_map_begin_client=pass malformed_replies=6 legacy_result_abi=preserved");
 }
 
 int main(int argc, char **argv)

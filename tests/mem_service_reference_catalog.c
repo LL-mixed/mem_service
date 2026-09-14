@@ -102,6 +102,15 @@ static void self_test(void)
     OK(mem_service_managed_mapping_transition(&svc->managed, view.key, "writer", generation,
         mapping.id, MEM_SERVICE_MANAGED_MAPPING_FINISH, &mapping));
     OK(mem_service_reference_seal(svc, view.key, "writer", generation, 2));
+    BAD(mem_service_reference_map_begin(svc, &a, "unknown", 1, &mapping));
+    BAD(mem_service_reference_map_begin(svc, &a, "writer", 3, &mapping));
+    changed = a; ++changed.object.payload_offset;
+    BAD(mem_service_reference_map_begin(svc, &changed, "writer", 1, &mapping));
+    OK(mem_service_reference_map_begin(svc, &a, "writer", 1, &mapping));
+    BAD(mem_service_managed_content_begin(&svc->managed, view.key, "writer", generation, 2, &output));
+    BAD(mem_service_managed_release(&svc->managed, view.key, "writer", true, generation, &output));
+    OK(mem_service_managed_mapping_transition(&svc->managed, view.key, "writer", generation,
+        mapping.id, MEM_SERVICE_MANAGED_MAPPING_CANCEL, &mapping));
     OK(mem_service_reference_resolve(svc, "logical/a", &resolved));
     assert(!memcmp(&resolved, &a, sizeof(a)));
     OK(mem_service_reference_resolve(svc, "logical/b", &resolved));

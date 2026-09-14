@@ -1,4 +1,4 @@
-"""Real CLI/SDK/daemon reference metadata transactions; no model or payload I/O."""
+"""Real CLI/SDK/daemon reference lifecycles; loopback payloads are synthetic."""
 import shutil
 import socket
 import struct
@@ -8,6 +8,8 @@ import unittest
 
 from tests import test_mem_service_object_session as fixtures
 
+ALLOCATION_BYTES = 8192
+
 
 @unittest.skipUnless(shutil.which("cc"), "host cc is required")
 class ReferenceTransactionTests(unittest.TestCase):
@@ -15,7 +17,8 @@ class ReferenceTransactionTests(unittest.TestCase):
         self.fixture = fixtures.MemServiceObjectSessionTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
-        daemon = self.fixture._start_active_object(extra_config="record_retention=latest:1")
+        daemon = self.fixture._start_active_object(logical_size=ALLOCATION_BYTES,
+            extra_config="record_retention=latest:1")
         self.addCleanup(self.fixture._stop_server, daemon)
         self.serial = 0
         self.connect = self.fixture._connect
@@ -34,7 +37,7 @@ class ReferenceTransactionTests(unittest.TestCase):
 
     def _reference(self, version=2, checksum=42, **changes):
         values = dict(key=b"obj-1", home=fixtures.HOME_NODE.encode(), generation=1,
-                      incarnation=fixtures.HOME_INCARNATION, size=4096, access=1,
+                      incarnation=fixtures.HOME_INCARNATION, size=ALLOCATION_BYTES, access=1,
                       offset=128, length=512, kind=5, owner=1, producer=2)
         values.update(changes)
         v = values
@@ -53,9 +56,9 @@ class ReferenceTransactionTests(unittest.TestCase):
             args += ["--session-id", session, "--idempotency-key", nonce or self._nonce()]
         if action in ("begin", "seal"):
             args += ["--generation", "1", "--version", str(version)]
-        if action in ("stage", "acquire"):
+        if action in ("stage", "acquire", "map-begin"):
             args += ["--reference-hex", reference or self._reference(version)]
-        if action == "acquire":
+        if action in ("acquire", "map-begin"):
             args += ["--access", "1"]
         result = self.fixture._run_client(*args, *extra, "--connect", self.connect)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
@@ -65,6 +68,109 @@ class ReferenceTransactionTests(unittest.TestCase):
         self._transition("begin", version=1)
         self._transition("stage")
         self._transition("seal")
+
+    def _mapping(self, action, mapping_id, session="reader"):
+        result = self.fixture._run_client(
+            "mapping-transition", "--action", action, "--mapping-id", str(mapping_id),
+            "--key", "obj-1", "--session-id", session, "--generation", "1",
+            "--idempotency-key", self._nonce(), "--connect", self.connect)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return fixtures._parse_kv(result.stdout)
+
+    def test_reference_mapping_requires_holder_and_pending_replay(self):
+        self._publish()
+        self._transition("map-begin", session="reader", success=False)
+        self._transition("acquire", session="reader")
+        for mutation in (dict(generation=2), dict(incarnation=8), dict(home=b"other"),
+                         dict(size=16384), dict(offset=129), dict(length=511),
+                         dict(kind=6), dict(owner=3), dict(producer=4), dict(access=3)):
+            self._transition("map-begin", session="reader", reference=self._reference(**mutation),
+                             success=False)
+        nonce = self._nonce()
+        pending = self._transition("map-begin", session="reader", nonce=nonce)
+        mapping_id = pending["mapping_id"]
+        self.assertEqual(pending["mapping_state"], "1")
+        self.assertEqual(self._transition("map-begin", session="reader", nonce=nonce), pending)
+        self.assertEqual(self.fixture._allocation_stats()["in_flight"], "1")
+        release = self.fixture._run_client(
+            "release-object", "--key", "obj-1", "--session-id", "reader",
+            "--expected-generation", "1", "--idempotency-key", self._nonce(),
+            "--connect", self.connect)
+        self.assertNotEqual(release.returncode, 0)
+        self._mapping("confirm", mapping_id)
+        self._transition("map-begin", session="reader", nonce=nonce, success=False)
+        self._mapping("close", mapping_id)
+        self._mapping("finish", mapping_id)
+        self._transition("map-begin", session="reader", nonce=nonce, success=False)
+        self._holder("release", "reader")
+        self.assertEqual(self.fixture._allocation_stats()["import_mappings"], "0")
+
+    def test_reference_mapping_pins_version_and_reserves_cleanup_capacity(self):
+        self._publish()
+        nonce = self._nonce()
+        pending = self._transition("map-begin", nonce=nonce)
+        mapping_id = pending["mapping_id"]
+        self._transition("begin", version=2, success=False)
+        removed = self.fixture._run_client(
+            "provider-deregister", "--node-id", fixtures.HOME_NODE,
+            "--incarnation", str(fixtures.HOME_INCARNATION), "--connect", self.connect)
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self._transition("map-begin", nonce=nonce, success=False)
+        self._mapping("cancel", mapping_id, session="producer")
+        self.fixture._register_home()
+        self._transition("map-begin", nonce=nonce, success=False)
+        pending = self._transition("map-begin")
+        for _ in range(80):
+            result = self.fixture._run_client(
+                "retire-object", "--key", "missing", "--expected-generation", "1",
+                "--idempotency-key", self._nonce(), "--connect", self.connect)
+            if "status=capacity_exceeded" in result.stdout:
+                break
+        else:
+            self.fail("expected bounded idempotency capacity")
+        self._transition("map-begin", success=False)
+        for action in ("confirm", "close", "finish"):
+            self._mapping(action, pending["mapping_id"], session="producer")
+        self._holder("release", "producer")
+        self.assertEqual(self.fixture._allocation_stats()["idempotency_reservation_deficit"], "0")
+
+    def test_session_maps_registered_subrange_readonly(self):
+        checksum = fixtures._fnv1a64(bytes(512))
+        self._transition("begin", version=1)
+        self._transition("stage", reference=self._reference(checksum=checksum))
+        self._transition("stage", key="logical/b",
+                         reference=self._reference(checksum=checksum, offset=4224))
+        self._transition("seal")
+        config = self.fixture._write_session(
+            "reference-reader.conf", self.connect, [
+                "acquire_reference key=logical/a idempotency_key=reader-acquire expected_generation=1",
+                "map_reference key=obj-1",
+                f"wait_visible key=obj-1 offset=0 len=512 expect_checksum={checksum}",
+                f"read key=obj-1 offset=0 len=512 expect_checksum={checksum}",
+                "read key=obj-1 offset=512 len=1 seed=0 expect_status=capacity_exceeded",
+                "write key=obj-1 offset=0 len=1 seed=7 expect_status=unsupported",
+                "probe_readonly key=obj-1",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=reader-release expected_generation=1",
+                "acquire_reference key=logical/b idempotency_key=reader-acquire-b expected_generation=1",
+                "map_reference key=obj-1",
+                f"wait_visible key=obj-1 offset=0 len=512 expect_checksum={checksum}",
+                f"read key=obj-1 offset=0 len=512 expect_checksum={checksum}",
+                "probe_readonly key=obj-1",
+                "unmap key=obj-1",
+                "release key=obj-1 idempotency_key=reader-release-b expected_generation=1",
+            ], session_id="reader", header_extra="provider=session-loopback")
+        result = self.fixture._run_session(config)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("action=map_reference key=obj-1 status=ok", result.stdout)
+        self.assertIn(f"base=0x{fixtures.DATA_MAP_ADDRESS + 128:016x} len=512", result.stdout)
+        self.assertIn(f"base=0x{fixtures.DATA_MAP_ADDRESS + 4224:016x} len=512", result.stdout)
+        self.assertIn("len=512", result.stdout)
+        self.assertIn("cpu_fault_probe=probe_readonly", result.stdout)
+        stats = self.fixture._allocation_stats()
+        self.assertEqual(stats["live_refs"], "1")
+        self.assertEqual(stats["import_mappings"], "0")
+        self.assertEqual(stats["in_flight"], "0")
 
     def test_publication_roundtrip_and_old_replay_rejection(self):
         nonce = self._nonce()
@@ -97,7 +203,7 @@ class ReferenceTransactionTests(unittest.TestCase):
     def test_identity_matrix_and_home_readiness_precede_replay(self):
         self._publish()
         for mutation in (dict(generation=2), dict(incarnation=8), dict(home=b"other"),
-                         dict(size=8192), dict(offset=129), dict(length=511),
+                         dict(size=16384), dict(offset=129), dict(length=511),
                          dict(kind=6), dict(owner=3), dict(producer=4), dict(access=3)):
             with self.subTest(mutation=mutation):
                 self._transition("acquire", reference=self._reference(**mutation),
@@ -220,7 +326,8 @@ class ReferenceTransactionTests(unittest.TestCase):
         self.fixture._register_home(connect=self.connect)
         result = self.fixture._run_client(
             "allocate-object", "--key", "obj-1", "--session-id", "producer",
-            "--size-bytes", "4096", "--capabilities", "1", "--idempotency-key", self._nonce(),
+            "--size-bytes", str(ALLOCATION_BYTES), "--capabilities", "1",
+            "--idempotency-key", self._nonce(),
             "--connect", self.connect)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         result = self.fixture._run_client(

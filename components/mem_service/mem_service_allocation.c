@@ -958,13 +958,14 @@ void mem_service_managed_stats_snapshot(
     stats_out->quarantine_events = table->quarantine_events;
 }
 
-enum mem_service_managed_result mem_service_managed_mapping_transition(
+static enum mem_service_managed_result mem_service_managed_mapping_transition_checked(
     struct mem_service_managed_table *table,
     const char *key,
     const char *session_id,
     uint64_t generation,
     uint64_t mapping_id,
     enum mem_service_managed_mapping_action action,
+    bool published_checked,
     struct mem_service_managed_mapping *mapping_out)
 {
     struct mem_service_managed_allocation *entry;
@@ -987,7 +988,7 @@ enum mem_service_managed_result mem_service_managed_mapping_transition(
         return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
 
     if (action == MEM_SERVICE_MANAGED_MAPPING_BEGIN) {
-        if (entry->reference_mode && (!entry->content_writing ||
+        if (!published_checked && entry->reference_mode && (!entry->content_writing ||
             entry->holder_count != 1 || strcmp(entry->owner_session, session_id)))
             return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
         if (entry->state != MEM_SERVICE_MANAGED_STATE_ACTIVE ||
@@ -1053,4 +1054,27 @@ enum mem_service_managed_result mem_service_managed_mapping_transition(
         memset(mapping, 0, sizeof(*mapping));
     }
     return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_mapping_transition(
+    struct mem_service_managed_table *table, const char *key, const char *session_id,
+    uint64_t generation, uint64_t mapping_id,
+    enum mem_service_managed_mapping_action action,
+    struct mem_service_managed_mapping *mapping_out)
+{
+    return mem_service_managed_mapping_transition_checked(table, key, session_id,
+        generation, mapping_id, action, false, mapping_out);
+}
+
+enum mem_service_managed_result mem_service_managed_mapping_begin_published(
+    struct mem_service_managed_table *table, const char *key, const char *session_id,
+    uint64_t generation, uint64_t version,
+    struct mem_service_managed_mapping *mapping_out)
+{
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result = mem_service_managed_content_check(
+        table, key, session_id, generation, version, false, &view);
+    if (result) return result;
+    return mem_service_managed_mapping_transition_checked(table, key, session_id,
+        generation, 0, MEM_SERVICE_MANAGED_MAPPING_BEGIN, true, mapping_out);
 }

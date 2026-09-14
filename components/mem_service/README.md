@@ -1,5 +1,19 @@
 # Memory Service Component
 
+## V2 reader 映射接入契约
+
+`reference-transition` 增加 `map-begin`，只接受完整已登记、当前封存版本的
+只读引用，并要求 session 已实际持有该 allocation。它创建原有 pending mapping
+事务并预留后续清理结果容量；旧 raw BEGIN 仍不能映射封存的 V2 对象。映射意图
+和活动映射都阻止内容换版。缓存 map-begin 仅可重放仍然 pending 的同一事务，
+结束或已确认的历史回执不得重新授予映射。
+
+新 SDK reader lifecycle 将原映射生命周期与完整 V2 分开保留，原结构 ABI 不变。
+不确定的 BEGIN 用原引用及 operation ID 重试；取得 mapping ID 后复用原确认、
+解除和终结状态机。provider 只接收服务返回的 allocation binding 与引用中的
+精确子区间，返回只读视图。此契约的代码、CLI、失败注入及真实 guest 验证分别
+记录，定义接口不构成已完成声明。
+
 ## 版本化全局对象引用编码（AM2 接入基础）
 
 `lingqu_object_service.h` 保留 64-byte V1 布局、版本常量和既有名字，新增固定
@@ -11,8 +25,8 @@ V2 payload offset 相对 allocation；V1 的 arena offset 语义保持不变，�
 参与后续身份比较，hash 不能独立标识对象。
 
 这些函数不读取 payload、不连接服务、不授予 holder 或访问权限，也不证明
-当前内容版本、checksum 或 backing 身份。服务权威绑定、跨进程 acquire/map、
-W5 接入及重启身份域仍须补齐。原生验证入口为
+当前内容版本、checksum 或 backing 身份。服务绑定及 reader SDK 使用下述显式
+协议，实际跨 guest 数据闭环、W5 接入及重启身份域仍须验证。原生验证入口为
 `make -C apps/mem_service object-ref-v2-smoke`，安装态入口为
 `installed-object-ref-v2-smoke`；夹具通过不代表完整 AM2 已验收。
 
@@ -27,10 +41,11 @@ seal 要求写入映射已确认解除且至少有一份有效视图。失败不
 
 resolve/acquire 必须匹配 record 中登记的完整 V2、当前 ACTIVE allocation 和
 已封存版本。V2 模式关闭旧 raw acquire 和已封存对象的旧 mapping BEGIN 入口，
-防止它们绕过版本检查；专用 V2 reader mapping 接通前该路径保持不可用。
+防止它们绕过版本检查；专用 V2 reader mapping 使用独立 map-begin 准入。
 core API 由服务单一串行化域调用，不提供独立锁。seal 表示可信 writer 提交发布
 元数据，core 不读取或验证 payload；SDK 仍须先完成 provider publish、可见性与
-mapping 清理。当前阶段不接入 wire/SDK/W5，不宣称重启恢复或实际数据访问通过。
+mapping 清理。wire 与 SDK 显式接入见下文；core 夹具不证明 W5、重启恢复或
+实际跨 guest 数据访问通过。
 
 完整 service 包含有界的大型 record/幂等表，生产 snapshot restore 的临时 service
 必须使用可检查分配失败且所有出口都释放的堆对象，避免嵌套大栈帧。独立单进程
@@ -134,10 +149,11 @@ provider 边界由替身承接，不能计作实际 guest 或崩溃恢复证明�
 ## 受管理资源的清理容量（现有协议）
 
 V2 控制接入使用独立中立 operation `0x7e reference-transition`，action 为
-begin/stage/seal/resolve/acquire。begin/seal 的 key 指 allocation，stage/resolve
+begin/stage/seal/resolve/acquire/map-begin。begin/seal 的 key 指 allocation，stage/resolve
 的 key 指逻辑 object，acquire 的 key 必须等于完整 reference_hex 中的 allocation
-key。V2 通过 512 个 hex 字符传递；只传元数据，不代理 payload。新 SDK/CLI 明确
-opt-in，旧端返回 unsupported；V2 reader mapping 仍须另外接入。
+key。map-begin 同样使用 allocation key，额外创建只读映射事务。V2 通过 512 个
+hex 字符传递；只传元数据，不代理 payload。新 SDK/CLI 明确 opt-in，旧端拒绝
+未知 action；reader 的 provider 映射由客户端进程内 SDK 执行。
 
 新操作在幂等重放前核对当前 allocation generation、content version 和活动 home
 incarnation，resolve/acquire 还须核对已登记完整视图。begin 预留首个 stage 与 seal

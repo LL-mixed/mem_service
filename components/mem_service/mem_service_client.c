@@ -1428,10 +1428,11 @@ static int mem_service_reference_response_u64(const char *payload, const char *n
     return 0;
 }
 
-int mem_service_client_reference_transition(
+static int mem_service_client_reference_rpc(
     const struct mem_service_client *client,
     const struct mem_service_reference_request *request,
     struct mem_service_client_reference_result *result_out,
+    struct mem_service_client_mapping_transaction *transaction_out,
     enum mem_service_wire_status *status_out)
 {
     char payload[1536], response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
@@ -1439,6 +1440,7 @@ int mem_service_client_reference_transition(
     struct mem_service_client_reference_result result = {0};
     struct mem_service_client_allocation *allocation = &result.allocation;
     uint64_t action, provider_backed, descriptor_len, live_refs;
+    struct mem_service_client_mapping_transaction transaction = {0};
     bool has_ref;
     int rc;
     if (!result_out || mem_service_reference_format_request(request, payload, sizeof(payload)))
@@ -1447,7 +1449,8 @@ int mem_service_client_reference_transition(
                                  payload, response, sizeof(response), status_out);
     if (rc) return rc;
     has_ref = request->action == MEM_SERVICE_REFERENCE_STAGE ||
-        request->action == MEM_SERVICE_REFERENCE_RESOLVE || request->action == MEM_SERVICE_REFERENCE_ACQUIRE;
+        request->action == MEM_SERVICE_REFERENCE_RESOLVE || request->action == MEM_SERVICE_REFERENCE_ACQUIRE ||
+        request->action == MEM_SERVICE_REFERENCE_MAP_BEGIN;
     if (mem_service_client_parse_allocation(response, allocation) ||
         mem_service_reference_response_field(response, "status", state, sizeof(state)) || strcmp(state, "ok") ||
         mem_service_reference_response_field(response, "state", state, sizeof(state)) || strcmp(state, "active") ||
@@ -1498,11 +1501,50 @@ int mem_service_client_reference_transition(
                allocation->version != request->version + (request->action == MEM_SERVICE_REFERENCE_BEGIN ? 1U : 0U)) {
         goto invalid_response;
     }
+    if (request->action == MEM_SERVICE_REFERENCE_MAP_BEGIN) {
+        uint64_t mapping_state;
+        char session[64];
+        if (!transaction_out ||
+            mem_service_reference_response_u64(response, "mapping_id", &transaction.mapping_id) ||
+            !transaction.mapping_id ||
+            mem_service_reference_response_u64(response, "mapping_state", &mapping_state) || mapping_state != 1 ||
+            mem_service_reference_response_field(response, "session_id", session, sizeof(session)) ||
+            strcmp(session, request->session_id)) goto invalid_response;
+        transaction.generation = allocation->generation;
+        transaction.state = 1;
+        *transaction_out = transaction;
+    }
     *result_out = result;
     return 0;
 invalid_response:
     mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
     return 1;
+}
+
+int mem_service_client_reference_transition(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    struct mem_service_client_reference_result *result_out,
+    enum mem_service_wire_status *status_out)
+{
+    if (!request || request->action == MEM_SERVICE_REFERENCE_MAP_BEGIN)
+        return mem_service_client_invalid(status_out);
+    return mem_service_client_reference_rpc(client, request, result_out, NULL, status_out);
+}
+
+int mem_service_client_reference_map_begin(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    struct mem_service_client_reference_result *result_out,
+    struct mem_service_client_mapping_transaction *transaction_out,
+    enum mem_service_wire_status *status_out)
+{
+    struct mem_service_client single_attempt;
+    if (!client || !request || request->action != MEM_SERVICE_REFERENCE_MAP_BEGIN || !transaction_out)
+        return mem_service_client_invalid(status_out);
+    single_attempt = *client;
+    single_attempt.wire_options.max_attempts = 1;
+    return mem_service_client_reference_rpc(&single_attempt, request, result_out, transaction_out, status_out);
 }
 
 int mem_service_client_mapping_transition(
@@ -1964,9 +2006,10 @@ int mem_service_client_reclaim_allocation(
  * provider contract. Returns 0 on success, -1 on clean failure, or
  * MEM_SERVICE_MAPPING_CLEANUP_REQUIRED with retained cleanup ownership.
  */
-int mem_service_client_map_allocation(
+static int mem_service_client_map_allocation_range(
     const struct mem_service_provider_channel *channel,
     const struct mem_service_client_allocation *allocation,
+    uint64_t offset, uint64_t len,
     uint64_t flags,
     struct mem_service_client_object_mapping *mapping_out)
 {
@@ -1990,7 +2033,10 @@ int mem_service_client_map_allocation(
         allocation->descriptor_len > MEM_SERVICE_PROVIDER_DESCRIPTOR_LEN ||
         allocation->address == 0 || allocation->size_bytes == 0 ||
         allocation->address_len == 0 ||
-        allocation->address_len < allocation->size_bytes) {
+        allocation->address_len < allocation->size_bytes || !len ||
+        offset > allocation->size_bytes || len > allocation->size_bytes - offset ||
+        allocation->address > UINTPTR_MAX ||
+        allocation->address_len > UINTPTR_MAX - allocation->address) {
         return -1;
     }
     key_len = strlen(allocation->key);
@@ -2015,9 +2061,9 @@ int mem_service_client_map_allocation(
     rc = mem_service_provider_channel_map_remote_region(
             channel,
             &remote,
-            0,
-            allocation->size_bytes,
-            (void *)(uintptr_t)allocation->address,
+            offset,
+            len,
+            (void *)(uintptr_t)(allocation->address + offset),
             MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS |
                 ((flags & MEM_SERVICE_CLIENT_MAP_READ) != 0
                      ? MEM_SERVICE_MAPPING_FLAG_READ
@@ -2036,8 +2082,8 @@ int mem_service_client_map_allocation(
     /* Strict same-VA: the provider must deliver exactly the requested
      * UBA; anything else is torn down and reported as a failure. */
     if (mapping.binding.mapping.base !=
-            (void *)(uintptr_t)allocation->address ||
-        mapping.binding.mapping.len != allocation->size_bytes) {
+            (void *)(uintptr_t)(allocation->address + offset) ||
+        mapping.binding.mapping.len != len) {
         if (mem_service_provider_channel_unmap_remote_region(channel,
                                                               &mapping.binding) != 0) {
             *mapping_out = mapping;
@@ -2048,10 +2094,19 @@ int mem_service_client_map_allocation(
     mapping.base = mapping.binding.mapping.base;
     /* The provider owns the full aligned backing; clients own only the
      * requested logical bytes, including when the last backing page is padded. */
-    mapping.len = allocation->size_bytes;
+    mapping.len = len;
     mapping.flags = flags;
     *mapping_out = mapping;
     return 0;
+}
+
+int mem_service_client_map_allocation(
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    uint64_t flags, struct mem_service_client_object_mapping *mapping_out)
+{
+    return mem_service_client_map_allocation_range(channel, allocation, 0,
+        allocation ? allocation->size_bytes : 0, flags, mapping_out);
 }
 
 int mem_service_client_unmap_allocation(
@@ -2272,6 +2327,116 @@ failed:
                                                      lifecycle, NULL);
     mem_service_client_set_status(status_out, status);
     return rc == 0 ? -1 : MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+}
+
+static int mem_service_client_reference_mapping_begin(
+    const struct mem_service_client *client,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    struct mem_service_client_allocation *allocation,
+    enum mem_service_wire_status *status_out)
+{
+    struct mem_service_reference_request request = {0};
+    struct mem_service_client_reference_result result;
+    struct mem_service_client_mapping_transaction transaction;
+    struct mem_service_client single_attempt = *client;
+    int rc;
+    single_attempt.wire_options.max_attempts = 1;
+    request.action = MEM_SERVICE_REFERENCE_MAP_BEGIN;
+    request.reference = lifecycle->reference;
+    request.access = LINGQU_OBJECT_REF_V2_READ;
+    snprintf(request.key, sizeof(request.key), "%s", lifecycle->reference.allocation_key);
+    snprintf(request.session_id, sizeof(request.session_id), "%s", lifecycle->mapping.session_id);
+    snprintf(request.idempotency_key, sizeof(request.idempotency_key), "%s-ref",
+             lifecycle->mapping.operation_id);
+    rc = mem_service_client_reference_map_begin(&single_attempt, &request, &result,
+                                                &transaction, status_out);
+    if (!rc) {
+        lifecycle->mapping.transaction = transaction;
+        if (allocation) *allocation = result.allocation;
+    }
+    return rc;
+}
+
+int mem_service_client_unmap_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out)
+{
+    if (!client || !channel || !mapping || !lifecycle || !lifecycle->mapping.pending)
+        return mem_service_client_invalid(status_out);
+    mapping->base = NULL; mapping->len = 0; mapping->flags = 0;
+    if (!lifecycle->mapping.transaction.mapping_id &&
+        mem_service_client_reference_mapping_begin(client, lifecycle, NULL, status_out))
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    return mem_service_client_unmap_managed_allocation(client, channel, mapping,
+                                                      &lifecycle->mapping, status_out);
+}
+
+int mem_service_client_map_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct lingqu_object_ref_wire_v2 *reference,
+    const char *session_id, const char *operation_id,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out)
+{
+    struct mem_service_client_allocation current;
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    int rc;
+    if (!client || !channel || !mapping || !lifecycle || lifecycle->mapping.pending ||
+        mapping->binding.mapped || lingqu_object_ref_v2_validate(reference) ||
+        !(reference->access & LINGQU_OBJECT_REF_V2_READ) || !session_id || !operation_id ||
+        !*session_id || !*operation_id ||
+        strlen(session_id) >= sizeof(lifecycle->mapping.session_id) ||
+        strlen(operation_id) >= sizeof(lifecycle->mapping.operation_id))
+        return mem_service_client_invalid(status_out);
+    /* Validate caller tokens before creating an uncertain cleanup obligation. */
+    struct mem_service_client_reference_lifecycle initial = {0};
+    snprintf(initial.mapping.session_id, sizeof(initial.mapping.session_id), "%s", session_id);
+    snprintf(initial.mapping.operation_id, sizeof(initial.mapping.operation_id), "%s", operation_id);
+    if (!lingqu_object_ref_v2_token_length(initial.mapping.session_id, sizeof(initial.mapping.session_id)) ||
+        !lingqu_object_ref_v2_token_length(initial.mapping.operation_id, sizeof(initial.mapping.operation_id)))
+        return mem_service_client_invalid(status_out);
+    initial.reference = *reference;
+    *lifecycle = initial;
+    memset(mapping, 0, sizeof(*mapping));
+    snprintf(mapping->key, sizeof(mapping->key), "%s", reference->allocation_key);
+    mapping->generation = reference->allocation_generation;
+    lifecycle->mapping.pending = true;
+    rc = mem_service_client_reference_mapping_begin(client, lifecycle, &current, &status);
+    if (rc) {
+        if (rc == 1 && (status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND ||
+            status == MEM_SERVICE_WIRE_STATUS_STALE_REF ||
+            status == MEM_SERVICE_WIRE_STATUS_INVALID_SESSION ||
+            status == MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED ||
+            status == MEM_SERVICE_WIRE_STATUS_UNSUPPORTED)) lifecycle->mapping.pending = false;
+        mem_service_client_set_status(status_out, status);
+        return lifecycle->mapping.pending ? MEM_SERVICE_MAPPING_CLEANUP_REQUIRED : -1;
+    }
+    if (mem_service_client_mapping_step(client, mapping, &lifecycle->mapping,
+            MEM_SERVICE_CLIENT_MAPPING_INSPECT, &status) || lifecycle->mapping.transaction.state != 1)
+        goto failed;
+    if (mem_service_client_map_allocation_range(channel, &current,
+            reference->object.payload_offset, reference->object.payload_bytes,
+            MEM_SERVICE_CLIENT_MAP_READ, mapping)) {
+        status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        goto failed;
+    }
+    if (mem_service_client_mapping_step(client, mapping, &lifecycle->mapping,
+            MEM_SERVICE_CLIENT_MAPPING_CONFIRM, &status) ||
+        mem_service_client_mapping_step(client, mapping, &lifecycle->mapping,
+            MEM_SERVICE_CLIENT_MAPPING_INSPECT, &status) || lifecycle->mapping.transaction.state != 2)
+        goto failed;
+    mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_OK);
+    return 0;
+failed:
+    if (status == MEM_SERVICE_WIRE_STATUS_OK) status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    rc = mem_service_client_unmap_managed_reference(client, channel, mapping, lifecycle, NULL);
+    mem_service_client_set_status(status_out, status);
+    return rc ? MEM_SERVICE_MAPPING_CLEANUP_REQUIRED : -1;
 }
 
 static void mem_service_client_parse_provider_directory(

@@ -398,6 +398,10 @@ enum mem_service_managed_result mem_service_managed_mapping_transition(
 /* Serialized core operations. Begin advances version before payload writes;
  * seal requires the caller to have completed provider publication and unmap.
  * Callers retain the sole owner holder throughout the write transaction. */
+enum mem_service_managed_result mem_service_managed_mapping_begin_published(
+    struct mem_service_managed_table *table, const char *key, const char *session_id,
+    uint64_t generation, uint64_t version,
+    struct mem_service_managed_mapping *mapping_out);
 enum mem_service_managed_result mem_service_managed_content_begin(
     struct mem_service_managed_table *table, const char *key,
     const char *session_id, uint64_t generation, uint64_t expected_version,

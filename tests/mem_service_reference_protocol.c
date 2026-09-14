@@ -22,11 +22,11 @@ static void self_test(void)
     strcpy(request.key, "allocation-1"); strcpy(request.session_id, "writer");
     strcpy(request.idempotency_key, "nonce-1"); request.generation = 1;
     request.version = 1; request.access = 1;
-    for (request.action = 1; request.action <= 5; ++request.action) {
+    for (request.action = 1; request.action <= 6; ++request.action) {
         assert(!mem_service_reference_format_request(&request, payload, sizeof(payload)));
         assert(!mem_service_reference_parse_request(payload, &decoded));
         assert(decoded.action == request.action && !strcmp(decoded.key, request.key));
-        if (request.action == 2 || request.action == 5)
+        if (request.action == 2 || request.action == 5 || request.action == 6)
             assert(!memcmp(&decoded.reference, ref, sizeof(*ref)));
         snprintf(changed, sizeof(changed), "%sfuture_optional=accepted\n", payload);
         assert(!mem_service_reference_parse_request(changed, &decoded));
@@ -39,6 +39,10 @@ static void self_test(void)
         assert(!memcmp(output, before, sizeof(before)));
         ++actions;
     }
+    request.action = MEM_SERVICE_REFERENCE_MAP_BEGIN;
+    request.reference.access = request.access = 3;
+    assert(mem_service_reference_format_request(&request, output, sizeof(output)));
+    request.reference.access = request.access = 1;
     request.action = MEM_SERVICE_REFERENCE_BEGIN;
     assert(!mem_service_reference_format_request(&request, payload, sizeof(payload)));
     const char *bad[] = {"-1", "+1", " 1", "18446744073709551616", "1garbage", "0", "09"};

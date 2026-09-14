@@ -487,6 +487,15 @@ int mem_service_client_reference_transition(
     struct mem_service_client_reference_result *result_out,
     enum mem_service_wire_status *status_out);
 
+/* MAP_BEGIN returns a pending cleanup obligation, never a process mapping.
+ * Both outputs are unchanged on failure. Use a fresh idempotency key. */
+int mem_service_client_reference_map_begin(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    struct mem_service_client_reference_result *result_out,
+    struct mem_service_client_mapping_transaction *transaction_out,
+    enum mem_service_wire_status *status_out);
+
 struct mem_service_client_allocation_stats {
     uint64_t backing_registered;
     uint64_t live_objects;
@@ -720,6 +729,29 @@ int mem_service_client_unmap_managed_allocation(
     const struct mem_service_provider_channel *channel,
     struct mem_service_client_object_mapping *mapping,
     struct mem_service_client_mapping_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out);
+
+/* Same single-owner rules as managed allocation mapping. The caller already
+ * holds the reference's allocation. Map is read-only and called once; on an
+ * uncertain outcome retain both outputs and retry unmap, never release early.
+ * Legacy mapping/lifecycle structures and reference RPC result ABI stay fixed. */
+struct mem_service_client_reference_lifecycle {
+    struct mem_service_client_mapping_lifecycle mapping;
+    struct lingqu_object_ref_wire_v2 reference;
+};
+int mem_service_client_map_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct lingqu_object_ref_wire_v2 *reference,
+    const char *session_id, const char *operation_id,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_unmap_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
     enum mem_service_wire_status *status_out);
 
 #endif
