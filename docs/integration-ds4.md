@@ -48,6 +48,14 @@ mapping 后续清理所需的应答位置，容量不足返回 `CAPACITY_EXCEEDE
 `allocation-stats` 增加幂等容量/已用/清理预留/可用/缺口文本字段；安装 SDK
 的已有结构和 DS4 transfer 热路径保持不变。此保护不实现幂等历史的无限回收。
 
+受管理幂等缓存的容量续作沿用 `serve --store`，增加内部持久重放历史与前缀
+checkpoint；仅确认持久化后回收缓存，未配置 store 时保持有界拒绝。历史启用
+后磁盘快照使用新 magic，旧二进制拒绝读取，wire 完整 snapshot 导出/恢复拒绝
+省略该外部历史。此改动不更改安装态 SDK/DS4 transfer 热路径，也不认证模型
+运行或 managed backing 的重启恢复。
+历史 store 重启后显式报告 `managed_recovery_required=1`，新 managed 数据
+工作等待 AM3 对账，data plane readiness 保持 0；metadata 查询继续可用。
+
 OBMM 平台诊断新增 `mem_service_provider_obmm_endpoint_probe_conflict()`，用于
 当前映射的固定地址冲突验收。它复用已持有的设备句柄，不改变 import、路由或
 业务映射 API；DS4 serving 无需调用，RoCE/TCP 的数据路径和配置保持不变。

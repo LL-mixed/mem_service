@@ -45,11 +45,11 @@
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
 #define MEM_SERVICE_DEPLOYMENT_SMOKE_VERSION 1U
 #define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_VERSION 1U
-#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7411U
-#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0x5272af77U
+#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7648U
+#define MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_CHECKSUM 0xd4f33080U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_VERSION 1U
 #define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_LEN 2144U
-#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x24ef05c9U
+#define MEM_SERVICE_UPGRADE_ROLLBACK_POLICY_EXPECTED_CHECKSUM 0x13450492U
 #define MEM_SERVICE_ALERT_RULES_VERSION 1U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_LEN 2096U
 #define MEM_SERVICE_ALERT_RULES_EXPECTED_CHECKSUM 0x05a9245cU
@@ -62,7 +62,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9814U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xc9d62b4eU
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0xfaf773b5U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 57U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -72,13 +72,13 @@
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_LEN 1025U
 #define MEM_SERVICE_API_ABI_POLICY_EXPECTED_CHECKSUM 0x5e460a87U
 #define MEM_SERVICE_COMPAT_MATRIX_VERSION 1U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 1979U
-#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x2d099155U
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_LEN 2226U
+#define MEM_SERVICE_COMPAT_MATRIX_EXPECTED_CHECKSUM 0x20e8427fU
 #define MEM_SERVICE_COMPAT_MATRIX_STATUS_COUNT 11U
 #define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_LEN 1252U
-#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0xb8341883U
+#define MEM_SERVICE_COMPAT_BASELINE_V1_EXPECTED_CHECKSUM 0x2e21b1d6U
 #define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_LEN 1734U
-#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x4d81a45dU
+#define MEM_SERVICE_COMPAT_OLD_NEW_MATRIX_EXPECTED_CHECKSUM 0x8e3cee6eU
 #define MEM_SERVICE_CLI_STORE_MAGIC "mem_service_store_v1"
 
 static void usage(const char *argv0)
@@ -1171,7 +1171,12 @@ static int render_compat_matrix(char *matrix, size_t matrix_len, size_t *used_ou
         append_wire_schema_line(matrix,
                                 matrix_len,
                                 &used,
-                                "idempotency_persistence=store-journal-and-full-snapshot\n") != 0 ||
+                                "idempotency_persistence=store-journal-and-full-snapshot\n"
+                                "managed_history=append-only-checkpoint-v1\n"
+                                "managed_history_store_magic=mem_service_store_history_v1\n"
+                                "managed_history_rollback=reject-legacy-reader\n"
+                                "managed_history_snapshot=paired-files-only\n"
+                                "managed_history_restart_data_plane=requires-reconciliation\n") != 0 ||
         append_wire_schema_line(matrix,
                                 matrix_len,
                                 &used,
@@ -7751,7 +7756,11 @@ static int render_admin_output_schema(char *schema, size_t schema_len, size_t *u
                                 "allocation_stats_field=idempotency_used type=u64\n"
                                 "allocation_stats_field=idempotency_cleanup_reserved type=u64\n"
                                 "allocation_stats_field=idempotency_available type=u64\n"
-                                "allocation_stats_field=idempotency_reservation_deficit type=u64\n") != 0 ||
+                                "allocation_stats_field=idempotency_reservation_deficit type=u64\n"
+                                "allocation_stats_field=idempotency_history_enabled type=u32\n"
+                                "allocation_stats_field=idempotency_history_records type=u64\n"
+                                "allocation_stats_field=idempotency_history_failed type=u32\n"
+                                "allocation_stats_field=managed_recovery_required type=u32\n") != 0 ||
         append_wire_schema_line(schema,
                                 schema_len,
                                 &used,

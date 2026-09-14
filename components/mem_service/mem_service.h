@@ -191,6 +191,8 @@ struct mem_service_audit_event {
     uint64_t checksum;
 };
 
+struct mem_service_replay_history;
+
 struct mem_service {
     bool control_plane_ready;
     bool provider_registry_ready;
@@ -199,6 +201,12 @@ struct mem_service {
     size_t record_count;
     uint64_t audit_next_sequence;
     uint64_t audit_event_count;
+    /* Daemon-owned durable replay context; never a provider/payload handle. */
+    struct mem_service_replay_history *replay_history;
+    bool replay_history_enabled;
+    bool managed_recovery_required;
+    uint64_t replay_history_count;
+    uint64_t replay_history_checksum;
     struct mem_service_provider_registry providers;
     struct mem_service_metrics metrics;
     struct mem_service_record records[MEM_SERVICE_MAX_RECORDS];

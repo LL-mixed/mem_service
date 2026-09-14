@@ -717,7 +717,9 @@ repository, which consumes this component by source; see
 只追加重放历史，先实现内部 `mem_service_replay_history.h/.c` 与
 `tests/mem_service_replay_history.c` 的 `--case <name> <new-history-path>`
 边界夹具，再接入 daemon。
-内部文件不属于安装 SDK，暂不改变运行服务、wire 或容量行为。
+内部文件不属于安装 SDK。daemon 接入沿用 `serve --store`，只将受管理操作的
+已完成结果移入历史；未配置 store 的服务继续使用原容量拒绝。旧 metadata
+record retention 的行为保持不变，受管理历史不进入通用 record GC。
 
 历史帧使用显式小端编码，包含序号、前帧校验、operation、request checksum、
 status、精确 key/response 长度和字节；校验用于检测意外损坏，不提供对抗篡改认证。
@@ -726,10 +728,15 @@ append 成功要求文件与创建目录项均已同步；不确定写入使句�
 据此删除内存记录。损坏、截断、替换文件、并发写者及不完整末帧均拒绝，禁止
 自动截掉历史。内存占用不随历史条数增长，磁盘容量仍受文件系统限制。
 
-后续 daemon 接入必须持久化并核对历史前缀 checkpoint，确保 snapshot/journal
-压缩、进程重启与缓存回收均保留旧请求结果；未配置持久 store 时继续保留容量
-拒绝。当前历史层夹具通过仅证明文件协议，不证明 daemon 已释放容量、managed
-backing 恢复或真实百轮通过。地址重用仍须独立完成 drain/epoch/旧上下文验收。
+缓存回收顺序为历史 append/fsync、写入带前缀 checkpoint 的 snapshot 并同步
+文件及目录、最后清除已归档缓存；任一步失败保留缓存并拒绝该次新工作。
+历史启用后的磁盘快照使用独立 magic `mem_service_store_history_v1`，旧服务
+须拒绝；原 v1 snapshot/wire 保持不变。历史服务的旧完整 snapshot 导出/恢复
+入口拒绝，避免生成缺少外部历史的假完整备份。重启先校验历史，再导入剩余
+缓存/journal，已归档应答不占用内存槽。无法配对的文件保留并拒绝启动。
+当前接入属于待验证实现；历史结果不授予当前映射权限，provider/readiness/
+generation 的重放前准入继续执行。managed backing 恢复、地址重用及真实百轮
+仍须独立完成 drain/epoch/旧上下文验收。
 
 `mem_service` is being split toward a product-grade Lingqu data service that can
 run as a guest component and as a host-side service for streaming LLM inference

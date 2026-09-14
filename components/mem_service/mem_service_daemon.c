@@ -25,6 +25,7 @@
 #include "mem_service_core.h"
 #include "mem_service_object_refs.h"
 #include "mem_service_reference_protocol.h"
+#include "mem_service_replay_history.h"
 #include "mem_service_record_table.h"
 #include "mem_service_ub_ssd_gsva_io.h"
 #include "mem_service_wire_client.h"
@@ -34,6 +35,7 @@
 #define MEM_SERVICE_UNIX_SPEC_PREFIX "unix:"
 #define MEM_SERVICE_TCP_SPEC_PREFIX "tcp:"
 #define MEM_SERVICE_STORE_MAGIC "mem_service_store_v1"
+#define MEM_SERVICE_HISTORY_STORE_MAGIC "mem_service_store_history_v1"
 #define MEM_SERVICE_JOURNAL_MAGIC "mem_service_journal_v1"
 #define MEM_SERVICE_STORE_SCHEMA_VERSION 1
 #define MEM_SERVICE_STORE_MAX_KNOWN_SCHEMA_VERSION 1
@@ -1370,6 +1372,52 @@ static int mem_service_parse_store_idempotency_field(
     return 0;
 }
 
+static int mem_service_history_path(const char *store, char *path, size_t bytes)
+{
+    return store != NULL && store[0] != '\0' &&
+        snprintf(path, bytes, "%s.replay-history", store) < (int)bytes ? 0 : -1;
+}
+
+static void mem_service_history_close(struct mem_service *svc)
+{
+    if (svc->replay_history != NULL) {
+        if (svc->replay_history->fd >= 0 &&
+            mem_service_replay_history_close(svc->replay_history) != 0)
+            fprintf(stderr, "mem_service replay-history: close failed\n");
+        free(svc->replay_history);
+        svc->replay_history = NULL;
+    }
+}
+
+static int mem_service_history_open(struct mem_service *svc, const char *store,
+                                    bool create)
+{
+    char path[512];
+    struct mem_service_replay_history *history;
+    if (svc->replay_history != NULL ||
+        mem_service_history_path(store, path, sizeof(path)) != 0)
+        return -1;
+    history = calloc(1, sizeof(*history));
+    if (history == NULL) return -1;
+    if (mem_service_replay_history_open(history, path, create,
+            svc->replay_history_count, svc->replay_history_checksum) != 0) {
+        free(history);
+        return -1;
+    }
+    svc->replay_history = history;
+    svc->replay_history_enabled = true;
+    return 0;
+}
+
+static bool mem_service_history_record_equal(
+    const struct mem_service_idempotency_record *a,
+    const struct mem_service_idempotency_record *b)
+{
+    return a->operation == b->operation && a->request_checksum == b->request_checksum &&
+        a->status == b->status && a->response_len == b->response_len &&
+        memcmp(a->response, b->response, a->response_len) == 0;
+}
+
 static int mem_service_store_import_idempotency(
     struct mem_service *svc,
     const struct mem_service_idempotency_record *record)
@@ -1378,6 +1426,14 @@ static int mem_service_store_import_idempotency(
 
     if (record->key[0] == '\0' || record->operation == 0) {
         return -1;
+    }
+    if (svc->replay_history != NULL) {
+        struct mem_service_idempotency_record archived;
+        int found = mem_service_replay_history_find(svc->replay_history,
+                                                   record->key, &archived);
+        if (found < 0) return -1;
+        if (found > 0)
+            return mem_service_history_record_equal(record, &archived) ? 0 : -1;
     }
     slot = mem_service_find_idempotency_record(svc, record->key);
     if (slot == NULL) {
@@ -3779,6 +3835,17 @@ static enum mem_service_wire_status mem_service_materialize_payload_block(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+static int mem_service_read_history_checkpoint(FILE *file, const char *name,
+                                               uint64_t *value)
+{
+    char line[128], canonical[128];
+    if (fgets(line, sizeof(line), file) == NULL ||
+        !mem_service_payload_get_u64_checked(line, name, value))
+        return -1;
+    snprintf(canonical, sizeof(canonical), "%s=%" PRIu64 "\n", name, *value);
+    return strcmp(line, canonical) == 0 ? 0 : -1;
+}
+
 static int mem_service_load_store(struct mem_service *svc,
                                   const char *store_path,
                                   bool *legacy_schema_out)
@@ -3803,7 +3870,17 @@ static int mem_service_load_store(struct mem_service *svc,
         return -1;
     }
     mem_service_trim_line(line);
-    if (strcmp(line, MEM_SERVICE_STORE_MAGIC) != 0) {
+    if (strcmp(line, MEM_SERVICE_HISTORY_STORE_MAGIC) == 0) {
+        if (mem_service_read_history_checkpoint(file, "replay_history_count",
+                &svc->replay_history_count) != 0 ||
+            mem_service_read_history_checkpoint(file, "replay_history_checksum",
+                &svc->replay_history_checksum) != 0 ||
+            mem_service_history_open(svc, store_path, false) != 0) {
+            fclose(file);
+            return -1;
+        }
+        svc->managed_recovery_required = true;
+    } else if (strcmp(line, MEM_SERVICE_STORE_MAGIC) != 0) {
         fclose(file);
         return -1;
     }
@@ -3894,16 +3971,26 @@ static int mem_service_load_durable_store(struct mem_service *svc,
                                           const char *store_path)
 {
     bool legacy_schema = false;
+    char history_path[512];
+    struct stat history_stat;
 
     if (mem_service_load_store(svc, store_path, &legacy_schema) != 0) {
+        mem_service_history_close(svc);
         return -1;
     }
+    /* An unpaired history must never silently become a fresh namespace. */
+    if (!svc->replay_history_enabled && store_path != NULL && store_path[0] != '\0' &&
+        (mem_service_history_path(store_path, history_path, sizeof(history_path)) != 0 ||
+         lstat(history_path, &history_stat) == 0 || errno != ENOENT))
+        return -1;
     if (mem_service_load_journal(svc, store_path) != 0) {
+        mem_service_history_close(svc);
         return -1;
     }
     if (legacy_schema &&
         (mem_service_save_store(svc, store_path) != 0 ||
          mem_service_compact_journal(store_path) != 0)) {
+        mem_service_history_close(svc);
         return -1;
     }
     return 0;
@@ -4182,6 +4269,22 @@ static int mem_service_append_journal(
     return fclose(file) == 0 ? 0 : -1;
 }
 
+static int mem_service_sync_store_parent(const char *path)
+{
+    char parent[512];
+    if (strlen(path) >= sizeof(parent)) return -1;
+    strcpy(parent, path);
+    char *slash = strrchr(parent, '/');
+    if (slash == NULL) strcpy(parent, ".");
+    else if (slash == parent) slash[1] = '\0';
+    else *slash = '\0';
+    int fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    int rc = fsync(fd);
+    if (close(fd) != 0) rc = -1;
+    return rc;
+}
+
 static int mem_service_save_store(const struct mem_service *svc, const char *store_path)
 {
     char tmp_path[512];
@@ -4204,13 +4307,22 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
     if (file == NULL) {
         return -1;
     }
+    if (svc->replay_history_enabled &&
+        fprintf(file, "%s\nreplay_history_count=%" PRIu64
+                "\nreplay_history_checksum=%" PRIu64 "\n",
+                MEM_SERVICE_HISTORY_STORE_MAGIC, svc->replay_history_count,
+                svc->replay_history_checksum) < 0) {
+        fclose(file);
+        unlink(tmp_path);
+        return -1;
+    }
     if (fprintf(file,
-                "%s\n"
+                "%s"
                 "store_schema_version=%d\n"
                 "record_count=%zu\n"
                 "audit_next_sequence=%" PRIu64 "\n"
                 "audit_event_count=%" PRIu64 "\n",
-                MEM_SERVICE_STORE_MAGIC,
+                svc->replay_history_enabled ? "" : MEM_SERVICE_STORE_MAGIC "\n",
                 MEM_SERVICE_STORE_SCHEMA_VERSION,
                 svc->record_count,
                 svc->audit_next_sequence,
@@ -4246,6 +4358,11 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
             return -1;
         }
     }
+    if (fflush(file) != 0 || fsync(fileno(file)) != 0) {
+        fclose(file);
+        unlink(tmp_path);
+        return -1;
+    }
     if (fclose(file) != 0) {
         unlink(tmp_path);
         return -1;
@@ -4254,7 +4371,7 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
         unlink(tmp_path);
         return -1;
     }
-    return 0;
+    return mem_service_sync_store_parent(store_path);
 }
 
 static enum mem_service_wire_status mem_service_put_object(struct mem_service *svc,
@@ -4330,8 +4447,12 @@ static int mem_service_rewrite_journal_header(const char *journal_path)
         return -1;
     }
     if (fprintf(file, "%s\n", MEM_SERVICE_JOURNAL_MAGIC) < 0 || fflush(file) != 0 ||
-        fsync(fileno(file)) != 0 || fclose(file) != 0) {
+        fsync(fileno(file)) != 0) {
         fclose(file);
+        unlink(tmp_path);
+        return -1;
+    }
+    if (fclose(file) != 0) {
         unlink(tmp_path);
         return -1;
     }
@@ -4339,7 +4460,7 @@ static int mem_service_rewrite_journal_header(const char *journal_path)
         unlink(tmp_path);
         return -1;
     }
-    return 0;
+    return mem_service_sync_store_parent(journal_path);
 }
 
 static int mem_service_compact_journal(const char *store_path)
@@ -10080,6 +10201,7 @@ static enum mem_service_wire_status mem_service_status(struct mem_service *svc,
         &svc->provider_directory,
         mem_service_monotonic_ms());
     data_plane_ready =
+        !svc->managed_recovery_required &&
         mem_service_provider_registry_data_plane_ready(&svc->providers) &&
         directory_poll.ready;
 
@@ -10385,6 +10507,11 @@ static enum mem_service_wire_status mem_service_export_snapshot(struct mem_servi
     size_t used = 0;
     size_t i;
 
+    if (svc->replay_history_enabled) {
+        snprintf(response, response_len,
+                 "status=unsupported\nreason=external_replay_history_required\n");
+        return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
+    }
     if (response_len == 0) {
         return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
     }
@@ -10544,6 +10671,7 @@ static bool mem_service_has_managed_identity(const struct mem_service *svc)
 {
     size_t i;
 
+    if (svc->replay_history_enabled) return true;
     for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
         if (svc->managed.entries[i].in_use)
             return true;
@@ -12083,7 +12211,11 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              "idempotency_used=%" PRIu64 "\n"
              "idempotency_cleanup_reserved=%" PRIu64 "\n"
              "idempotency_available=%" PRIu64 "\n"
-             "idempotency_reservation_deficit=%" PRIu64 "\n",
+             "idempotency_reservation_deficit=%" PRIu64 "\n"
+             "idempotency_history_enabled=%u\n"
+             "idempotency_history_records=%" PRIu64 "\n"
+             "idempotency_history_failed=%u\n"
+             "managed_recovery_required=%u\n",
              stats.backing_registered,
              stats.live_objects,
              stats.backing_allocated_bytes,
@@ -12110,7 +12242,11 @@ static enum mem_service_wire_status mem_service_allocation_stats(
              MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS,
              used, reserved, mem_service_idempotency_available(svc),
              used + reserved > MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS ?
-             used + reserved - MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS : 0U);
+                 used + reserved - MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS : 0U,
+             svc->replay_history_enabled ? 1U : 0U,
+             svc->replay_history != NULL ? svc->replay_history->count : 0U,
+             svc->replay_history != NULL && svc->replay_history->failed ? 1U : 0U,
+             svc->managed_recovery_required ? 1U : 0U);
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
@@ -12375,7 +12511,8 @@ static enum mem_service_wire_status mem_service_provider_status(
         poll.required_count,
         poll.active_count,
         poll.ready ? 1U : 0U,
-        (mem_service_provider_registry_data_plane_ready(&svc->providers) &&
+        (!svc->managed_recovery_required &&
+         mem_service_provider_registry_data_plane_ready(&svc->providers) &&
          poll.ready)
             ? 1U
             : 0U,
@@ -13166,6 +13303,48 @@ static bool mem_service_can_use_cleanup_reservation(
            action == MEM_SERVICE_MANAGED_MAPPING_CANCEL;
 }
 
+static bool mem_service_history_managed_operation(uint32_t operation)
+{
+    return operation == MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION ||
+        operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION;
+}
+
+static int mem_service_history_make_room(struct mem_service *svc,
+                                          const char *store_path)
+{
+    bool selected[MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS] = {false};
+    size_t count = 0;
+    if (store_path == NULL || store_path[0] == '\0') return 0;
+    for (size_t i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
+        selected[i] = svc->idempotency_records[i].in_use &&
+            mem_service_history_managed_operation(svc->idempotency_records[i].operation);
+        count += selected[i] ? 1U : 0U;
+    }
+    if (count == 0) return 0;
+    if (svc->replay_history == NULL &&
+        mem_service_history_open(svc, store_path, !svc->replay_history_enabled) != 0)
+        return -1;
+    for (size_t i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
+        if (selected[i] && mem_service_replay_history_append(svc->replay_history,
+                                                           &svc->idempotency_records[i]) != 0)
+            return -1;
+    }
+    svc->replay_history_count = svc->replay_history->count;
+    svc->replay_history_checksum = svc->replay_history->checksum;
+    /* Persist the prefix while the original cache is still intact. A crash
+     * then reloads that cache through history-aware deduplication. */
+    if (mem_service_save_store(svc, store_path) != 0) return -1;
+    for (size_t i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
+        if (selected[i])
+            memset(&svc->idempotency_records[i], 0, sizeof(svc->idempotency_records[i]));
+    }
+    return 0;
+}
+
 static enum mem_service_wire_status mem_service_try_idempotency_replay(
     struct mem_service *svc,
     enum mem_service_wire_operation operation,
@@ -13174,11 +13353,13 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
     size_t response_len,
     struct mem_service_idempotency_record **pending_record_out,
     bool *handled_out,
-    bool *cleanup_reserved_out)
+    bool *cleanup_reserved_out,
+    const char *store_path)
 {
     char key[MEM_SERVICE_IDEMPOTENCY_KEY_LEN];
     uint32_t request_checksum;
     struct mem_service_idempotency_record *record;
+    struct mem_service_idempotency_record archived;
     bool has_key;
     uint64_t required;
 
@@ -13196,9 +13377,19 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
 
     request_checksum = mem_service_idempotency_request_checksum(payload);
     record = has_key ? mem_service_find_idempotency_record(svc, key) : NULL;
+    if (record == NULL && has_key && svc->replay_history != NULL) {
+        int found = mem_service_replay_history_find(svc->replay_history, key, &archived);
+        if (found < 0) goto history_failure;
+        if (found > 0) record = &archived;
+    }
     if (record == NULL) {
         required = mem_service_new_cleanup_reservations(operation, payload) +
                    (has_key ? 1U : 0U);
+        if (required > mem_service_idempotency_available(svc) &&
+            !(mem_service_can_use_cleanup_reservation(svc, operation, payload) &&
+              mem_service_cleanup_reservations(svc) > 0U) &&
+            mem_service_history_make_room(svc, store_path) != 0)
+            goto history_failure;
         record = has_key ? mem_service_alloc_idempotency_record(svc) : NULL;
         if (required > mem_service_idempotency_available(svc)) {
             if (record != NULL &&
@@ -13259,6 +13450,11 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
         response[copy_len] = '\0';
     }
     return (enum mem_service_wire_status)record->status;
+history_failure:
+    if (handled_out != NULL) *handled_out = true;
+    snprintf(response, response_len,
+             "status=internal\nreason=replay_history_unavailable\n");
+    return MEM_SERVICE_WIRE_STATUS_INTERNAL;
 }
 
 static void mem_service_complete_idempotency_record(
@@ -13466,6 +13662,14 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
      * pending_idempotency NULL so no outcome is recorded.
      */
     if (mem_service_operation_gated_managed_data_op(operation, payload) &&
+        svc->managed_recovery_required &&
+        operation != MEM_SERVICE_WIRE_OP_RELEASE_OBJECT &&
+        operation != MEM_SERVICE_WIRE_OP_RETIRE_OBJECT) {
+        snprintf(response, response_len,
+                 "status=internal\nreason=managed_reconciliation_required\n");
+        status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        idempotency_handled = true;
+    } else if (mem_service_operation_gated_managed_data_op(operation, payload) &&
         !mem_service_provider_directory_data_ops_allowed(
             &svc->provider_directory,
             mem_service_monotonic_ms())) {
@@ -13491,7 +13695,8 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                                                     response_len,
                                                     &pending_idempotency,
                                                     &idempotency_handled,
-                                                    &cleanup_reserved);
+                                                    &cleanup_reserved,
+                                                    store_path);
     }
 
     if (!idempotency_handled) {
@@ -15921,23 +16126,27 @@ int mem_service_run_unix_daemon_with_runtime(
                                      providers,
                                      provider_directory,
                                      allocation_home_provider) != 0) {
+        mem_service_history_close(&svc);
         return 1;
     }
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("mem_service serve: socket");
+        mem_service_history_close(&svc);
         return 1;
     }
     unlink(path);
     if (bind(server_fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
         perror("mem_service serve: bind");
         close(server_fd);
+        mem_service_history_close(&svc);
         return 1;
     }
     if (listen(server_fd, 16) != 0) {
         perror("mem_service serve: listen");
         close(server_fd);
         unlink(path);
+        mem_service_history_close(&svc);
         return 1;
     }
     if (metrics_listen_spec != NULL && metrics_listen_spec[0] != '\0') {
@@ -15945,6 +16154,7 @@ int mem_service_run_unix_daemon_with_runtime(
         if (metrics_fd < 0) {
             close(server_fd);
             unlink(path);
+            mem_service_history_close(&svc);
             return 1;
         }
     }
@@ -15956,6 +16166,7 @@ int mem_service_run_unix_daemon_with_runtime(
             close(metrics_fd);
         }
         unlink(path);
+        mem_service_history_close(&svc);
         return 1;
     }
     if (store_path != NULL && store_path[0] != '\0') {
@@ -15989,6 +16200,7 @@ int mem_service_run_unix_daemon_with_runtime(
     printf(" provider_count=%zu provider_ready_count=%zu data_plane_ready=%u",
            svc.providers.count,
            mem_service_provider_registry_ready_count(&svc.providers),
+           !svc.managed_recovery_required &&
            mem_service_provider_registry_data_plane_ready(&svc.providers)
                ? 1U
                : 0U);
@@ -16057,6 +16269,7 @@ int mem_service_run_unix_daemon_with_runtime(
         close(metrics_fd);
     }
     unlink(path);
+    mem_service_history_close(&svc);
     printf("mem_service serve: status=stopped\n");
     return rc;
 }
@@ -16152,11 +16365,13 @@ int mem_service_run_daemon_with_runtime(
                                      providers,
                                      provider_directory,
                                      runtime->allocation_home_provider) != 0) {
+        mem_service_history_close(&svc);
         return 1;
     }
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("mem_service serve: socket");
+        mem_service_history_close(&svc);
         return 1;
     }
     {
@@ -16171,17 +16386,20 @@ int mem_service_run_daemon_with_runtime(
     if (bind(server_fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
         perror("mem_service serve: bind");
         close(server_fd);
+        mem_service_history_close(&svc);
         return 1;
     }
     if (listen(server_fd, 16) != 0) {
         perror("mem_service serve: listen");
         close(server_fd);
+        mem_service_history_close(&svc);
         return 1;
     }
     if (metrics_listen_spec != NULL && metrics_listen_spec[0] != '\0') {
         metrics_fd = mem_service_open_metrics_listener(metrics_listen_spec);
         if (metrics_fd < 0) {
             close(server_fd);
+            mem_service_history_close(&svc);
             return 1;
         }
     }
@@ -16192,6 +16410,7 @@ int mem_service_run_daemon_with_runtime(
         if (metrics_fd >= 0) {
             close(metrics_fd);
         }
+        mem_service_history_close(&svc);
         return 1;
     }
     if (store_path != NULL && store_path[0] != '\0') {
@@ -16225,6 +16444,7 @@ int mem_service_run_daemon_with_runtime(
     printf(" provider_count=%zu provider_ready_count=%zu data_plane_ready=%u",
            svc.providers.count,
            mem_service_provider_registry_ready_count(&svc.providers),
+           !svc.managed_recovery_required &&
            mem_service_provider_registry_data_plane_ready(&svc.providers)
                ? 1U
                : 0U);
@@ -16314,6 +16534,7 @@ int mem_service_run_daemon_with_runtime(
     if (metrics_fd >= 0) {
         close(metrics_fd);
     }
+    mem_service_history_close(&svc);
     printf("mem_service serve: status=stopped\n");
     return rc;
 }

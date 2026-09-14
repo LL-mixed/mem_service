@@ -82,6 +82,16 @@ daemon 的幂等表为已接纳的对象、holder 和 mapping 预留后续清理
 旧 SDK 可忽略。已有 managed identity 时 snapshot restore 被拒绝，以保留重放历史。
 此接纳保护不提供无限幂等历史、重启恢复或资源强制撤销。
 
+容量续作通过既有 `serve --store` 接入内部重放历史。服务在归档应答及含前缀
+checkpoint 的磁盘快照都确认同步后才回收缓存；无 store 时保留原有容量拒绝。
+历史启用后的 store 使用新 magic，旧二进制不能回滚读取；完整备份需同时保留
+store 与其 `.replay-history` 文件，原 wire snapshot 导出/恢复不支持该组合。
+此项不证明 managed backing 跨重启恢复。ub_sim 必须在独立服务测试/提交/发布
+后，同时更新 gitlink、lock 及直接链接 daemon 的构建源清单，才能进行 guest 验收。
+历史 store 重启后控制服务可供查询，`managed_recovery_required=1` 且
+`data_plane_ready=0`；在 AM3 资源对账接通前不接纳新 managed 数据工作，避免
+将空的运行期 allocation 表或历史成功应答解释成有效 backing。
+
 OBMM 平台诊断增加 `mem_service_provider_obmm_endpoint_resources_v1()`，查询当前
 endpoint 保留的 export/import、VMA、可访问视图及待清理映射；调用须与该 endpoint
 的其他操作串行。object-session 的 `stats` 同时输出 `provider-resources`，与服务

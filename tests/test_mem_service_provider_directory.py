@@ -76,6 +76,7 @@ class MemServiceProviderDirectoryTests(unittest.TestCase):
             f"-I{ROOT / 'libs' / 'obmm_queue'}",
             str(CLI_SOURCE),
             str(SERVICE_DIR / "mem_service_daemon.c"),
+            str(SERVICE_DIR / "mem_service_replay_history.c"),
             str(SERVICE_DIR / "mem_service_client.c"),
             str(SERVICE_DIR / "mem_service_wire_client.c"),
             str(SERVICE_DIR / "mem_service_metadata.c"),

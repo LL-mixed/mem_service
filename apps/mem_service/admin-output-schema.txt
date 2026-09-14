@@ -24,6 +24,10 @@ allocation_stats_field=idempotency_used type=u64
 allocation_stats_field=idempotency_cleanup_reserved type=u64
 allocation_stats_field=idempotency_available type=u64
 allocation_stats_field=idempotency_reservation_deficit type=u64
+allocation_stats_field=idempotency_history_enabled type=u32
+allocation_stats_field=idempotency_history_records type=u64
+allocation_stats_field=idempotency_history_failed type=u32
+allocation_stats_field=managed_recovery_required type=u32
 status_field=ready type=u32
 status_field=control_plane_ready type=u32
 status_field=provider_registry_ready type=u32
