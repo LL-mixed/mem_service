@@ -209,7 +209,11 @@ handle，须与 endpoint 操作串行化；它不新增业务 SDK API 或 wire o
 
 取消 ALLOCATING 对象会进入 RETIRING，等待 home 清理确认；迟到 publish 只登记
 待清理 reservation，不重新开放 acquire。当前 worker 重启遇到已有 state 文件时
-拒绝运行，地址不重用，异常资源保留待核对。该限制不能视为恢复与强制撤销已完成。
+拒绝运行，异常资源保留待核对。正常生命周期的地址复用交给内核空闲区间
+分配器，worker 不再自行推进地址游标。消费平台必须完成 managed V2 unmap
+的完整 CPU/PTO 排空、fence/route/TLB 清理及 holder 终结，并支持分配 ioctl
+的 ENOSPC 无资源契约；其他不确定结果继续隔离。真实同址重用/旧身份拒绝
+须单独验收，该接入不构成恢复或强制撤销完成声明。
 
 地址管理接入新增 `mem_service_client_poll_allocation()` 和诊断命令
 `poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>`。

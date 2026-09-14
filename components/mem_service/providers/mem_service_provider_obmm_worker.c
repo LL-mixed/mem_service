@@ -38,7 +38,7 @@ struct worker_reservation {
 enum worker_allocate_result {
     WORKER_ALLOCATE_ERROR = -1,
     WORKER_ALLOCATE_OK = 0,
-    /* Proven before any resource-creating ioctl or reservation mutation. */
+    /* No segment: preflight rejection or the platform's ENOSPC contract. */
     WORKER_ALLOCATE_CAPACITY = 1,
     WORKER_ALLOCATE_BACKING_EMPTY = 2,
 };
@@ -153,7 +153,7 @@ static int allocate_work(int device, int journal,
     const struct worker_config *config, const struct mem_service_client *client,
     const struct obmm_cmd_gsva_aperture *aperture,
     const struct mem_service_client_allocation *work,
-    struct worker_reservation *reservation, uint64_t *next_address)
+    struct worker_reservation *reservation)
 {
     struct obmm_cmd_gsva_alloc_segment_v1 request = {0};
     struct obmm_cmd_export exported = {0};
@@ -162,7 +162,7 @@ static int allocate_work(int device, int journal,
     enum mem_service_wire_status status;
     uint64_t alignment = work->alignment_bytes;
     uint64_t granularity = config->allocation_granularity_bytes;
-    uint64_t backing_size;
+    uint64_t backing_size, first_aligned;
     long page_size = sysconf(_SC_PAGESIZE);
     int export_result;
 
@@ -172,8 +172,7 @@ static int allocate_work(int device, int journal,
         !work->generation || !work->key[0] || page_size <= 0 ||
         work->provider_backed || work->descriptor_len || work->address || work->address_len ||
         work->holder_count || work->live_refs || !aperture->base || !aperture->size ||
-        aperture->size > UINT64_MAX - aperture->base || *next_address < aperture->base ||
-        *next_address - aperture->base > aperture->size) return WORKER_ALLOCATE_ERROR;
+        aperture->size > UINT64_MAX - aperture->base) return WORKER_ALLOCATE_ERROR;
     if (!granularity || (granularity & (granularity - 1)) ||
         granularity < (uint64_t)page_size || !work->size_bytes)
         return WORKER_ALLOCATE_ERROR;
@@ -182,14 +181,15 @@ static int allocate_work(int device, int journal,
     backing_size = (work->size_bytes + granularity - 1) & ~(granularity - 1);
     if (alignment && (alignment & (alignment - 1))) return -1;
     if (alignment < granularity) alignment = granularity;
-    if (*next_address > UINT64_MAX - (alignment - 1))
+    if (aperture->base > UINT64_MAX - (alignment - 1))
         return WORKER_ALLOCATE_CAPACITY;
-    request.requested_home_va = (*next_address + alignment - 1) & ~(alignment - 1);
-    if (request.requested_home_va < aperture->base ||
-        request.requested_home_va - aperture->base > aperture->size ||
-        backing_size > UINT64_MAX - request.requested_home_va ||
-        backing_size > aperture->size - (request.requested_home_va - aperture->base))
+    first_aligned = (aperture->base + alignment - 1) & ~(alignment - 1);
+    if (first_aligned - aperture->base > aperture->size ||
+        backing_size > aperture->size - (first_aligned - aperture->base))
         return WORKER_ALLOCATE_CAPACITY;
+    /* The kernel owns interval selection and reuse. This zero request must
+     * not be replaced by a second worker-side address allocator. */
+    request.requested_home_va = 0;
     if (record_phase(journal, work->generation, "reserve-intent", 0, 0)) return -1;
     reservation->occupied = true;
     strcpy(reservation->key, work->key);
@@ -202,13 +202,22 @@ static int allocate_work(int device, int journal,
     request.requested_p_tag = OBMM_GSVA_P_TAG_AUTO;
     request.access_flags = OBMM_GSVA_ACCESS_READ | OBMM_GSVA_ACCESS_WRITE;
     if (gva_manager_allocate_segment(device, &request)) {
+        const struct obmm_gsva_segment_desc_v1 empty = {0};
+        /* Only this direct allocation API guarantees ENOSPC before reserving
+         * an interval. Lost output (EFAULT) and contradictory output remain
+         * unknown, even if no segment ID is visible to this process. */
+        if (errno == ENOSPC && !memcmp(&request.desc, &empty, sizeof(empty))) {
+            if (record_phase(journal, work->generation, "reserve-empty", 0, 0))
+                return WORKER_ALLOCATE_ERROR;
+            memset(reservation, 0, sizeof(*reservation));
+            return WORKER_ALLOCATE_CAPACITY;
+        }
         reservation->segment = request.desc;
         (void)record_phase(journal, work->generation, "reserve-unknown",
                            request.desc.segment_id, 0);
         return -1;
     }
     reservation->segment = request.desc;
-    *next_address = request.desc.home_va + request.desc.size;
     if (record_phase(journal, work->generation, "reserved", request.desc.segment_id, 0)) return -1;
     if (request.desc.home_va < aperture->base ||
         request.desc.home_va - aperture->base > aperture->size ||
@@ -320,8 +329,8 @@ static int cancel_unbacked_work(int journal, const struct worker_config *config,
     char operation[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
     int length;
 
-    /* Requires no resource-creating attempt, or a NO_BACKING receipt followed
-     * by confirmed segment retirement. An errno alone never authorizes this. */
+    /* Requires confirmed no segment, or a NO_BACKING receipt followed by
+     * confirmed segment retirement. Unknown ioctl errors never authorize it. */
     if (strcmp(work->state, "allocating") || work->provider_backed ||
         work->descriptor_len || work->address || work->address_len ||
         work->holder_count || work->live_refs || !work->generation ||
@@ -387,7 +396,6 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
     int device = -1, journal = -1, result = 1;
     bool signals = false, refreshed = false;
     struct worker_reservation *reservations = NULL;
-    uint64_t next_address;
 
     if (read_config(config_path, &config)) {
         fprintf(stderr, "obmm-worker invalid config\n");
@@ -401,12 +409,11 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
     device = open("/dev/obmm", O_RDWR | O_CLOEXEC);
     if (device < 0 || ioctl(device, OBMM_CMD_GSVA_APERTURE_QUERY, &aperture) ||
         !(aperture.flags & OBMM_GSVA_APERTURE_F_ACTIVE)) goto done;
-    next_address = aperture.base;
     reservations = calloc(MEM_SERVICE_MANAGED_MAX_ALLOCATIONS, sizeof(*reservations));
     if (!reservations) goto done;
     journal = create_state(config.state);
     if (journal < 0) goto done;
-    printf("obmm-worker address_reuse=disabled home_policy=single-owner "
+    printf("obmm-worker address_reuse=kernel-confirmed home_policy=single-owner "
            "forced_revoke=unsupported recovery=quarantine\n");
     printf("obmm-worker starting provider refresh node=%s\n", config.node);
     fflush(stdout);
@@ -461,7 +468,7 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
             int allocation_result;
             if (owned || !available) goto done;
             allocation_result = allocate_work(device, journal, &config,
-                    &client, &aperture, &work, available, &next_address);
+                    &client, &aperture, &work, available);
             if (allocation_result == WORKER_ALLOCATE_CAPACITY) {
                 if (available->occupied || reject_capacity_work(journal, &config, &client, &work))
                     goto done;

@@ -165,28 +165,38 @@ eligible only with zero holders. It must durably record release intent, finish
 unexport and kernel segment retirement, and then confirm reclaim. Failed or
 uncertain steps stop processing and retain state for reconciliation. This
 path relies on clients unmapping before releasing their holders; forced
-revocation and recovery require separate validation. Released addresses are
-not reused during a worker session.
+revocation and recovery require separate validation.
+
+地址复用由 kernel 区间分配器统一执行：worker 提交 requested_home_va=0，
+不维护第二份空闲表或单调游标。匹配的平台必须在 managed unmap 时停止新访问、
+等待完整 CPU/PTO 调用退出、完成 fence/route/TLB 清理；SDK 确认全部映射
+终结后才允许 holder release。worker 确认 unexport、segment retire 和 service
+reclaim 后继续分配；同址新对象必须使用内核返回的新 segment/token 和服务
+generation。任何不确定清理均停止 worker，保留状态；已有 state 文件仍禁止
+重启，不提供跨重启重用或强制撤销。此接入须经实际 guest 复用/旧身份测试验收。
 
 Capacity rejection before the first kernel allocation uses the existing
 generation-checked retire and home reclaim confirmations. The worker records
 `capacity-reject-intent`, cancels the unpublished request, confirms that no
 reservation exists, and continues serving. A rounded-size overflow, aligned
-address overflow, or insufficient remaining aperture is a deterministic
+address overflow, or a request that cannot fit anywhere in the aperture is a deterministic
 capacity rejection. The rejected allocation becomes RETIRED, with no
 descriptor or address; `inspect-allocation`/`object-session wait_state` expose
 that terminal state, and the worker reports `reason=address_capacity`.
-This path does not reclaim or reuse previously retired addresses. Uncertain
-kernel/export errors still require reconciliation; an errno alone does not prove
-that no resource was created. Uncertain cancellation acknowledgements also
-stop the worker with its state file retained.
+运行期区间耗尽只接受平台 `gva_manager_allocate_segment()` 的特定契约：
+直接 ALLOC_SEGMENT ioctl 返回 ENOSPC，且零初始化的 descriptor 仍全零，
+证明本次未创建 segment。worker 先同步 `reserve-empty`，再清除本次意图并
+执行上述取消确认。匹配内核仅在区间保留前返回 ENOSPC；成功保留后的输出
+丢失返回 EFAULT。此规则不泛化到 export、其他 errno、非零 descriptor 或
+其他 ioctl；这些情况仍须核对，禁止推断为空。取消应答不确定也停止 worker。
 
 Managed backing uses the platform's checked GSVA export v1 ioctl. A successful
 NO_BACKING receipt is distinct from an ioctl error: the kernel confirms that
 the pool/sgtable attempt left no export backing. The worker records this
 receipt, retires its known segment, and only then cancels and confirms the
-unpublished service object (`reason=backing_allocation`). The address cursor
-is not rewound. Failed retirement or cancellation retains the reservation.
+unpublished service object (`reason=backing_allocation`). Only confirmed segment
+retirement makes the interval available to the kernel allocator again.
+Failed retirement or cancellation retains the reservation.
 Old kernels reject the new ioctl; the worker never retries ordinary export.
 The kernel also pins the segment during checked export and while its export
 handle exists, preventing early segment retirement. These changes require a
