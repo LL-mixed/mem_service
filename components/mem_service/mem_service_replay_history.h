@@ -26,6 +26,14 @@ int mem_service_replay_history_close(struct mem_service_replay_history *history)
 int mem_service_replay_history_append(struct mem_service_replay_history *history,
     const struct mem_service_idempotency_record *record);
 
+/* Validate all history once for 1..MAX cache records, reject conflicts before
+ * writing, then sync new frames as one batch. Exact duplicates are no-ops.
+ * Uncertain I/O poisons the handle and leaves its checkpoint unchanged;
+ * reopening may recover a complete suffix. Retain the entire caller cache
+ * until a snapshot containing the new checkpoint has been persisted. */
+int mem_service_replay_history_append_batch(struct mem_service_replay_history *history,
+    const struct mem_service_idempotency_record *const *records, size_t count);
+
 /* Returns 1 when found, 0 when absent, -1 on an untrustworthy history.
  * On absence/error the output is unchanged. */
 int mem_service_replay_history_find(struct mem_service_replay_history *history,

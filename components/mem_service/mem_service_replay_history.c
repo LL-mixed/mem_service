@@ -71,9 +71,17 @@ static bool same_file(const struct mem_service_replay_history *h)
         opened.st_dev == named.st_dev && opened.st_ino == named.st_ino;
 }
 
+struct batch_lookup {
+    const struct mem_service_idempotency_record *const *records;
+    size_t count;
+    bool present[MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS];
+    bool conflict;
+};
+
 static int scan(struct mem_service_replay_history *h, uint64_t prefix_count,
     uint64_t prefix_checksum, const char *key,
-    struct mem_service_idempotency_record *out, bool allow_suffix)
+    struct mem_service_idempotency_record *out, bool allow_suffix,
+    struct batch_lookup *batch)
 {
     unsigned char frame[FRAME_BYTES];
     struct mem_service_idempotency_record found = {0};
@@ -105,6 +113,18 @@ static int scan(struct mem_service_replay_history *h, uint64_t prefix_count,
         checksum = decode(frame + bytes, 8);
         count++;
         if (count == prefix_count) prefix_seen = checksum == prefix_checksum;
+        for (size_t i = 0; batch != NULL && i < batch->count; ++i) {
+            const struct mem_service_idempotency_record *r = batch->records[i];
+            if (strlen(r->key) != key_len ||
+                memcmp(r->key, frame + FRAME_HEADER, key_len) != 0) continue;
+            batch->present[i] = true;
+            if (r->operation != decode(frame + 16, 4) ||
+                r->request_checksum != decode(frame + 20, 4) ||
+                r->status != decode(frame + 24, 4) ||
+                r->response_len != response_len ||
+                memcmp(r->response, frame + FRAME_HEADER + key_len, response_len) != 0)
+                batch->conflict = true;
+        }
         if (key != NULL && strlen(key) == key_len &&
             memcmp(key, frame + FRAME_HEADER, key_len) == 0) {
             memset(&found, 0, sizeof(found));
@@ -162,7 +182,7 @@ int mem_service_replay_history_open(struct mem_service_replay_history *h,
     if (create && (write_exact(h->fd, history_magic, sizeof(history_magic)) != 0 ||
                    fsync(h->fd) != 0 || sync_parent(path) != 0))
         goto fail;
-    if (scan(h, checkpoint_count, checkpoint_checksum, NULL, NULL, true) < 0)
+    if (scan(h, checkpoint_count, checkpoint_checksum, NULL, NULL, true, NULL) < 0)
         goto fail;
     return 0;
 fail:
@@ -186,30 +206,34 @@ int mem_service_replay_history_find(struct mem_service_replay_history *h,
     if (h == NULL || key == NULL || record == NULL || key[0] == '\0' ||
         strnlen(key, MEM_SERVICE_IDEMPOTENCY_KEY_LEN) >= MEM_SERVICE_IDEMPOTENCY_KEY_LEN)
         return -1;
-    return scan(h, h->count, h->checksum, key, record, false);
+    return scan(h, h->count, h->checksum, key, record, false, NULL);
 }
 
-int mem_service_replay_history_append(struct mem_service_replay_history *h,
-    const struct mem_service_idempotency_record *record)
+static bool valid_record(const struct mem_service_idempotency_record *r)
+{
+    return r != NULL && r->in_use && r->operation != 0 && r->key[0] != '\0' &&
+        strnlen(r->key, MEM_SERVICE_IDEMPOTENCY_KEY_LEN) < MEM_SERVICE_IDEMPOTENCY_KEY_LEN &&
+        r->response_len < MEM_SERVICE_IDEMPOTENCY_RESPONSE_LEN &&
+        strnlen(r->response, MEM_SERVICE_IDEMPOTENCY_RESPONSE_LEN) == r->response_len;
+}
+
+static bool same_record(const struct mem_service_idempotency_record *a,
+                        const struct mem_service_idempotency_record *b)
+{
+    return a->operation == b->operation && a->request_checksum == b->request_checksum &&
+        a->status == b->status && a->response_len == b->response_len &&
+        memcmp(a->response, b->response, a->response_len) == 0;
+}
+
+static int append_frame(struct mem_service_replay_history *h,
+    const struct mem_service_idempotency_record *record, uint64_t *count,
+    uint64_t *chain)
 {
     unsigned char frame[FRAME_BYTES] = {0};
-    struct mem_service_idempotency_record previous;
-    if (h == NULL || record == NULL || !record->in_use || record->operation == 0 ||
-        record->response_len >= MEM_SERVICE_IDEMPOTENCY_RESPONSE_LEN ||
-        strnlen(record->response, MEM_SERVICE_IDEMPOTENCY_RESPONSE_LEN) != record->response_len)
-        return -1;
-    int rc = mem_service_replay_history_find(h, record->key, &previous);
-    if (rc < 0 || h->count == UINT64_MAX) return -1;
-    if (rc == 1)
-        return previous.operation == record->operation &&
-            previous.request_checksum == record->request_checksum &&
-            previous.status == record->status &&
-            previous.response_len == record->response_len &&
-            memcmp(previous.response, record->response, record->response_len) == 0 ? 0 : -1;
     size_t key_len = strlen(record->key);
     size_t bytes = FRAME_HEADER + key_len + record->response_len;
-    encode(frame, h->count + 1, 8);
-    encode(frame + 8, h->checksum, 8);
+    encode(frame, *count + 1, 8);
+    encode(frame + 8, *chain, 8);
     encode(frame + 16, record->operation, 4);
     encode(frame + 20, record->request_checksum, 4);
     encode(frame + 24, record->status, 4);
@@ -219,14 +243,54 @@ int mem_service_replay_history_append(struct mem_service_replay_history *h,
     memcpy(frame + FRAME_HEADER + key_len, record->response, record->response_len);
     uint64_t checksum = frame_checksum(frame, bytes);
     encode(frame + bytes, checksum, 8);
-    /* scan left the descriptor at validated EOF. Uncertain writes retain
-     * the file unchanged for inspection; the owner must not evict its cache. */
-    if (write_exact(h->fd, frame, bytes + 8U) != 0 || fsync(h->fd) != 0 ||
-        !same_file(h)) {
+    if (write_exact(h->fd, frame, bytes + 8U) != 0) return -1;
+    (*count)++;
+    *chain = checksum;
+    return 0;
+}
+
+int mem_service_replay_history_append_batch(struct mem_service_replay_history *h,
+    const struct mem_service_idempotency_record *const *records, size_t count)
+{
+    struct batch_lookup batch = {.records = records, .count = count};
+    uint64_t added = 0;
+    if (h == NULL || records == NULL || count == 0 ||
+        count > MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS) return -1;
+    for (size_t i = 0; i < count; ++i) {
+        if (!valid_record(records[i])) return -1;
+        for (size_t j = 0; j < i; ++j) {
+            if (strcmp(records[i]->key, records[j]->key) != 0) continue;
+            if (!same_record(records[i], records[j])) return -1;
+            batch.present[i] = true;
+        }
+    }
+    if (scan(h, h->count, h->checksum, NULL, NULL, false, &batch) < 0 ||
+        batch.conflict) return -1;
+    for (size_t i = 0; i < count; ++i) added += batch.present[i] ? 0U : 1U;
+    if (added > UINT64_MAX - h->count) return -1;
+    if (added == 0) return 0;
+    uint64_t next_count = h->count, next_checksum = h->checksum;
+    /* The scan leaves the descriptor at validated EOF. All candidate checks
+     * precede writes. A failed batch may leave a complete or partial suffix;
+     * neither its checkpoint nor any caller cache is committed on failure. */
+    for (size_t i = 0; i < count; ++i) {
+        if (!batch.present[i] &&
+            append_frame(h, records[i], &next_count, &next_checksum) != 0) {
+            h->failed = true;
+            return -1;
+        }
+    }
+    if (fsync(h->fd) != 0 || !same_file(h)) {
         h->failed = true;
         return -1;
     }
-    h->count++;
-    h->checksum = checksum;
+    h->count = next_count;
+    h->checksum = next_checksum;
     return 0;
+}
+
+int mem_service_replay_history_append(struct mem_service_replay_history *h,
+    const struct mem_service_idempotency_record *record)
+{
+    return mem_service_replay_history_append_batch(h, &record, 1);
 }

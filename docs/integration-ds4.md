@@ -53,6 +53,9 @@ checkpoint；仅确认持久化后回收缓存，未配置 store 时保持有界
 后磁盘快照使用新 magic，旧二进制拒绝读取，wire 完整 snapshot 导出/恢复拒绝
 省略该外部历史。此改动不更改安装态 SDK/DS4 transfer 热路径，也不认证模型
 运行或 managed backing 的重启恢复。
+内部缓存归档按有界批次完整校验一次历史，全部冲突预检后才追加并同步，
+含 checkpoint 快照持久化后才淘汰原缓存。失败保持原缓存及不确定历史；
+wire/安装 SDK、磁盘帧格式、DS4 transfer 和请求超时均不变。
 历史 store 重启后显式报告 `managed_recovery_required=1`，新 managed 数据
 工作等待 AM3 对账，data plane readiness 保持 0；metadata 查询继续可用。
 

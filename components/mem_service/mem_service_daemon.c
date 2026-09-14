@@ -13317,22 +13317,20 @@ static int mem_service_history_make_room(struct mem_service *svc,
                                           const char *store_path)
 {
     bool selected[MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS] = {false};
+    const struct mem_service_idempotency_record *batch[MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS];
     size_t count = 0;
     if (store_path == NULL || store_path[0] == '\0') return 0;
     for (size_t i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
         selected[i] = svc->idempotency_records[i].in_use &&
             mem_service_history_managed_operation(svc->idempotency_records[i].operation);
-        count += selected[i] ? 1U : 0U;
+        if (selected[i]) batch[count++] = &svc->idempotency_records[i];
     }
     if (count == 0) return 0;
     if (svc->replay_history == NULL &&
         mem_service_history_open(svc, store_path, !svc->replay_history_enabled) != 0)
         return -1;
-    for (size_t i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
-        if (selected[i] && mem_service_replay_history_append(svc->replay_history,
-                                                           &svc->idempotency_records[i]) != 0)
-            return -1;
-    }
+    if (mem_service_replay_history_append_batch(svc->replay_history, batch, count) != 0)
+        return -1;
     svc->replay_history_count = svc->replay_history->count;
     svc->replay_history_checksum = svc->replay_history->checksum;
     /* Persist the prefix while the original cache is still intact. A crash

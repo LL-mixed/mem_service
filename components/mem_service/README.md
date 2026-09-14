@@ -1,5 +1,16 @@
 # Memory Service Component
 
+## 幂等历史批量归档约定
+
+既有 `serve --store` 的缓存归档使用有界批量接口，一批最多等于幂等缓存
+容量。每批完整扫描并校验全部历史一次，核对批内及历史 key 的精确重复或
+冲突，全部预检通过后才追加；不以提前命中或缓存命中跳过历史尾部校验。
+新增帧统一同步成功后才更新内存 checkpoint，再持久化含 checkpoint 的
+服务快照，最后淘汰原缓存。写入或同步不确定时保留整个缓存，句柄进入
+failed 状态；完整后缀可在重新打开时验证，半帧不自动截断。批次不承诺
+失败时零字节落盘。该内部优化不改变 wire、安装 SDK、磁盘帧格式或请求
+超时，也不替代实际 guest 百轮与 managed backing 恢复验证。
+
 ## V2 writer 发布准备契约
 
 `mem_service_client_prepare_managed_reference()` 接收 begin 返回的 allocation、

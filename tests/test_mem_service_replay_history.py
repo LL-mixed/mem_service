@@ -20,6 +20,7 @@ class ReplayHistoryTests(unittest.TestCase):
         run = subprocess.run([
             compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
             "-Dfsync=history_test_fsync", "-Dwrite=history_test_write",
+            "-Dread=history_test_read",
             "-I", str(root / "components/mem_service"),
             str(root / "tests/mem_service_replay_history.c"),
             str(root / "components/mem_service/mem_service_replay_history.c"),
@@ -80,6 +81,33 @@ class ReplayHistoryTests(unittest.TestCase):
 
     def test_sync_failure_keeps_cache_checkpoint_and_requires_reopen(self):
         self.run_case("sync-failure")
+
+    def test_batch_checks_history_once_and_reopens_complete_suffix(self):
+        self.run_case("batch-roundtrip")
+
+    def test_batch_validates_all_inputs_duplicates_and_conflicts_before_write(self):
+        self.run_case("batch-preflight")
+
+    def test_batch_partial_second_write_preserves_old_checkpoint(self):
+        self.run_case("batch-write-failure")
+
+    def test_batch_sync_failure_recovers_complete_suffix_without_duplicate(self):
+        self.run_case("batch-sync-failure")
+
+    def test_batch_does_not_skip_corrupt_or_torn_suffix_for_existing_keys(self):
+        for mode in ("batch-corrupt", "batch-truncate", "batch-torn"):
+            with self.subTest(mode=mode):
+                self.run_case(mode)
+
+    def test_daemon_batches_archival_before_snapshot_and_cache_eviction(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "components/mem_service/mem_service_daemon.c").read_text()
+        body = source.split("static int mem_service_history_make_room(", 1)[1].split(
+            "static enum mem_service_wire_status", 1)[0]
+        self.assertIn("mem_service_replay_history_append_batch(svc->replay_history, batch, count)", body)
+        self.assertNotIn("mem_service_replay_history_append(", body)
+        self.assertLess(body.index("append_batch("), body.index("mem_service_save_store("))
+        self.assertLess(body.index("mem_service_save_store("), body.index("memset("))
 
     def test_cli_rejects_missing_extra_and_unknown_arguments(self):
         for args in ([], ["--self-test"], ["--case", "unknown", "unused"],

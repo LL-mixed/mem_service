@@ -84,6 +84,9 @@ daemon 的幂等表为已接纳的对象、holder 和 mapping 预留后续清理
 
 容量续作通过既有 `serve --store` 接入内部重放历史。服务在归档应答及含前缀
 checkpoint 的磁盘快照都确认同步后才回收缓存；无 store 时保留原有容量拒绝。
+缓存归档通过内部有界批量接口完整校验历史一次，预检所有冲突后追加并同步；
+失败保留原缓存和旧 checkpoint，半写历史不自动修剪。wire/SDK、磁盘帧格式
+及请求截止时间不变，实际 guest 延迟改善需独立运行验证。
 历史启用后的 store 使用新 magic，旧二进制不能回滚读取；完整备份需同时保留
 store 与其 `.replay-history` 文件，原 wire snapshot 导出/恢复不支持该组合。
 此项不证明 managed backing 跨重启恢复。ub_sim 必须在独立服务测试/提交/发布
