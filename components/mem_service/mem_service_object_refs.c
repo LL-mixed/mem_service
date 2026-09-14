@@ -186,7 +186,7 @@ enum mem_service_managed_result mem_service_reference_resolve(
     return MEM_SERVICE_MANAGED_RESULT_OK;
 }
 
-enum mem_service_managed_result mem_service_reference_acquire(
+enum mem_service_managed_result mem_service_reference_validate(
     struct mem_service *svc, const struct lingqu_object_ref_wire_v2 *ref,
     const char *session_id, uint32_t requested_access,
     struct mem_service_managed_view *allocation_out)
@@ -208,6 +208,20 @@ enum mem_service_managed_result mem_service_reference_acquire(
             break;
         }
     if (!registered) return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    *allocation_out = view;
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_reference_acquire(
+    struct mem_service *svc, const struct lingqu_object_ref_wire_v2 *ref,
+    const char *session_id, uint32_t requested_access,
+    struct mem_service_managed_view *allocation_out)
+{
+    struct mem_service_managed_view current;
+    enum mem_service_managed_result result;
+    if (!allocation_out) return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    result = mem_service_reference_validate(svc, ref, session_id, requested_access, &current);
+    if (result) return result;
     return mem_service_managed_acquire_published(&svc->managed, ref->allocation_key,
         session_id, ref->allocation_generation, ref->object.object_version, allocation_out);
 }

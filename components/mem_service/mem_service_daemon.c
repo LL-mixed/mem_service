@@ -24,6 +24,7 @@
 
 #include "mem_service_core.h"
 #include "mem_service_object_refs.h"
+#include "mem_service_reference_protocol.h"
 #include "mem_service_record_table.h"
 #include "mem_service_ub_ssd_gsva_io.h"
 #include "mem_service_wire_client.h"
@@ -9379,6 +9380,9 @@ static enum mem_service_wire_status mem_service_put_object(struct mem_service *s
     if (!mem_service_payload_get_string(payload, "key", key, sizeof(key))) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
+    record = mem_service_find_record(svc, key);
+    if (record != NULL && record->kind == MEM_SERVICE_RECORD_MANAGED_VIEW)
+        return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
     memset(&next, 0, sizeof(next));
     next.in_use = true;
     next.kind = MEM_SERVICE_RECORD_KVCACHE_OBJECT;
@@ -9628,6 +9632,8 @@ static enum mem_service_wire_status mem_service_store_artifact(
     }
     record = mem_service_find_record(svc, key);
     if (record != NULL) {
+        if (record->kind == MEM_SERVICE_RECORD_MANAGED_VIEW)
+            return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
         old_version = record->version;
     }
     has_requested_version =
@@ -11007,6 +11013,7 @@ static bool mem_service_record_matches_retention_kind(
     uint32_t retained_record_tenant)
 {
     return record != NULL && record->in_use &&
+           record->kind != MEM_SERVICE_RECORD_MANAGED_VIEW &&
            (retained_record_kind == 0U ||
             (uint32_t)record->kind == retained_record_kind) &&
            (!retained_record_tenant_enabled ||
@@ -11087,7 +11094,8 @@ static void mem_service_prune_idempotency_for_record_key(struct mem_service *svc
             idem->operation == MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT ||
             idem->operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
             idem->operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT ||
-            idem->operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION) {
+            idem->operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION ||
+            idem->operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION) {
             continue;
         }
         response_key[0] = '\0';
@@ -11763,6 +11771,138 @@ static enum mem_service_wire_status mem_service_mapping_admission_gate(
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
+static enum mem_service_wire_status mem_service_reference_admission_gate(
+    struct mem_service *svc, const char *payload, char *response, size_t response_len)
+{
+    struct mem_service_reference_request request;
+    struct lingqu_object_ref_wire_v2 ref;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+    const char *key;
+    uint64_t incarnation = 0, generation, version;
+
+    if (mem_service_reference_parse_request(payload, &request))
+        return mem_service_managed_finish(MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST,
+                                          NULL, NULL, response, response_len);
+    ref = request.reference;
+    if (request.action == MEM_SERVICE_REFERENCE_RESOLVE) {
+        result = mem_service_reference_resolve(svc, request.key, &ref);
+        if (result) return mem_service_managed_finish(result, NULL, request.key,
+                                                      response, response_len);
+    }
+    key = (request.action == MEM_SERVICE_REFERENCE_BEGIN ||
+           request.action == MEM_SERVICE_REFERENCE_SEAL) ? request.key : ref.allocation_key;
+    generation = ref.allocation_generation;
+    version = ref.object.object_version;
+    if (request.action == MEM_SERVICE_REFERENCE_BEGIN || request.action == MEM_SERVICE_REFERENCE_SEAL) {
+        generation = request.generation;
+        version = request.version;
+    }
+    result = mem_service_managed_inspect(&svc->managed, key, &view);
+    if (!result && view.generation != generation)
+        result = MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    if (!result && (!view.provider_backed || view.state != MEM_SERVICE_MANAGED_STATE_ACTIVE))
+        result = MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    if (result) return mem_service_managed_finish(result, NULL, key, response, response_len);
+    if (!mem_service_provider_directory_lookup_active(&svc->provider_directory,
+            view.home_node_id, mem_service_monotonic_ms(), &incarnation)) {
+        snprintf(response, response_len, "status=internal\nreason=data_plane_not_ready\n");
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    if (incarnation != view.provider_incarnation)
+        result = MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
+    if (!result && request.action != MEM_SERVICE_REFERENCE_BEGIN && view.version != version)
+        result = MEM_SERVICE_MANAGED_RESULT_VERSION_CONFLICT;
+    if (!result && request.action == MEM_SERVICE_REFERENCE_BEGIN) {
+        if (version == UINT64_MAX || (view.version != version && view.version != version + 1U))
+            result = MEM_SERVICE_MANAGED_RESULT_VERSION_CONFLICT;
+        else if (view.version == version + 1U)
+            result = mem_service_managed_content_check(&svc->managed, key, request.session_id,
+                generation, view.version, true, &view);
+    }
+    if (!result && (request.action == MEM_SERVICE_REFERENCE_STAGE ||
+                    request.action == MEM_SERVICE_REFERENCE_ACQUIRE ||
+                    request.action == MEM_SERVICE_REFERENCE_RESOLVE) &&
+        (strcmp(view.home_node_id, ref.home_node) || view.size_bytes != ref.allocation_bytes ||
+         view.provider_incarnation != ref.provider_incarnation))
+        result = MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
+    if (!result && request.action == MEM_SERVICE_REFERENCE_STAGE)
+        result = mem_service_managed_content_check(&svc->managed, key, request.session_id,
+            generation, version, true, &view);
+    if (!result && request.action == MEM_SERVICE_REFERENCE_ACQUIRE) {
+        result = mem_service_reference_validate(svc, &ref, request.session_id,
+                                                (uint32_t)request.access, &view);
+        /* A released grant must not be resurrected by a cached ACQUIRE reply. */
+        for (size_t i = 0; !result && i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
+            const struct mem_service_idempotency_record *idem = &svc->idempotency_records[i];
+            bool held = false;
+            if (!idem->in_use || strcmp(idem->key, request.idempotency_key) ||
+                idem->operation != MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION ||
+                idem->request_checksum != mem_service_wire_checksum(payload, strlen(payload)) ||
+                idem->status != MEM_SERVICE_WIRE_STATUS_OK) continue;
+            for (uint32_t j = 0; j < view.holder_count; ++j)
+                if (!strcmp(view.holders[j].session_id, request.session_id) &&
+                    view.holders[j].generation == generation) held = true;
+            if (!held) result = MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
+        }
+    }
+    if (result) return mem_service_managed_finish(result, NULL, key, response, response_len);
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
+static enum mem_service_wire_status mem_service_reference_transition(
+    struct mem_service *svc, const char *payload, char *response, size_t response_len)
+{
+    struct mem_service_reference_request request;
+    struct mem_service_managed_view view;
+    struct lingqu_object_ref_wire_v2 ref;
+    enum mem_service_managed_result result = MEM_SERVICE_MANAGED_RESULT_OK;
+    enum mem_service_wire_status gate;
+    const char *key;
+    char hex[513];
+
+    gate = mem_service_reference_admission_gate(svc, payload, response, response_len);
+    if (gate != MEM_SERVICE_WIRE_STATUS_OK) return gate;
+    if (mem_service_reference_parse_request(payload, &request))
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    ref = request.reference;
+    switch (request.action) {
+    case MEM_SERVICE_REFERENCE_BEGIN:
+        result = mem_service_managed_content_begin(&svc->managed, request.key,
+            request.session_id, request.generation, request.version, &view);
+        break;
+    case MEM_SERVICE_REFERENCE_STAGE:
+        result = mem_service_reference_stage(svc, request.key, request.session_id, &ref);
+        break;
+    case MEM_SERVICE_REFERENCE_SEAL:
+        result = mem_service_reference_seal(svc, request.key, request.session_id,
+                                            request.generation, request.version);
+        break;
+    case MEM_SERVICE_REFERENCE_RESOLVE:
+        result = mem_service_reference_resolve(svc, request.key, &ref);
+        break;
+    case MEM_SERVICE_REFERENCE_ACQUIRE:
+        result = mem_service_reference_acquire(svc, &ref, request.session_id,
+                                               (uint32_t)request.access, &view);
+        break;
+    }
+    key = (request.action == MEM_SERVICE_REFERENCE_BEGIN ||
+           request.action == MEM_SERVICE_REFERENCE_SEAL) ? request.key : ref.allocation_key;
+    if (!result) result = mem_service_managed_inspect(&svc->managed, key, &view);
+    if (result) return mem_service_managed_finish(result, NULL, key, response, response_len);
+    mem_service_managed_render_view(&view, response, response_len);
+    if (mem_service_wire_payload_append_u64(response, response_len, "action", request.action) ||
+        mem_service_wire_payload_append_field(response, response_len, "reference_key", request.key))
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    if (request.action == MEM_SERVICE_REFERENCE_STAGE ||
+        request.action == MEM_SERVICE_REFERENCE_RESOLVE || request.action == MEM_SERVICE_REFERENCE_ACQUIRE) {
+        if (mem_service_reference_encode_hex(&ref, hex, sizeof(hex)) ||
+            mem_service_wire_payload_append_field(response, response_len, "reference_hex", hex))
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
 static enum mem_service_wire_status mem_service_mapping_transition(
     struct mem_service *svc, const char *payload, char *response, size_t response_len)
 {
@@ -11806,6 +11946,21 @@ static uint64_t mem_service_idempotency_used(const struct mem_service *svc)
     return used;
 }
 
+static bool mem_service_has_staged_reference(const struct mem_service *svc,
+                                             const char *key, uint64_t generation,
+                                             uint64_t version)
+{
+    for (size_t i = 0; i < MEM_SERVICE_MAX_RECORDS; ++i) {
+        const struct mem_service_record *record = &svc->records[i];
+        const struct lingqu_object_ref_wire_v2 *ref = &record->managed_ref;
+        if (record->in_use && record->kind == MEM_SERVICE_RECORD_MANAGED_VIEW &&
+            !lingqu_object_ref_v2_validate(ref) && !strcmp(ref->allocation_key, key) &&
+            ref->allocation_generation == generation && ref->object.object_version == version)
+            return true;
+    }
+    return false;
+}
+
 static uint64_t mem_service_cleanup_reservations(const struct mem_service *svc)
 {
     uint64_t reserved = 0;
@@ -11820,6 +11975,12 @@ static uint64_t mem_service_cleanup_reservations(const struct mem_service *svc)
         if (entry->state == MEM_SERVICE_MANAGED_STATE_ALLOCATING ||
             entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE)
             reserved += 1U; /* RETIRE */
+        if (entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE &&
+            entry->reference_mode && entry->content_writing) {
+            bool staged = mem_service_has_staged_reference(svc, entry->key,
+                                                            entry->generation, entry->version);
+            reserved += staged ? 1U : 2U; /* First STAGE, then SEAL. */
+        }
     }
     for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
         switch (svc->managed.mappings[i].state) {
@@ -12623,6 +12784,8 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
         return mem_service_poll_allocation(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION:
         return mem_service_mapping_transition(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION:
+        return mem_service_reference_transition(svc, payload, response, response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -12936,17 +13099,31 @@ static uint64_t mem_service_new_cleanup_reservations(
         mem_service_payload_get_u64_checked(payload, "action", &action) &&
         action == MEM_SERVICE_MANAGED_MAPPING_BEGIN)
         return 3U;
+    if (operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION &&
+        mem_service_payload_get_u64_checked(payload, "action", &action)) {
+        if (action == MEM_SERVICE_REFERENCE_BEGIN) return 2U;
+        if (action == MEM_SERVICE_REFERENCE_ACQUIRE) return 1U;
+    }
     return 0U;
 }
 
 static bool mem_service_can_use_cleanup_reservation(
-    enum mem_service_wire_operation operation, const char *payload)
+    const struct mem_service *svc, enum mem_service_wire_operation operation, const char *payload)
 {
     uint64_t action = 0;
 
     if (operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
         operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT)
         return true;
+    if (operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION &&
+        mem_service_payload_get_u64_checked(payload, "action", &action)) {
+        struct mem_service_reference_request request;
+        if (mem_service_reference_parse_request(payload, &request)) return false;
+        return action == MEM_SERVICE_REFERENCE_SEAL ||
+            (action == MEM_SERVICE_REFERENCE_STAGE &&
+             !mem_service_has_staged_reference(svc, request.reference.allocation_key,
+                 request.reference.allocation_generation, request.reference.object.object_version));
+    }
     if (operation != MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION ||
         !mem_service_payload_get_u64_checked(payload, "action", &action))
         return false;
@@ -12995,7 +13172,7 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
                 mem_service_idempotency_used(svc) +
                     mem_service_cleanup_reservations(svc) <=
                     MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS &&
-                mem_service_can_use_cleanup_reservation(operation, payload)) {
+                mem_service_can_use_cleanup_reservation(svc, operation, payload)) {
                 /* Dispatch performs identity/state validation. A reserved
                  * result may be committed only after an obligation is freed. */
                 *cleanup_reserved_out = true;
@@ -13269,6 +13446,10 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                                                             response_len)) != MEM_SERVICE_WIRE_STATUS_OK) {
         /* An old successful reply cannot authorize a replaced home instance. */
         idempotency_handled = true;
+    } else if (operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION &&
+               (status = mem_service_reference_admission_gate(svc, payload, response,
+                                                              response_len)) != MEM_SERVICE_WIRE_STATUS_OK) {
+        idempotency_handled = true;
     } else {
         status = mem_service_try_idempotency_replay(svc,
                                                     operation,
@@ -13457,6 +13638,11 @@ static bool mem_service_operation_mutates(enum mem_service_wire_operation operat
                                           const char *payload)
 {
     switch (operation) {
+    case MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION: {
+        uint64_t action = 0;
+        (void)mem_service_payload_get_u64_checked(payload, "action", &action);
+        return action != MEM_SERVICE_REFERENCE_RESOLVE;
+    }
     case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION: {
         uint64_t action = 0;
         (void)mem_service_payload_get_u64_checked(payload, "action", &action);
@@ -13498,6 +13684,8 @@ static bool mem_service_operation_gated_managed_data_op(
     enum mem_service_wire_operation operation, const char *payload)
 {
     switch (operation) {
+    case MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION:
+        return true;
     case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION: {
         uint64_t action = 0;
         (void)mem_service_payload_get_u64_checked(payload, "action", &action);
@@ -13586,6 +13774,12 @@ static uint64_t mem_service_estimate_new_record_count(
     const char *payload)
 {
     switch (operation) {
+    case MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION: {
+        uint64_t action = 0;
+        (void)mem_service_payload_get_u64_checked(payload, "action", &action);
+        return action == MEM_SERVICE_REFERENCE_STAGE ?
+            mem_service_estimate_new_key_record_count(svc, payload) : 0U;
+    }
     case MEM_SERVICE_WIRE_OP_PUT_OBJECT:
     case MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF:
     case MEM_SERVICE_WIRE_OP_REGISTER_EXECUTION_ARTIFACT:
@@ -14876,6 +15070,7 @@ static bool mem_service_network_operation_allowed(
     enum mem_service_wire_operation operation)
 {
     switch (operation) {
+    case MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION:
     case MEM_SERVICE_WIRE_OP_HEALTH:
     case MEM_SERVICE_WIRE_OP_READY:
     case MEM_SERVICE_WIRE_OP_STATUS:
@@ -14958,6 +15153,16 @@ static int mem_service_handle_client(int client_fd,
                                          &request,
                                          MEM_SERVICE_WIRE_STATUS_CHECKSUM_MISMATCH,
                                          "checksum_mismatch\n");
+    }
+    /* The reference parser consumes text; do not silently discard a binary
+     * suffix before duplicate-field and idempotency validation. */
+    if (request.operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION &&
+        memchr(request_payload, '\0', request.payload_len) != NULL) {
+        mem_service_record_operation_metrics(svc, MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION,
+                                              MEM_SERVICE_WIRE_STATUS_INVALID_SESSION, 0);
+        return mem_service_send_response(client_fd, &request,
+            MEM_SERVICE_WIRE_STATUS_INVALID_SESSION,
+            "status=invalid_session\nreason=embedded_nul\n");
     }
     if (connection != NULL && connection->network) {
         char declared_node[MEM_SERVICE_NETWORK_NODE_ID_LEN];

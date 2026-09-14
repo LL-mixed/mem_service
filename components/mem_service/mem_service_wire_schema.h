@@ -295,6 +295,17 @@ static const struct mem_service_wire_payload_field
         {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
 };
 
+static const struct mem_service_wire_payload_field mem_service_wire_reference_fields[] = {
+    {"action", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+    {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+    {"session_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+    {"generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+    {"version", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+    {"reference_hex", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+    {"access", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+    {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+};
+
 static const struct mem_service_wire_operation_schema
     mem_service_wire_operation_schemas[] = {
         {MEM_SERVICE_WIRE_OP_HEALTH,
@@ -611,6 +622,14 @@ static const struct mem_service_wire_operation_schema
          mem_service_wire_mapping_transition_fields,
          sizeof(mem_service_wire_mapping_transition_fields) /
              sizeof(mem_service_wire_mapping_transition_fields[0]),
+         NULL,
+         0},
+        {MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION,
+         "reference_transition",
+         MEM_SERVICE_WIRE_SCHEMA_VERSION,
+         MEM_SERVICE_WIRE_SCHEMA_FORMAT_TEXT_KV,
+         mem_service_wire_reference_fields,
+         sizeof(mem_service_wire_reference_fields) / sizeof(mem_service_wire_reference_fields[0]),
          NULL,
          0},
         {MEM_SERVICE_WIRE_OP_POLL_ALLOCATION,

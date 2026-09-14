@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "mem_service_provider.h"
+#include "mem_service_reference_protocol.h"
 #include "mem_service_wire.h"
 #include "mem_service_wire_client.h"
 
@@ -472,6 +473,19 @@ struct mem_service_client_allocation {
     struct mem_service_client_allocation_holder
         holders[MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS];
 };
+
+/* Metadata only; successful ACQUIRE holds the allocation until RELEASE.
+ * Output remains untouched on any request, transport or response failure. */
+struct mem_service_client_reference_result {
+    struct mem_service_client_allocation allocation;
+    struct lingqu_object_ref_wire_v2 reference;
+};
+
+int mem_service_client_reference_transition(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    struct mem_service_client_reference_result *result_out,
+    enum mem_service_wire_status *status_out);
 
 struct mem_service_client_allocation_stats {
     uint64_t backing_registered;

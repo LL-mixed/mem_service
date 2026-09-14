@@ -303,6 +303,31 @@ scripts/run_w5_memory_service_bootstrap.sh
 
 ## 6. Simpler/PTO 原地发布契约
 
+### 受管理 V2 引用控制接口（显式接入）
+
+新增 `mem_service_client_reference_transition()` 与 CLI
+`reference-transition`，使用 `0x7e` metadata-only RPC。调用者将
+`mem_service_reference_request` 清零后填写 action-specific 字段；固定字符串
+要求 NUL 终止并保持尾部零填充。`begin` / `seal` 的 key 是 allocation key；
+`stage` / `resolve` 的 key 是逻辑对象 key；`acquire` 的 key 必须与
+`reference_hex` 内完整 allocation key 相同。V1 消费者不会自动升级。
+
+有序流程为：allocation owner 持有唯一 holder → `begin`（传当前 version，
+成功后递增）→ 完成 provider 写入与可见性操作 → `stage` 一个或多个 V2 引用
+→ `seal` → reader `resolve` / `acquire` → 现有 `release-object`。引用 metadata
+不携带 payload；`seal` 的元数据成功回执不能单独证明设备写入完成。
+
+BEGIN / STAGE / SEAL / ACQUIRE 必须携带 idempotency key。当前 readiness、
+generation、content version、home incarnation 检查发生在缓存回执返回前。
+开始新版本后，旧版 resolve/acquire 会失败；provider 实例更换后，旧成功回执
+也不能获得当前引用。BEGIN 为首次 STAGE 和 SEAL 预留回执容量，ACQUIRE
+为 RELEASE 预留容量；通用 record retention 不回收受管理引用。
+
+本接口当前覆盖 daemon 生命周期内的控制协议。reader 的 V2 映射接入、
+provider 可见性闭环、W5 V2 实际数据链路和跨 daemon 重启验证仍需完成；
+不能将上述 metadata 测试计入这些验收项。下游消费仍遵守 clean commit、
+远端可获取、gitlink 与 lock 一致的原有要求。
+
 W5 可以把已提交 hidden-state ObjectRef 对应的 OBMM payload range 交给
 `lingqu_shmem` compute adapter，并形成 `AddressSpace::UB_GM` memref。Simpler
 执行 PTO callable 时，输入由 `TLOAD` 读取，输出由 `TSTORE` 写入当前节点的

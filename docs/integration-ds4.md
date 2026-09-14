@@ -316,6 +316,24 @@ record 引用的对象块；DS4 本地 prefix index 的淘汰不直接删除 dae
 
 ## 8. 排错
 
+### 可选 V2 引用控制接口
+
+安装 SDK 新增 `mem_service_reference_protocol.h` 和
+`mem_service_client_reference_transition()`，对应 CLI `reference-transition`
+的 begin/stage/seal/resolve/acquire。现有 client record 的 808-byte ABI 与
+V1 ObjectRef 的 64-byte 编码保持不变；使用新接口需要具有 `0x7e` operation
+的服务端，旧服务端返回 unsupported，SDK 不回退到 V1。
+
+新接口只传受管理引用 metadata。调用方必须零初始化 request，明确指定
+allocation generation、内容 version、home incarnation 与完整 V2 引用；
+失败时 result 输出保持原值，调用者必须先检查返回值，不能继续使用旧 result。
+`acquire` 成功后仍需 `release-object` 归还 holder。
+
+DS4 当前推理/KV 路径不因此自动切换到 V2。控制回执不代表 payload 已完成
+发布或可读；V2 reader mapping、模型数据链路和重启恢复仍是独立验收项。
+安装边界可使用 `make -C apps/mem_service installed-reference-protocol-smoke`
+验证，该目标编译安装目录中的公开头和 client/provider 源码。
+
 | 症状 | 排查 |
 | --- | --- |
 | `cannot open payload provider config` | `--dist-payload-config` 路径错误或不可读 |

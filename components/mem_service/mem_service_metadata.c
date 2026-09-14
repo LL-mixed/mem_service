@@ -17,6 +17,7 @@ static int mem_service_put_request_prefix(struct mem_service *svc,
     struct mem_service_record *rec;
 
     rec = mem_service_find_record(svc, key);
+    if (rec && rec->kind == MEM_SERVICE_RECORD_MANAGED_VIEW) return -1;
     if (!rec) {
         rec = mem_service_alloc_record(svc);
     }
@@ -105,6 +106,7 @@ static int mem_service_put_block_meta(struct mem_service *svc,
     struct mem_service_record *rec;
 
     rec = mem_service_find_record(svc, key);
+    if (rec && rec->kind == MEM_SERVICE_RECORD_MANAGED_VIEW) return -1;
     if (!rec) {
         rec = mem_service_alloc_record(svc);
     }

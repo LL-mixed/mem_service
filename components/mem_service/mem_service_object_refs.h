@@ -27,5 +27,10 @@ enum mem_service_managed_result mem_service_reference_acquire(
     struct mem_service *svc, const struct lingqu_object_ref_wire_v2 *ref,
     const char *session_id, uint32_t requested_access,
     struct mem_service_managed_view *allocation_out);
+/* Read-only admission for RPC replay gates; never adds a holder. */
+enum mem_service_managed_result mem_service_reference_validate(
+    struct mem_service *svc, const struct lingqu_object_ref_wire_v2 *ref,
+    const char *session_id, uint32_t requested_access,
+    struct mem_service_managed_view *allocation_out);
 
 #endif

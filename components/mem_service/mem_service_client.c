@@ -1391,6 +1391,120 @@ static int mem_service_client_parse_allocation(
     return allocation_out->key[0] == '\0' ? -1 : 0;
 }
 
+/* Unlike legacy payload getters, reject duplicate and truncated identity. */
+static int mem_service_reference_response_field(
+    const char *payload, const char *name, char *output, size_t capacity)
+{
+    const char *value = NULL;
+    size_t size = 0, name_len = strlen(name);
+    for (const char *cursor = payload; *cursor;) {
+        const char *end = strchr(cursor, '\n');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        const char *equal = memchr(cursor, '=', length);
+        if (!equal || equal == cursor) return -1;
+        if ((size_t)(equal - cursor) == name_len && !memcmp(cursor, name, name_len)) {
+            if (value) return -1;
+            value = equal + 1;
+            size = length - name_len - 1;
+            if (size >= capacity) return -1;
+        }
+        cursor = end ? end + 1 : cursor + length;
+    }
+    if (!value) return -1;
+    memcpy(output, value, size); output[size] = 0;
+    return 0;
+}
+
+static int mem_service_reference_response_u64(const char *payload, const char *name,
+                                              uint64_t *output)
+{
+    char text[32], *end;
+    unsigned long long value;
+    if (mem_service_reference_response_field(payload, name, text, sizeof(text)) ||
+        text[0] < '0' || text[0] > '9') return -1;
+    errno = 0; value = strtoull(text, &end, 0);
+    if (errno || *end) return -1;
+    *output = (uint64_t)value;
+    return 0;
+}
+
+int mem_service_client_reference_transition(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    struct mem_service_client_reference_result *result_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[1536], response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
+    char key[96], hex[513], expected_hex[513], state[32];
+    struct mem_service_client_reference_result result = {0};
+    struct mem_service_client_allocation *allocation = &result.allocation;
+    uint64_t action, provider_backed, descriptor_len, live_refs;
+    bool has_ref;
+    int rc;
+    if (!result_out || mem_service_reference_format_request(request, payload, sizeof(payload)))
+        return mem_service_client_invalid(status_out);
+    rc = mem_service_client_send(client, MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION,
+                                 payload, response, sizeof(response), status_out);
+    if (rc) return rc;
+    has_ref = request->action == MEM_SERVICE_REFERENCE_STAGE ||
+        request->action == MEM_SERVICE_REFERENCE_RESOLVE || request->action == MEM_SERVICE_REFERENCE_ACQUIRE;
+    if (mem_service_client_parse_allocation(response, allocation) ||
+        mem_service_reference_response_field(response, "status", state, sizeof(state)) || strcmp(state, "ok") ||
+        mem_service_reference_response_field(response, "state", state, sizeof(state)) || strcmp(state, "active") ||
+        mem_service_reference_response_u64(response, "action", &action) || action != request->action ||
+        mem_service_reference_response_field(response, "reference_key", key, sizeof(key)) || strcmp(key, request->key) ||
+        mem_service_reference_response_field(response, "key", allocation->key, sizeof(allocation->key)) ||
+        mem_service_reference_response_field(response, "home_node", allocation->home_node, sizeof(allocation->home_node)) ||
+        !lingqu_object_ref_v2_token_length(allocation->key, sizeof(allocation->key)) ||
+        !lingqu_object_ref_v2_token_length(allocation->home_node, sizeof(allocation->home_node)) ||
+        mem_service_reference_response_u64(response, "generation", &allocation->generation) || !allocation->generation ||
+        mem_service_reference_response_u64(response, "version", &allocation->version) || !allocation->version ||
+        mem_service_reference_response_u64(response, "size_bytes", &allocation->size_bytes) || !allocation->size_bytes ||
+        mem_service_reference_response_u64(response, "alignment_bytes", &allocation->alignment_bytes) ||
+        mem_service_reference_response_u64(response, "capabilities", &allocation->capabilities) ||
+        mem_service_reference_response_u64(response, "provider_incarnation", &allocation->provider_incarnation) ||
+        !allocation->provider_incarnation ||
+        mem_service_reference_response_u64(response, "provider_backed", &provider_backed) || provider_backed != 1 ||
+        mem_service_reference_response_u64(response, "address", &allocation->address) ||
+        mem_service_reference_response_u64(response, "address_len", &allocation->address_len) ||
+        mem_service_reference_response_u64(response, "live_refs", &live_refs) ||
+        live_refs > MEM_SERVICE_CLIENT_ALLOCATION_MAX_HOLDERS ||
+        mem_service_reference_response_u64(response, "descriptor_len", &descriptor_len) ||
+        descriptor_len > sizeof(allocation->descriptor)) goto invalid_response;
+    {
+        char descriptor_hex[2 * MEM_SERVICE_CLIENT_ALLOCATION_DESCRIPTOR_MAX_LEN + 1];
+        if (mem_service_reference_response_field(response, "descriptor_hex", descriptor_hex,
+                                                  sizeof(descriptor_hex)) ||
+            strlen(descriptor_hex) != 2 * descriptor_len ||
+            allocation->descriptor_len != descriptor_len) goto invalid_response;
+    }
+    if (has_ref) {
+        if (mem_service_reference_response_field(response, "reference_hex", hex, sizeof(hex)) ||
+            mem_service_reference_decode_hex(hex, &result.reference) ||
+            strcmp(allocation->key, result.reference.allocation_key) ||
+            strcmp(allocation->home_node, result.reference.home_node) ||
+            allocation->generation != result.reference.allocation_generation ||
+            allocation->version != result.reference.object.object_version ||
+            allocation->size_bytes != result.reference.allocation_bytes ||
+            allocation->provider_incarnation != result.reference.provider_incarnation)
+            goto invalid_response;
+        if (request->action != MEM_SERVICE_REFERENCE_RESOLVE) {
+            if (mem_service_reference_encode_hex(&request->reference, expected_hex, sizeof(expected_hex)) ||
+                mem_service_reference_encode_hex(&result.reference, hex, sizeof(hex)) ||
+                strcmp(hex, expected_hex)) goto invalid_response;
+        }
+    } else if (strcmp(allocation->key, request->key) || allocation->generation != request->generation ||
+               (request->action == MEM_SERVICE_REFERENCE_BEGIN && request->version == UINT64_MAX) ||
+               allocation->version != request->version + (request->action == MEM_SERVICE_REFERENCE_BEGIN ? 1U : 0U)) {
+        goto invalid_response;
+    }
+    *result_out = result;
+    return 0;
+invalid_response:
+    mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
+    return 1;
+}
+
 int mem_service_client_mapping_transition(
     const struct mem_service_client *client,
     const char *key, const char *session_id, uint64_t generation,

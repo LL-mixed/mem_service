@@ -133,10 +133,24 @@ provider 边界由替身承接，不能计作实际 guest 或崩溃恢复证明�
 
 ## 受管理资源的清理容量（现有协议）
 
+V2 控制接入使用独立中立 operation `0x7e reference-transition`，action 为
+begin/stage/seal/resolve/acquire。begin/seal 的 key 指 allocation，stage/resolve
+的 key 指逻辑 object，acquire 的 key 必须等于完整 reference_hex 中的 allocation
+key。V2 通过 512 个 hex 字符传递；只传元数据，不代理 payload。新 SDK/CLI 明确
+opt-in，旧端返回 unsupported；V2 reader mapping 仍须另外接入。
+
+新操作在幂等重放前核对当前 allocation generation、content version 和活动 home
+incarnation，resolve/acquire 还须核对已登记完整视图。begin 预留首个 stage 与 seal
+的结果容量，首个有效 stage 和 seal 可使用各自预留；acquire 预留 release。
+无效 stage/seal 不得消耗其他操作的清理位置。通用 record retention 不删除
+managed-view 或该协议的幂等结果，旧 metadata 写入不得覆盖 managed-view。
+这些约束属于当前 daemon 生命周期，未提供重启后身份域或持久化恢复认证。
+
 daemon 接纳新请求时，必须在幂等结果表中预留已有资源完成正常清理所需的空间：
 每个 ALLOCATING/ACTIVE 对象保留一次 retire，每个 holder 保留一次 release，
 pending/active/closing 映射分别保留 3/2/1 次后续状态迁移。新 allocate/acquire
-按最多增加一条义务估算，BEGIN 按三条估算，并另计本次请求的幂等结果。
+按最多增加一条义务估算，mapping BEGIN 按三条估算，reference BEGIN 按两条
+估算，并另计本次请求的幂等结果。
 普通请求不能使用这些预留位置；有效的清理迁移释放相应义务后，才可将应答写入。
 无效或未推进状态的清理请求不能消耗最后的清理空间，返回可重试的
 `CAPACITY_EXCEEDED reason=cleanup_capacity_reserved`，不缓存该临时拒绝。
