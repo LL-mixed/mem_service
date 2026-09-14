@@ -27,6 +27,7 @@ enum mem_service_record_kind {
     MEM_SERVICE_RECORD_RUNTIME_HANDOFF = 14,
     MEM_SERVICE_RECORD_EXECUTION_ARTIFACT = 15,
     MEM_SERVICE_RECORD_TRAINING_ARTIFACT = 16,
+    MEM_SERVICE_RECORD_MANAGED_VIEW = 17,
 };
 
 enum mem_service_kvcache_state {
@@ -90,6 +91,9 @@ struct mem_service_record {
     int64_t object_publish_supernode_offset_ms;
     uint32_t member_count;
     char member_block_hashes[MEM_SERVICE_MAX_GROUP_MEMBERS][96];
+    /* Explicit V2 binding; never interpret its allocation offset as an arena
+     * offset. Managed allocation/reference restart recovery is not yet wired. */
+    struct lingqu_object_ref_wire_v2 managed_ref;
 };
 
 struct mem_service_metrics {

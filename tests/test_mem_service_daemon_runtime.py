@@ -2676,6 +2676,28 @@ int main(int argc, char **argv)
         self.assertIn("version_conflict=2", fixtures.stdout)
         self.assertIn("fail_closed=6", fixtures.stdout)
 
+    def test_restore_policy_fits_one_megabyte_stack(self):
+        try:
+            import resource
+        except ImportError:
+            self.skipTest("requires POSIX stack resource limits")
+
+        def bounded_stack():
+            _, hard = resource.getrlimit(resource.RLIMIT_STACK)
+            limit = 1024 * 1024
+            if hard != resource.RLIM_INFINITY:
+                limit = min(limit, hard)
+            resource.setrlimit(resource.RLIMIT_STACK, (limit, hard))
+
+        result = subprocess.run([str(self.binary), "restore-policy-fixtures"],
+                                capture_output=True, text=True, timeout=30,
+                                preexec_fn=bounded_stack)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("full_restore=ok", result.stdout)
+        self.assertIn("paged_restore=ok", result.stdout)
+        self.assertIn("live_state=unchanged-until-commit", result.stdout)
+        self.assertIn("fail_closed=6", result.stdout)
+
     def test_ops_certification_policy_cli_matches_checked_in_contract(self):
         fixtures = self._run_client("ops-certification-fixtures")
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)

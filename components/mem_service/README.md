@@ -18,6 +18,25 @@ W5 接入及重启身份域仍须补齐。原生验证入口为
 
 ## 受管理 session 的数据可见性
 
+V2 引用的服务端绑定沿用同一个 record table，并将逻辑 object key 显式绑定到
+allocation 的完整身份与视图。新增 core 发布序列为 begin/stage/seal：只有持有
+唯一 holder 的 allocation owner，且没有遗留 mapping transaction，才能 begin；
+begin 推进 content version 并使旧引用失效。stage 登记同代同版本的多个对象视图，
+seal 要求写入映射已确认解除且至少有一份有效视图。失败不恢复旧版本，因为数据
+可能已被写入；放弃发布须走现有 retire/release/reclaim，不能让旧引用重新有效。
+
+resolve/acquire 必须匹配 record 中登记的完整 V2、当前 ACTIVE allocation 和
+已封存版本。V2 模式关闭旧 raw acquire 和已封存对象的旧 mapping BEGIN 入口，
+防止它们绕过版本检查；专用 V2 reader mapping 接通前该路径保持不可用。
+core API 由服务单一串行化域调用，不提供独立锁。seal 表示可信 writer 提交发布
+元数据，core 不读取或验证 payload；SDK 仍须先完成 provider publish、可见性与
+mapping 清理。当前阶段不接入 wire/SDK/W5，不宣称重启恢复或实际数据访问通过。
+
+完整 service 包含有界的大型 record/幂等表，生产 snapshot restore 的临时 service
+必须使用可检查分配失败且所有出口都释放的堆对象，避免嵌套大栈帧。独立单进程
+CLI restore fixture 的多个 service 使用静态 scratch 并逐次初始化；不提高系统
+栈限制来掩盖恢复路径的栈容量问题。
+
 映射失败后的清理状态不能丢失。中立 map wrapper 返回
 `MEM_SERVICE_MAPPING_CLEANUP_REQUIRED` 时，输出 binding 保留 owner/handle，
 `mapped=true` 表示仍有资源需要清理，base/len 清零以禁止访问；调用方必须保留

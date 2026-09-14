@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+V2 服务端引用目录新增 core 发布/解析状态机，沿用同一 record table 与 managed
+allocation。它改变 core 内存结构，未改变安装态 client/provider SDK 的既有
+结构与调用路径；本阶段不提供新的 wire/SDK 接入，也未接通 V2 reader mapping。
+DS4 继续使用当前安装 SDK，不能把 core metadata 测试计作推理或数据面认证。
+
 安装 SDK 的既有 `lingqu_object_service.h` 增加 header-only V2 引用编解码，
 V1 布局和版本常量不变，不新增链接依赖。DS4 当前路径保持 V1，须拒绝未知版本。
 V2 携带 allocation key/generation/home/incarnation/range/access 元数据；它不

@@ -5032,9 +5032,10 @@ int mem_service_run_restore_policy_fixture_check(void)
     static const char page_request[] =
         "start_index=0\n"
         "max_records=1\n";
-    struct mem_service svc;
-    struct mem_service full_restored;
-    struct mem_service restored;
+    /* Isolated CLI fixture: avoid stacking several full service tables. */
+    static struct mem_service svc;
+    static struct mem_service full_restored;
+    static struct mem_service restored;
     struct mem_service_record record;
     char response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN];
     char snapshot[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN];
@@ -10028,6 +10029,8 @@ static const char *mem_service_record_kind_name(enum mem_service_record_kind kin
         return "execution_artifact";
     case MEM_SERVICE_RECORD_TRAINING_ARTIFACT:
         return "training_artifact";
+    case MEM_SERVICE_RECORD_MANAGED_VIEW:
+        return "managed_view";
     default:
         return "unknown";
     }
@@ -10551,32 +10554,41 @@ static enum mem_service_wire_status mem_service_restore_snapshot(struct mem_serv
                                                                  char *response,
                                                                  size_t response_len)
 {
-    struct mem_service restored;
+    struct mem_service *restored;
 
     if (mem_service_has_managed_identity(svc)) {
         snprintf(response, response_len,
                  "status=version_conflict\nreason=managed_history_in_use\n");
         return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
     }
-    if (payload == NULL || payload[0] == '\0' ||
-        mem_service_init(&restored,
+    if (payload == NULL || payload[0] == '\0')
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    restored = calloc(1, sizeof(*restored));
+    if (restored == NULL) {
+        snprintf(response, response_len,
+                 "status=internal\nreason=restore_allocation_failed\n");
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    if (mem_service_init(restored,
                          svc->control_plane_ready,
                          svc->provider_registry_ready,
                          svc->durable_ready) != 0 ||
-        mem_service_import_snapshot_text(&restored, payload) != 0) {
+        mem_service_import_snapshot_text(restored, payload) != 0) {
+        free(restored);
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
     memset(svc->records, 0, sizeof(svc->records));
-    memcpy(svc->records, restored.records, sizeof(svc->records));
+    memcpy(svc->records, restored->records, sizeof(svc->records));
     memset(svc->idempotency_records, 0, sizeof(svc->idempotency_records));
     memcpy(svc->idempotency_records,
-           restored.idempotency_records,
+           restored->idempotency_records,
            sizeof(svc->idempotency_records));
     memset(svc->audit_events, 0, sizeof(svc->audit_events));
-    memcpy(svc->audit_events, restored.audit_events, sizeof(svc->audit_events));
-    svc->record_count = restored.record_count;
-    svc->audit_next_sequence = restored.audit_next_sequence;
-    svc->audit_event_count = restored.audit_event_count;
+    memcpy(svc->audit_events, restored->audit_events, sizeof(svc->audit_events));
+    svc->record_count = restored->record_count;
+    svc->audit_next_sequence = restored->audit_next_sequence;
+    svc->audit_event_count = restored->audit_event_count;
+    free(restored);
     snprintf(response,
              response_len,
              "status=ok\nrestored=1\nrecord_count=%zu\n",
@@ -11331,6 +11343,7 @@ static enum mem_service_wire_status mem_service_managed_result_to_wire(
         return MEM_SERVICE_WIRE_STATUS_NOT_FOUND;
     case MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT:
     case MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH:
+    case MEM_SERVICE_MANAGED_RESULT_VERSION_CONFLICT:
         return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
     case MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION:
     case MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT:

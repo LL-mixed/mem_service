@@ -252,6 +252,12 @@ endif
 
 .PHONY: mapping-owner-smoke installed-mapping-owner-smoke
 .PHONY: object-ref-v2-smoke installed-object-ref-v2-smoke
+.PHONY: reference-catalog-smoke
+reference-catalog-smoke:
+	mkdir -p $(ROOT)/out/mem_service
+	$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/components/mem_service $(ROOT)/tests/mem_service_reference_catalog.c $(ROOT)/components/mem_service/mem_service_allocation.c $(ROOT)/components/mem_service/mem_service_records.c $(ROOT)/components/mem_service/mem_service_object_refs.c -o $(ROOT)/out/mem_service/reference-catalog
+	$(ROOT)/out/mem_service/reference-catalog --self-test
+
 object-ref-v2-smoke:
 	mkdir -p $(ROOT)/out/mem_service
 	$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/components/mem_service $(ROOT)/tests/mem_service_object_ref_v2.c -o $(ROOT)/out/mem_service/object-ref-v2

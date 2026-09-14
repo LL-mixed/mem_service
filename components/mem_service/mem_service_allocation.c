@@ -200,6 +200,8 @@ const char *mem_service_managed_result_name(enum mem_service_managed_result resu
         return "key_conflict";
     case MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION:
         return "stale_generation";
+    case MEM_SERVICE_MANAGED_RESULT_VERSION_CONFLICT:
+        return "version_conflict";
     case MEM_SERVICE_MANAGED_RESULT_CAPACITY:
         return "capacity_exceeded";
     case MEM_SERVICE_MANAGED_RESULT_BACKING_UNAVAILABLE:
@@ -381,13 +383,14 @@ enum mem_service_managed_result mem_service_managed_allocate(
     return MEM_SERVICE_MANAGED_RESULT_OK;
 }
 
-enum mem_service_managed_result mem_service_managed_acquire(
+static enum mem_service_managed_result mem_service_managed_acquire_internal(
     struct mem_service_managed_table *table,
     const char *key,
     const char *session_id,
     bool has_expected_generation,
     uint64_t expected_generation,
-    struct mem_service_managed_view *view_out)
+    struct mem_service_managed_view *view_out,
+    bool reference_checked)
 {
     struct mem_service_managed_allocation *entry;
     struct mem_service_managed_holder *holder;
@@ -414,6 +417,10 @@ enum mem_service_managed_result mem_service_managed_acquire(
         table->acquire_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
+    if (entry->reference_mode && !reference_checked) {
+        table->acquire_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    }
     if (mem_service_managed_find_holder(entry, session_id) >= 0) {
         /* Re-acquire by an existing holder is naturally idempotent. */
         table->acquire_ok_count += 1U;
@@ -432,6 +439,122 @@ enum mem_service_managed_result mem_service_managed_acquire(
     table->acquire_ok_count += 1U;
     mem_service_managed_fill_view(entry, view_out);
     return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_acquire(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, bool has_expected_generation,
+    uint64_t expected_generation, struct mem_service_managed_view *view_out)
+{
+    return mem_service_managed_acquire_internal(table, key, session_id,
+        has_expected_generation, expected_generation, view_out, false);
+}
+
+static bool mem_service_managed_has_mapping(
+    const struct mem_service_managed_table *table,
+    const struct mem_service_managed_allocation *entry)
+{
+    for (size_t i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i)
+        if (table->mappings[i].state != MEM_SERVICE_MANAGED_MAPPING_NONE &&
+            table->mappings[i].generation == entry->generation &&
+            !strcmp(table->mappings[i].key, entry->key)) return true;
+    return false;
+}
+
+static enum mem_service_managed_result mem_service_managed_content_identity(
+    const struct mem_service_managed_table *table, const char *key,
+    uint64_t generation, uint64_t version,
+    const struct mem_service_managed_allocation **entry_out)
+{
+    const struct mem_service_managed_allocation *entry;
+    if (!table || !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN) ||
+        !generation || !version) return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    entry = mem_service_managed_find_const(table, key);
+    if (!entry) return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    if (entry->generation != generation) return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    if (entry->version != version) return MEM_SERVICE_MANAGED_RESULT_VERSION_CONFLICT;
+    if (entry->state != MEM_SERVICE_MANAGED_STATE_ACTIVE || !entry->provider_backed)
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    *entry_out = entry;
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+static bool mem_service_managed_content_owner(
+    const struct mem_service_managed_allocation *entry, const char *session_id)
+{
+    return mem_service_managed_string_valid(session_id, MEM_SERVICE_MANAGED_SESSION_ID_LEN) &&
+        !strcmp(entry->owner_session, session_id) && entry->holder_count == 1 &&
+        mem_service_managed_find_holder(entry, session_id) >= 0;
+}
+
+enum mem_service_managed_result mem_service_managed_content_begin(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t expected_version,
+    struct mem_service_managed_view *view_out)
+{
+    const struct mem_service_managed_allocation *current;
+    struct mem_service_managed_allocation *entry;
+    enum mem_service_managed_result result = mem_service_managed_content_identity(
+        table, key, generation, expected_version, &current);
+    if (result) return result;
+    if (!mem_service_managed_content_owner(current, session_id))
+        return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
+    if (current->content_writing || mem_service_managed_has_mapping(table, current))
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    if (current->version == UINT64_MAX) return MEM_SERVICE_MANAGED_RESULT_CAPACITY;
+    entry = mem_service_managed_find(table, key);
+    entry->reference_mode = true;
+    entry->content_writing = true;
+    ++entry->version;
+    mem_service_managed_fill_view(entry, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_content_check(
+    const struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t version,
+    bool writing, struct mem_service_managed_view *view_out)
+{
+    const struct mem_service_managed_allocation *entry;
+    enum mem_service_managed_result result = mem_service_managed_content_identity(
+        table, key, generation, version, &entry);
+    if (result) return result;
+    if (!entry->reference_mode || entry->content_writing != writing)
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    if (writing && !mem_service_managed_content_owner(entry, session_id))
+        return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
+    mem_service_managed_fill_view(entry, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_content_seal(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t version)
+{
+    struct mem_service_managed_allocation *entry;
+    enum mem_service_managed_result result = mem_service_managed_content_check(
+        table, key, session_id, generation, version, true, NULL);
+    if (result) return result;
+    entry = mem_service_managed_find(table, key);
+    if (mem_service_managed_has_mapping(table, entry))
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    entry->content_writing = false;
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_acquire_published(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t version,
+    struct mem_service_managed_view *view_out)
+{
+    enum mem_service_managed_result result = mem_service_managed_content_check(
+        table, key, NULL, generation, version, false, NULL);
+    if (result) {
+        if (table) ++table->acquire_rejected_count;
+        return result;
+    }
+    return mem_service_managed_acquire_internal(table, key, session_id, true,
+                                                generation, view_out, true);
 }
 
 enum mem_service_managed_result mem_service_managed_release(
@@ -864,6 +987,9 @@ enum mem_service_managed_result mem_service_managed_mapping_transition(
         return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
 
     if (action == MEM_SERVICE_MANAGED_MAPPING_BEGIN) {
+        if (entry->reference_mode && (!entry->content_writing ||
+            entry->holder_count != 1 || strcmp(entry->owner_session, session_id)))
+            return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
         if (entry->state != MEM_SERVICE_MANAGED_STATE_ACTIVE ||
             !entry->provider_backed || !(entry->capabilities & MEM_SERVICE_MANAGED_CAP_MAP))
             return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;

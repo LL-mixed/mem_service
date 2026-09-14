@@ -123,6 +123,7 @@ enum mem_service_managed_result {
     /* The configured home provider holds no active registration in the
      * provider directory; the allocation was not attempted. */
     MEM_SERVICE_MANAGED_RESULT_PROVIDER_UNAVAILABLE = 11,
+    MEM_SERVICE_MANAGED_RESULT_VERSION_CONFLICT = 12,
 };
 
 struct mem_service_managed_holder {
@@ -179,6 +180,9 @@ struct mem_service_managed_allocation {
     uint64_t address_len;
     uint8_t descriptor[MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN];
     uint32_t descriptor_len;
+    /* Opt-in V2 content publication. A failed write never revives old refs. */
+    bool reference_mode;
+    bool content_writing;
 };
 
 struct mem_service_managed_backing_ops {
@@ -390,5 +394,26 @@ enum mem_service_managed_result mem_service_managed_mapping_transition(
     uint64_t mapping_id,
     enum mem_service_managed_mapping_action action,
     struct mem_service_managed_mapping *mapping_out);
+
+/* Serialized core operations. Begin advances version before payload writes;
+ * seal requires the caller to have completed provider publication and unmap.
+ * Callers retain the sole owner holder throughout the write transaction. */
+enum mem_service_managed_result mem_service_managed_content_begin(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t expected_version,
+    struct mem_service_managed_view *view_out);
+enum mem_service_managed_result mem_service_managed_content_check(
+    const struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t version,
+    bool writing, struct mem_service_managed_view *view_out);
+enum mem_service_managed_result mem_service_managed_content_seal(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t version);
+/* Internal authority seam: the object-record layer must first validate the
+ * complete registered reference. This is not a raw wire acquire substitute. */
+enum mem_service_managed_result mem_service_managed_acquire_published(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, uint64_t generation, uint64_t version,
+    struct mem_service_managed_view *view_out);
 
 #endif

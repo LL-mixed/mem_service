@@ -10,6 +10,13 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+V2 的服务 core 增加 begin/stage/seal、resolve/acquire 元数据状态机，使用现有
+record table 的专用 managed-view kind。写入前推进 content version；封存后按
+登记的完整视图及当前 allocation 核对引用。core record/allocation 内存结构新增
+字段，不能混用不同版本的 core 编译产物；旧 V1 投影明确拒绝 managed-view。
+此阶段尚无新 wire/SDK 入口，V2 reader mapping 与 W5 接入仍待实现；ub_sim
+不得直接调用 core 绕过统一 SDK 或消费未提交、未锁定的子仓库源码。
+
 全局引用新增 opt-in 的 256-byte V2 编码，位于既有公开头
 `lingqu_object_service.h`，不增加链接依赖。V1 布局和版本常量不变，旧消费者
 必须继续拒绝 V2。V2 offset 相对 allocation，禁止把旧 arena offset 直接升级。
