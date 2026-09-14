@@ -76,6 +76,21 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+### 固定地址子区间
+
+严格 GSVA 的固定地址请求以视图首字节为 requested_address，必须精确等于
+descriptor 的 remote_uba 加 offset；offset 与 len 继续受完整 backing 边界约束。
+provider 保留完整地址 reservation，仅开放覆盖视图的页，并返回精确的视图
+base/len。视图前后的完整页保持 PROT_NONE；同页内剩余字节由 SDK 范围检查约束。
+旧非严格 descriptor 的固定地址非零 offset 请求仍拒绝，禁止隐式回退。
+
+此能力只解决 provider 映射几何，不授予 V2 holder 或证明当前 content version。
+服务与 SDK 必须另行完成已登记引用的映射准入。无设备边界夹具通过生产中立
+channel 调用 provider，并使用真实文件共享映射核对非零偏移、只读保护、边界
+拒绝和清理；文件替身结果不能计作实际 OBMM guest 的共享可见性认证。
+定向命令为 OBMM provider test executable 的 `--fixed-subrange`，完整 Python
+入口沿用 `tests.test_mem_service_obmm_provider`。
+
 ### Compute attachment ownership
 
 平台 compute adapter 可从当前 SDK mapping binding 取得不透明 pin。provider

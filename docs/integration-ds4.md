@@ -1,5 +1,9 @@
 # ds4 使用侧适配手册
 
+严格 OBMM provider 的固定地址子区间请求现在按视图首字节核对地址，允许合法
+非零 offset，并保留只读权限与视图外整页保护。此实现不改变中立 SDK 结构、
+RoCE/TCP 路径或 DS4 默认行为；它不提供 V2 reader 的服务端准入或模型验收结果。
+
 V2 服务端引用目录新增 core 发布/解析状态机，沿用同一 record table 与 managed
 allocation。它改变 core 内存结构，未改变安装态 client/provider SDK 的既有
 结构与调用路径；本阶段不提供新的 wire/SDK 接入，也未接通 V2 reader mapping。

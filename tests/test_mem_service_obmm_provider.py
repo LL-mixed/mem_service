@@ -51,6 +51,8 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("gsva_import_dual_token=pass", result.stdout)
+                self.assertIn("obmm_fixed_subrange=pass views=4 rejected=10 "
+                              "file_alias=1 readonly=1 resources=0", result.stdout)
                 self.assertIn("obmm_cleanup_ownership=pass", result.stdout)
                 self.assertIn("obmm_compute_mapping_pins=pass no_alias=1 deferred_cleanup=1",
                               result.stdout)
@@ -60,6 +62,10 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 self.assertEqual(result.stderr.count("result=pass checks=24 source=retained_handle"), 2)
                 self.assertRegex(result.stderr, r"obmm-map: result=failed stage=mmap "
                                  r"fixed_va=0x[0-9a-f]+ len=[0-9]+ errno=17\b")
+                focused = subprocess.run([str(binary), "--fixed-subrange"],
+                                         capture_output=True, text=True, timeout=10)
+                self.assertEqual(focused.returncode, 0, focused.stderr)
+                self.assertIn("obmm_fixed_subrange=pass views=4 rejected=10", focused.stdout)
 
     def _compile(self, compiler: str, output: pathlib.Path, linux_backend=None) -> None:
         if linux_backend is None:

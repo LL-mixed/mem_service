@@ -10,6 +10,12 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+严格 OBMM 固定地址映射允许非零 allocation-relative offset：中立 provider
+请求的 requested_address 必须等于 backing 基址加 offset，返回精确视图 base/len。
+整个 backing 地址空间继续保留，视图外完整页不可访问，子页边界仍由 SDK 检查。
+此 provider 改动不开放已封存 V2 对象的 raw mapping BEGIN；reader 必须等待
+服务与 SDK 的完整引用准入接通。文件映射边界夹具不替代实际 OBMM guest 验收。
+
 V2 的服务 core 增加 begin/stage/seal、resolve/acquire 元数据状态机，使用现有
 record table 的专用 managed-view kind。写入前推进 content version；封存后按
 登记的完整视图及当前 allocation 核对引用。core record/allocation 内存结构新增

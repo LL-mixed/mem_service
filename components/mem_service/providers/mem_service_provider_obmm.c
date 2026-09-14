@@ -702,17 +702,22 @@ static int mem_service_obmm_provider_map_remote_region(
         request->offset > request->remote_region_len ||
         request->len > request->remote_region_len - request->offset ||
         ((request->flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS) != 0 &&
-         (request->requested_address == NULL || request->offset != 0)) ||
+         request->requested_address == NULL) ||
         ((request->flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS) == 0 &&
          request->requested_address != NULL) ||
         mem_service_obmm_descriptor_decode(&request->remote_descriptor,
                                            &descriptor) != 0 ||
-        descriptor.size != request->remote_region_len) {
+        descriptor.size != request->remote_region_len ||
+        (!descriptor.strict_gsva && request->offset != 0 &&
+         (request->flags & MEM_SERVICE_MAPPING_FLAG_FIXED_ADDRESS))) {
         return -1;
     }
+    /* The neutral contract fixes the returned view, not the backing base.
+     * Descriptor decoding and request bounds make this addition safe. */
     if (descriptor.strict_gsva &&
         ((request->requested_address != NULL &&
-          (uintptr_t)request->requested_address != descriptor.remote_uba) ||
+          (uintptr_t)request->requested_address !=
+              descriptor.remote_uba + request->offset) ||
          ((request->flags & MEM_SERVICE_MAPPING_FLAG_READ) &&
           !(descriptor.access_flags & OBMM_GSVA_ACCESS_READ)) ||
          ((request->flags & MEM_SERVICE_MAPPING_FLAG_WRITE) &&
