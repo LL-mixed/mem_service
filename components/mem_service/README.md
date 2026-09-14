@@ -1,5 +1,21 @@
 # Memory Service Component
 
+## 版本化全局对象引用编码（AM2 接入基础）
+
+`lingqu_object_service.h` 保留 64-byte V1 布局、版本常量和既有名字，新增固定
+256-byte V2 及 header-only 编解码 API。V2 保留原对象元数据字段，并携带完整
+allocation key、generation、home ID/incarnation、逻辑大小和访问权限。
+V2 payload offset 相对 allocation；V1 的 arena offset 语义保持不变，禁止
+仅改版本号升级旧引用。编码明确使用 little-endian，拒绝未知版本/长度/权限位、
+非规范字符串和范围溢出，失败不修改输出。key hash 沿用现有算法，完整 key
+参与后续身份比较，hash 不能独立标识对象。
+
+这些函数不读取 payload、不连接服务、不授予 holder 或访问权限，也不证明
+当前内容版本、checksum 或 backing 身份。服务权威绑定、跨进程 acquire/map、
+W5 接入及重启身份域仍须补齐。原生验证入口为
+`make -C apps/mem_service object-ref-v2-smoke`，安装态入口为
+`installed-object-ref-v2-smoke`；夹具通过不代表完整 AM2 已验收。
+
 ## 受管理 session 的数据可见性
 
 映射失败后的清理状态不能丢失。中立 map wrapper 返回

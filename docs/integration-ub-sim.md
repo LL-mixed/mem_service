@@ -10,6 +10,13 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+全局引用新增 opt-in 的 256-byte V2 编码，位于既有公开头
+`lingqu_object_service.h`，不增加链接依赖。V1 布局和版本常量不变，旧消费者
+必须继续拒绝 V2。V2 offset 相对 allocation，禁止把旧 arena offset 直接升级。
+完整 key、generation、home/incarnation、逻辑大小和权限用于后续权威绑定核对；
+解码成功不授予 holder，不证明数据版本或 payload checksum。ub_sim 须在服务端
+绑定及 SDK acquire/map 接通后显式采用，当前默认消费者不变。
+
 AM2 的统一访问 owner 采用新增中立 `mem_service_mapping_owner.h/.c`，显式链接
 该源文件及 `-pthread`。同一 provider channel 的多个 owner 共用 access domain；
 平台 setup/teardown 与域内运行分阶段，运行中不绕过 domain 调用 raw provider。

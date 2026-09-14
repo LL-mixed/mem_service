@@ -251,6 +251,17 @@ all: linqu_mem_service linqu_mem_service_core
 endif
 
 .PHONY: mapping-owner-smoke installed-mapping-owner-smoke
+.PHONY: object-ref-v2-smoke installed-object-ref-v2-smoke
+object-ref-v2-smoke:
+	mkdir -p $(ROOT)/out/mem_service
+	$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/components/mem_service $(ROOT)/tests/mem_service_object_ref_v2.c -o $(ROOT)/out/mem_service/object-ref-v2
+	$(ROOT)/out/mem_service/object-ref-v2 --self-test
+
+installed-object-ref-v2-smoke: install
+	mkdir -p $(PACKAGE_OUT_DIR)/installed-object-ref-v2
+	$(HOST_CC) $(HOST_CFLAGS) -I$(INSTALL_INCLUDEDIR) $(ROOT)/tests/mem_service_object_ref_v2.c -o $(PACKAGE_OUT_DIR)/installed-object-ref-v2/object-ref-v2
+	$(PACKAGE_OUT_DIR)/installed-object-ref-v2/object-ref-v2 --self-test
+
 mapping-owner-smoke:
 	mkdir -p $(ROOT)/out/mem_service
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -I$(ROOT)/components/mem_service $(ROOT)/tests/mem_service_mapping_owner.c $(MEM_SERVICE_MAPPING_OWNER) -o $(ROOT)/out/mem_service/mapping-owner

@@ -1,5 +1,11 @@
 # ds4 使用侧适配手册
 
+安装 SDK 的既有 `lingqu_object_service.h` 增加 header-only V2 引用编解码，
+V1 布局和版本常量不变，不新增链接依赖。DS4 当前路径保持 V1，须拒绝未知版本。
+V2 携带 allocation key/generation/home/incarnation/range/access 元数据；它不
+授予访问权限，不验证 payload 内容，不提供服务端绑定或重启恢复保证。显式采用
+须等待相应服务/SDK 流程接通，不能把 V1 arena offset 当作 V2 allocation offset。
+
 新增的中立 mapping owner 模块供受管理映射消费者显式采用，安装态通过
 `mapping_owner_sources` 与 `mapping_owner_libs` 查询，后者为 `-pthread`。
 原 `sdk_sources`、已有 public record/wire 布局和 DS4 transfer 热路径保持不变。
