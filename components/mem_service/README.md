@@ -711,6 +711,26 @@ repository, which consumes this component by source; see
 
 ## Productization Split Contract
 
+### 受管理重放历史容量续作
+
+现有 64 项内存幂等表及清理预留保持不变。容量续作采用独立于可压缩 journal 的
+只追加重放历史，先实现内部 `mem_service_replay_history.h/.c` 与
+`tests/mem_service_replay_history.c` 的 `--case <name> <new-history-path>`
+边界夹具，再接入 daemon。
+内部文件不属于安装 SDK，暂不改变运行服务、wire 或容量行为。
+
+历史帧使用显式小端编码，包含序号、前帧校验、operation、request checksum、
+status、精确 key/response 长度和字节；校验用于检测意外损坏，不提供对抗篡改认证。
+查找须完整验证日志与调用方的已提交前缀，保留旧操作结果及冲突判据。
+append 成功要求文件与创建目录项均已同步；不确定写入使句柄停止服务，不能
+据此删除内存记录。损坏、截断、替换文件、并发写者及不完整末帧均拒绝，禁止
+自动截掉历史。内存占用不随历史条数增长，磁盘容量仍受文件系统限制。
+
+后续 daemon 接入必须持久化并核对历史前缀 checkpoint，确保 snapshot/journal
+压缩、进程重启与缓存回收均保留旧请求结果；未配置持久 store 时继续保留容量
+拒绝。当前历史层夹具通过仅证明文件协议，不证明 daemon 已释放容量、managed
+backing 恢复或真实百轮通过。地址重用仍须独立完成 drain/epoch/旧上下文验收。
+
 `mem_service` is being split toward a product-grade Lingqu data service that can
 run as a guest component and as a host-side service for streaming LLM inference
 and LLM pre-training data paths.
