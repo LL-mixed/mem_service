@@ -172,6 +172,41 @@ class ReferenceTransactionTests(unittest.TestCase):
         self.assertEqual(stats["import_mappings"], "0")
         self.assertEqual(stats["in_flight"], "0")
 
+    def test_session_publishes_reference_from_written_bytes(self):
+        self._holder("release", "producer")
+        publish = "publish_reference key=logical/a idempotency_key=writer-stage offset=128 len=512 kind=5 owner=1 producer=2"
+        config = self.fixture._write_session(
+            "reference-writer.conf", self.connect, [
+                "acquire key=obj-1 idempotency_key=writer-acquire expected_generation=1",
+                "begin_reference key=obj-1 idempotency_key=writer-begin generation=1 version=1",
+                "map key=obj-1 flags=readwrite",
+                "write key=obj-1 offset=128 len=512 seed=17",
+                "write key=obj-1 offset=4224 len=512 seed=39",
+                publish,
+                publish,
+                publish.replace("len=512", "len=511") + " expect_status=version_conflict",
+                "write key=obj-1 offset=128 len=1 seed=99 expect_status=unsupported",
+                "begin_reference key=obj-1 idempotency_key=writer-begin generation=1 version=1",
+                "write key=obj-1 offset=128 len=1 seed=99 expect_status=unsupported",
+                "publish_reference key=logical/b idempotency_key=writer-stage-b offset=4224 len=512 kind=5 owner=1 producer=2",
+                "read key=obj-1 offset=128 len=512 seed=17",
+                "read key=obj-1 offset=4224 len=512 seed=39",
+                "unmap key=obj-1",
+                "seal_reference key=obj-1 idempotency_key=writer-seal generation=1 version=2",
+                "release key=obj-1 idempotency_key=writer-release expected_generation=1",
+            ], session_id="producer", header_extra="provider=session-loopback")
+        result = self.fixture._run_session(config)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name, seed, offset in (("logical/a", 17, 128), ("logical/b", 39, 4224)):
+            expected = self._reference(checksum=fixtures._fnv1a64(fixtures._pattern(seed, 512)),
+                                       offset=offset)
+            self.assertIn(f"reference_key={name} reference_hex={expected}", result.stdout)
+            self.assertEqual(self._transition("resolve", key=name)["reference_hex"], expected)
+        self.assertIn("reference_payload_frozen", result.stdout)
+        stats = self.fixture._allocation_stats()
+        for field in ("live_refs", "import_mappings", "in_flight"):
+            self.assertEqual(stats[field], "0")
+
     def test_publication_roundtrip_and_old_replay_rejection(self):
         nonce = self._nonce()
         first = self._transition("begin", version=1, nonce=nonce)

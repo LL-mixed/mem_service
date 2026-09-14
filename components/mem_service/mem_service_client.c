@@ -2245,6 +2245,87 @@ static bool mem_service_client_allocation_binding_matches(
         !memcmp(supplied->descriptor, current->descriptor, supplied->descriptor_len);
 }
 
+int mem_service_client_prepare_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    const struct mem_service_client_object_mapping *mapping,
+    const struct mem_service_client_mapping_lifecycle *lifecycle,
+    const struct mem_service_client_reference_view *view,
+    struct lingqu_object_ref_wire_v2 *reference_out,
+    enum mem_service_wire_status *status_out)
+{
+    struct mem_service_client_allocation current;
+    struct mem_service_client_mapping_transaction transaction;
+    struct mem_service_visibility_completion completion;
+    struct lingqu_object_ref_wire_v2 reference = {0};
+    const uint64_t flags = MEM_SERVICE_CLIENT_MAP_READ | MEM_SERVICE_CLIENT_MAP_WRITE;
+    int rc;
+
+    if (!client || !channel || !channel->provider || !allocation || !mapping || !lifecycle || !view ||
+        !reference_out || !lifecycle->pending || lifecycle->terminal_action ||
+        lifecycle->transaction.state != 2 || !lifecycle->transaction.mapping_id ||
+        !lingqu_object_ref_v2_token_length(allocation->key, sizeof(allocation->key)) ||
+        !lingqu_object_ref_v2_token_length(mapping->key, sizeof(mapping->key)) ||
+        !lingqu_object_ref_v2_token_length(lifecycle->session_id, sizeof(lifecycle->session_id)) ||
+        !lingqu_object_ref_v2_token_length(lifecycle->operation_id, sizeof(lifecycle->operation_id)) ||
+        strcmp(allocation->key, mapping->key) || !allocation->generation ||
+        allocation->generation != mapping->generation ||
+        lifecycle->transaction.generation != mapping->generation ||
+        !allocation->version || !mapping->base || mapping->flags != flags ||
+        mapping->len != allocation->size_bytes || !mapping->binding.mapped ||
+        !mapping->binding.mapping.handle ||
+        mapping->binding.owner != channel->provider ||
+        mapping->binding.mapping.base != mapping->base ||
+        mapping->binding.mapping.len != mapping->len ||
+        (uintptr_t)mapping->base != allocation->address ||
+        mapping->len > UINTPTR_MAX - (uintptr_t)mapping->base ||
+        !view->object_kind || !view->len || view->offset > mapping->len ||
+        view->len > mapping->len - view->offset)
+        return mem_service_client_invalid(status_out);
+    rc = mem_service_client_inspect_allocation(client, allocation->key, &current, status_out);
+    if (rc) return rc;
+    if (!mem_service_client_allocation_binding_matches(allocation, &current) ||
+        allocation->version != current.version) goto stale;
+    rc = mem_service_client_mapping_transition(client, mapping->key,
+        lifecycle->session_id, mapping->generation, lifecycle->transaction.mapping_id,
+        MEM_SERVICE_CLIENT_MAPPING_INSPECT, lifecycle->operation_id, &transaction, status_out);
+    if (rc) return rc;
+    if (transaction.state != 2) goto stale;
+
+    reference.object.magic = LINGQU_OBJECT_REF_MAGIC;
+    reference.object.layout_version = LINGQU_OBJECT_REF_V2_LAYOUT_VERSION;
+    reference.object.object_kind = view->object_kind;
+    reference.object.state = LINGQU_OBJECT_STATE_COMMITTED_WIRE;
+    reference.object.owner_entity = view->owner_entity;
+    reference.object.producer_entity = view->producer_entity;
+    reference.object.object_version = current.version;
+    reference.object.key_hash = lingqu_object_ref_key_hash(current.key, strlen(current.key));
+    reference.object.payload_offset = view->offset;
+    reference.object.payload_bytes = view->len;
+    reference.wire_bytes = LINGQU_OBJECT_REF_V2_BYTES;
+    reference.access = LINGQU_OBJECT_REF_V2_READ;
+    reference.allocation_generation = current.generation;
+    reference.provider_incarnation = current.provider_incarnation;
+    reference.allocation_bytes = current.size_bytes;
+    snprintf(reference.allocation_key, sizeof(reference.allocation_key), "%s", current.key);
+    snprintf(reference.home_node, sizeof(reference.home_node), "%s", current.home_node);
+    if (lingqu_object_ref_v2_validate(&reference)) return mem_service_client_invalid(status_out);
+    reference.object.payload_checksum = mem_service_provider_checksum64(
+        (const uint8_t *)mapping->base + view->offset, view->len);
+    if (mem_service_provider_channel_publish_range(channel, &mapping->binding,
+            view->offset, view->len, reference.object.payload_checksum, &completion)) {
+        mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_INTERNAL);
+        return -1;
+    }
+    *reference_out = reference;
+    mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_OK);
+    return 0;
+stale:
+    mem_service_client_set_status(status_out, MEM_SERVICE_WIRE_STATUS_STALE_REF);
+    return -1;
+}
+
 int mem_service_client_map_managed_allocation(
     const struct mem_service_client *client,
     const struct mem_service_provider_channel *channel,

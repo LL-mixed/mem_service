@@ -27,6 +27,8 @@ class ReferenceProtocolTests(unittest.TestCase):
             self.assertIn("malformed_replies=17 output_preserved=1 scope=mock-wire", run.stdout)
             self.assertIn("reference_map_begin_client=pass malformed_replies=6 legacy_result_abi=preserved",
                           run.stdout)
+            self.assertIn("reference_writer_prepare=pass failures=10 output_preserved=1 scope=mock-wire-provider",
+                          run.stdout)
 
     def test_strict_roundtrip_and_unchanged_failure_outputs(self):
         compiler = shutil.which("cc")

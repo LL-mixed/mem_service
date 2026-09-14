@@ -1,5 +1,12 @@
 # ds4 使用侧适配手册
 
+可选 V2 writer SDK 新增 `mem_service_client_prepare_managed_reference()`，从
+当前完整读写映射准备只读视图引用；仅在 provider publish 确认后返回完整 V2。
+调用者冻结 payload，保留引用用于 stage 重试，确认 unmap 后 seal。该函数沿用
+安装态 client/provider 源码集合，不改变原结构 ABI 或 DS4 当前 transfer 热路径。
+配套 CLI 为 object-session 的 begin_reference/publish_reference/seal_reference。
+实际 DS4 推理接入与跨节点数据验证仍须单独完成。
+
 可选 V2 reader SDK 增加独立 reference lifecycle、只读 map/unmap 与返回 pending
 事务的 `mem_service_client_reference_map_begin()`。已有 reference result、mapping、
 lifecycle 和 client record 布局保持不变；原通用 reference-transition SDK 不接纳

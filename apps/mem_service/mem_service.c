@@ -156,6 +156,8 @@ static void usage(const char *argv0)
     printf(" [reference-transition --action <begin|stage|seal|resolve|acquire|map-begin> --key <key> [--session-id <id> --idempotency-key <id>] [--generation <u64> --version <u64>] [--reference-hex <512hex>] [--access <1|2|3>]]");
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict|probe_descriptor> field=value ...]");
     printf(" [object-session map diagnostics: fault=<descriptor|descriptor_length|descriptor_oversize|address|address_len|size|alignment|capabilities|home|incarnation> [fault_byte=N for descriptor] expect_status=stale_ref]");
+    printf(" [object-session V2 writer: begin_reference key=<allocation> generation=N version=N idempotency_key=<id>; publish_reference key=<logical> offset=N len=N kind=N owner=N producer=N idempotency_key=<id>; unmap then seal_reference key=<allocation> generation=N version=N idempotency_key=<id>]");
+    printf(" [object-session V2 reader: acquire_reference key=<logical> idempotency_key=<id>; map_reference key=<allocation>; unmap then release]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
 #ifdef MEM_SERVICE_ENABLE_QWEN3_INSPECT
     printf(" [--inspect-qwen3]");
@@ -9548,6 +9550,9 @@ enum mem_service_object_session_action {
     MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR = 19,
     MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE = 20,
     MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE = 21,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE = 22,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE = 23,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE = 24,
 };
 
 struct mem_service_object_session_field {
@@ -9590,6 +9595,8 @@ struct mem_service_object_session_op {
     bool has_data_seed;
     bool has_expect_checksum;
     uint64_t expect_checksum;
+    uint64_t content_version;
+    struct mem_service_client_reference_view reference_view;
 };
 
 struct mem_service_object_session_config {
@@ -9653,6 +9660,7 @@ struct mem_service_object_session_state {
     uint32_t holder_op_count;
     bool mapped;
     uint64_t mapped_backing_len;
+    uint64_t mapped_content_version;
     struct mem_service_client_object_mapping conflict_mapping;
     struct mem_service_client_mapping_lifecycle conflict_lifecycle;
     struct mem_service_client_object_mapping mapping;
@@ -9661,6 +9669,11 @@ struct mem_service_object_session_state {
     bool mapped_reference;
     struct lingqu_object_ref_wire_v2 reference;
     struct mem_service_client_reference_lifecycle reference_lifecycle;
+    bool has_writer;
+    struct mem_service_client_allocation writer_allocation;
+    struct mem_service_reference_request prepared[MEM_SERVICE_OBJECT_SESSION_MAX_OPS];
+    bool staged[MEM_SERVICE_OBJECT_SESSION_MAX_OPS];
+    uint32_t prepared_count;
     const struct mem_service_client *client;
     bool provider_ready;
     struct mem_service_provider_registry registry;
@@ -9936,6 +9949,12 @@ static const char *mem_service_object_session_action_name(uint32_t action)
         return "acquire_reference";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE:
         return "map_reference";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE:
+        return "begin_reference";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE:
+        return "publish_reference";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE:
+        return "seal_reference";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
         return "release";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE:
@@ -10251,6 +10270,12 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
     static const char *const read[] = {
         "key", "offset", "len", "seed", "expect_checksum",
     };
+    static const char *const reference_version[] = {
+        "key", "idempotency_key", "generation", "version",
+    };
+    static const char *const reference_publish[] = {
+        "key", "idempotency_key", "offset", "len", "kind", "owner", "producer",
+    };
     const char *const *table = NULL;
     size_t count = 0;
     size_t i;
@@ -10261,6 +10286,15 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
         }
     }
     switch (action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE:
+        table = reference_version;
+        count = sizeof(reference_version) / sizeof(reference_version[0]);
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE:
+        table = reference_publish;
+        count = sizeof(reference_publish) / sizeof(reference_publish[0]);
+        break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE:
         table = allocate;
         count = sizeof(allocate) / sizeof(allocate[0]);
@@ -10336,6 +10370,9 @@ static bool mem_service_object_session_parse_action(const char *name,
         {"acquire", MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE},
         {"acquire_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE_REFERENCE},
         {"map_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE},
+        {"begin_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE},
+        {"publish_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE},
+        {"seal_reference", MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE},
         {"release", MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE},
         {"retire", MEM_SERVICE_OBJECT_SESSION_ACTION_RETIRE},
         {"inspect", MEM_SERVICE_OBJECT_SESSION_ACTION_INSPECT},
@@ -10502,6 +10539,31 @@ static int mem_service_object_session_parse_op(
     }
 
     switch (op->action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE:
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key", op->idempotency_key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("generation", op->generation);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("version", op->content_version);
+        if (!op->generation || !op->content_version) return 2;
+        break;
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE: {
+        uint64_t kind, owner, producer;
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key", op->idempotency_key);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("offset", op->reference_view.offset);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("len", op->reference_view.len);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("kind", kind);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("owner", owner);
+        MEM_SERVICE_OBJECT_SESSION_REQUIRED_U64("producer", producer);
+        if (!kind || kind > UINT16_MAX || owner > UINT32_MAX || producer > UINT32_MAX ||
+            !op->reference_view.len || op->reference_view.len > MEM_SERVICE_OBJECT_SESSION_MAX_DATA_LEN)
+            return 2;
+        op->reference_view.object_kind = (uint16_t)kind;
+        op->reference_view.owner_entity = (uint32_t)owner;
+        op->reference_view.producer_entity = (uint32_t)producer;
+        break;
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ALLOCATE:
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("idempotency_key",
@@ -11076,6 +11138,7 @@ static int mem_service_object_session_load_config(
 static bool mem_service_object_session_action_is_data_plane(uint32_t action)
 {
     return action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_MAP_REFERENCE ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_UNMAP ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE ||
@@ -11523,6 +11586,83 @@ static int mem_service_object_session_run_op(
 
     memset(&view, 0, sizeof(view));
     switch (op->action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE: {
+        struct mem_service_reference_request request = {0};
+        struct mem_service_client_reference_result result;
+        bool begin = op->action == MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE;
+        request.action = begin ? MEM_SERVICE_REFERENCE_BEGIN : MEM_SERVICE_REFERENCE_SEAL;
+        request.generation = op->generation;
+        request.version = op->content_version;
+        snprintf(request.key, sizeof(request.key), "%s", op->key);
+        snprintf(request.session_id, sizeof(request.session_id), "%s", config->session_id);
+        snprintf(request.idempotency_key, sizeof(request.idempotency_key), "%s", op->idempotency_key);
+        if (!begin) {
+            for (uint32_t i = 0; i < state->prepared_count; ++i) {
+                const struct lingqu_object_ref_wire_v2 *ref = &state->prepared[i].reference;
+                if (!state->staged[i] && !strcmp(ref->allocation_key, op->key) &&
+                    ref->allocation_generation == op->generation &&
+                    ref->object.object_version == op->content_version)
+                    return mem_service_object_session_finish_data_op(config, index, op,
+                        MEM_SERVICE_WIRE_STATUS_INTERNAL, "stage_unconfirmed", 0, 0, 0, false);
+            }
+        }
+        rc = mem_service_client_reference_transition(client, &request, &result, &status);
+        if (!rc) {
+            view = result.allocation;
+            if (begin) {
+                state->writer_allocation = view;
+                state->has_writer = true;
+            }
+        }
+        break;
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE: {
+        struct mem_service_reference_request request = {0};
+        struct mem_service_client_reference_result result;
+        char hex[LINGQU_OBJECT_REF_V2_BYTES * 2 + 1];
+        uint32_t slot;
+        for (slot = 0; slot < state->prepared_count; ++slot)
+            if (!strcmp(state->prepared[slot].idempotency_key, op->idempotency_key)) break;
+        if (slot < state->prepared_count) {
+            request = state->prepared[slot];
+            const struct lingqu_object_ref_wire *ref = &request.reference.object;
+            if (strcmp(request.key, op->key) || ref->payload_offset != op->reference_view.offset ||
+                ref->payload_bytes != op->reference_view.len ||
+                ref->object_kind != op->reference_view.object_kind ||
+                ref->owner_entity != op->reference_view.owner_entity ||
+                ref->producer_entity != op->reference_view.producer_entity) {
+                status = MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+                rc = -1;
+                break;
+            }
+        } else {
+            if (!state->has_writer || !state->mapped || state->mapped_reference ||
+                state->prepared_count == MEM_SERVICE_OBJECT_SESSION_MAX_OPS) {
+                status = MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+                rc = -1;
+                break;
+            }
+            rc = mem_service_client_prepare_managed_reference(client, &state->channel,
+                &state->writer_allocation, &state->mapping, &state->mapping_lifecycle,
+                &op->reference_view, &request.reference, &status);
+            if (rc) break;
+            request.action = MEM_SERVICE_REFERENCE_STAGE;
+            snprintf(request.key, sizeof(request.key), "%s", op->key);
+            snprintf(request.session_id, sizeof(request.session_id), "%s", config->session_id);
+            snprintf(request.idempotency_key, sizeof(request.idempotency_key), "%s", op->idempotency_key);
+            state->prepared[state->prepared_count++] = request;
+        }
+        rc = mem_service_client_reference_transition(client, &request, &result, &status);
+        if (!rc) {
+            state->staged[slot] = true;
+            view = result.allocation;
+            if (mem_service_reference_encode_hex(&request.reference, hex, sizeof(hex))) return 1;
+            printf("mem_service object-session: session=%s reference_key=%s reference_hex=%s\n",
+                   config->session_id, request.key, hex);
+        }
+        break;
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD: {
         uint64_t offset = 0;
@@ -11814,7 +11954,11 @@ static int mem_service_object_session_run_op(
             return mem_service_object_session_finish_data_op(config, index, op,
                 MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "mapping_fault_unavailable",
                 0, 0, 0, false);
-        if (!probe) state->mapped_reference = reference_map;
+        if (!probe) {
+            state->mapped_reference = reference_map;
+            state->mapped_content_version = reference_map ?
+                state->reference.object.object_version : supplied.version;
+        }
         rc = reference_map ?
             mem_service_client_map_managed_reference(client, &state->channel, &state->reference,
                 config->session_id, operation_id, &state->mapping, &state->reference_lifecycle, &status) :
@@ -11962,6 +12106,14 @@ static int mem_service_object_session_run_op(
         uint8_t *base;
         uint64_t i;
 
+        for (uint32_t j = 0; j < state->prepared_count; ++j) {
+            const struct lingqu_object_ref_wire_v2 *ref = &state->prepared[j].reference;
+            if (!strcmp(ref->allocation_key, op->key) &&
+                ref->allocation_generation == state->mapping.generation &&
+                ref->object.object_version == state->mapped_content_version)
+                return mem_service_object_session_finish_data_op(config, index, op,
+                    MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "reference_payload_frozen", 0, 0, 0, false);
+        }
         if (!state->mapped ||
             strcmp(state->mapping.key, op->key) != 0) {
             return mem_service_object_session_finish_data_op(

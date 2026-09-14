@@ -10,6 +10,18 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+V2 writer 的 `object-session` 顺序为 acquire、`begin_reference key=<allocation>
+generation=<g> version=<old-version> idempotency_key=<id>`、map/write、
+`publish_reference key=<logical> offset=<n> len=<n> kind=<n> owner=<n> producer=<n>
+idempotency_key=<id>`、unmap、`seal_reference key=<allocation> generation=<g>
+version=<new-version> idempotency_key=<id>`、release。版本值显式指定，避免丢失应答
+后将一次重试变成另一次换版。publish_reference 使用 SDK 的
+`mem_service_client_prepare_managed_reference()`，从 begin 回执和实际映射字节
+生成 V2，确认 provider publish 后登记。CLI 保留每个完整请求用于原样重试；
+同一发布 ID 改变视图参数会拒绝。首次准备成功后该 payload 禁止再写，未确认 stage
+禁止 seal。多个视图应先全部写好，再逐项发布。此命令序列不需要手填 reference_hex。
+loopback 的匿名 payload 不能证明跨进程数据共享；真实 guest 的读写闭环另行验收。
+
 V2 reader 新增 `mem_service_client_map_managed_reference()` 与配套 unmap，
 使用独立 reference lifecycle 保留引用和不确定的 BEGIN。客户端先 resolve、
 acquire，再发起只读映射；服务在 `map-begin` 中核对完整登记引用、封存版本、

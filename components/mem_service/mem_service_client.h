@@ -731,6 +731,28 @@ int mem_service_client_unmap_managed_allocation(
     struct mem_service_client_mapping_lifecycle *lifecycle,
     enum mem_service_wire_status *status_out);
 
+/* Prepare after a successful reference BEGIN and writes to its full mapping.
+ * Caller serializes mapping/provider access and freezes payload through SEAL.
+ * On success provider publication is confirmed; retain the exact output for
+ * STAGE retries, unmap completely, then SEAL. This does not send STAGE/SEAL.
+ * Failure leaves reference_out unchanged. No mapping/holder ownership moves. */
+struct mem_service_client_reference_view {
+    uint64_t offset;
+    uint64_t len;
+    uint16_t object_kind;
+    uint32_t owner_entity;
+    uint32_t producer_entity;
+};
+int mem_service_client_prepare_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct mem_service_client_allocation *allocation,
+    const struct mem_service_client_object_mapping *mapping,
+    const struct mem_service_client_mapping_lifecycle *lifecycle,
+    const struct mem_service_client_reference_view *view,
+    struct lingqu_object_ref_wire_v2 *reference_out,
+    enum mem_service_wire_status *status_out);
+
 /* Same single-owner rules as managed allocation mapping. The caller already
  * holds the reference's allocation. Map is read-only and called once; on an
  * uncertain outcome retain both outputs and retry unmap, never release early.

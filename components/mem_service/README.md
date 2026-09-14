@@ -1,5 +1,16 @@
 # Memory Service Component
 
+## V2 writer 发布准备契约
+
+`mem_service_client_prepare_managed_reference()` 接收 begin 返回的 allocation、
+当前完整读写 mapping/lifecycle 和逻辑视图参数。它先核对服务端 allocation 与
+活动 mapping，再从实际映射字节计算 checksum，确认中立 provider publish 完成后
+返回只读 V2。失败不修改引用输出，不发送 stage/seal。调用者保持唯一写入权，
+从准备开始到 seal 完成禁止并发改写 payload，并保留返回的完整引用用于同一
+idempotency key 的 stage 重试；应答不确定时禁止重新生成引用。多个逻辑视图可
+在同一次冻结的完整映射上准备，全部 stage 后确认 unmap，最后 seal。
+该 API 不代替 begin/stage/seal 的服务端准入，也不提供进程崩溃后的恢复。
+
 ## V2 reader 映射接入契约
 
 `reference-transition` 增加 `map-begin`，只接受完整已登记、当前封存版本的
