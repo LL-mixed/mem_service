@@ -47,6 +47,11 @@ object-session 的诊断 `unmap ... probe_unmapped=1` 检查同一进程解除�
 原 CPU 地址访问故障。该选项不改变默认 unmap、公开 SDK 或 DS4 transfer 路径；
 它不认证旧 descriptor/token 拒绝或同址新映射建立后的裸指针隔离。
 
+`capture_mapping` / `probe_retired_mapping` 是 object-session 的退役描述符
+诊断：保留实际映射的快照，在退役及同址新代数据校验后测试 provider 访问。
+普通 map 错误不算通过，要求目标 CPU 故障与清理成功，并由调用方复验新对象。
+DS4 serving 无需调用，公开 SDK、wire 和 transfer 路径保持不变。
+
 daemon 幂等接纳新增受管理资源清理预留：普通请求不能耗尽已有对象、holder 和
 mapping 后续清理所需的应答位置，容量不足返回 `CAPACITY_EXCEEDED`。
 `allocation-stats` 增加幂等容量/已用/清理预留/可用/缺口文本字段；安装 SDK

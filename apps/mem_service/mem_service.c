@@ -157,6 +157,7 @@ static void usage(const char *argv0)
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict|probe_descriptor> field=value ...]");
     printf(" [object-session map diagnostics: fault=<descriptor|descriptor_length|descriptor_oversize|address|address_len|size|alignment|capabilities|home|incarnation> [fault_byte=N for descriptor] expect_status=stale_ref]");
     printf(" [object-session unmap diagnostic: unmap key=<key> probe_unmapped=1 # require same-process CPU fault after confirmed unmap]");
+    printf(" [object-session retired descriptor diagnostic: capture_mapping key=<old>; retire old and verify same-address replacement; probe_retired_mapping key=<old> # require provider CPU fault and confirmed cleanup]");
     printf(" [object-session V2 writer: begin_reference key=<allocation> generation=N version=N idempotency_key=<id>; publish_reference key=<logical> offset=N len=N kind=N owner=N producer=N idempotency_key=<id>; unmap then seal_reference key=<allocation> generation=N version=N idempotency_key=<id>]");
     printf(" [object-session V2 reader: acquire_reference key=<logical> idempotency_key=<id>; map_reference key=<allocation>; unmap then release]");
     printf(" [bootstrap-w5-service --memory-store <path> --memory-object-store <path> --memory-engram-state <path> --memory-registry-dir <path> [--service-name <name>] [--print-env]]");
@@ -9563,6 +9564,8 @@ enum mem_service_object_session_action {
     MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE = 22,
     MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_REFERENCE = 23,
     MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE = 24,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING = 25,
+    MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING = 26,
 };
 
 struct mem_service_object_session_field {
@@ -9670,12 +9673,21 @@ struct mem_service_object_session_state {
                       [MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
     uint32_t holder_op_count;
     bool mapped;
+    bool mapped_read_verified;
     uint64_t mapped_backing_len;
     uint64_t mapped_content_version;
     struct mem_service_client_object_mapping conflict_mapping;
     struct mem_service_client_mapping_lifecycle conflict_lifecycle;
     struct mem_service_client_object_mapping mapping;
     struct mem_service_client_mapping_lifecycle mapping_lifecycle;
+    /* Diagnostic identity copy only: it owns no holder or SDK mapping. */
+    bool has_captured_mapping;
+    struct mem_service_client_allocation captured_allocation;
+    uint64_t captured_address;
+    uint64_t captured_len;
+    char replacement_key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    uint64_t replacement_generation;
+    struct mem_service_client_object_mapping retired_probe_mapping;
     bool has_reference;
     bool mapped_reference;
     struct lingqu_object_ref_wire_v2 reference;
@@ -9996,6 +10008,10 @@ static const char *mem_service_object_session_action_name(uint32_t action)
         return "probe_conflict";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR:
         return "probe_descriptor";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING:
+        return "capture_mapping";
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING:
+        return "probe_retired_mapping";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PUBLISH_DATA:
         return "publish_data";
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WAIT_VISIBLE:
@@ -10352,6 +10368,8 @@ static bool mem_service_object_session_field_allowed(uint32_t action,
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING:
         table = key_only;
         count = sizeof(key_only) / sizeof(key_only[0]);
         break;
@@ -10407,6 +10425,8 @@ static bool mem_service_object_session_parse_action(const char *name,
         {"probe_guard", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD},
         {"probe_conflict", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT},
         {"probe_descriptor", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR},
+        {"capture_mapping", MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING},
+        {"probe_retired_mapping", MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING},
     };
     size_t i;
 
@@ -10871,6 +10891,8 @@ static int mem_service_object_session_parse_op(
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING:
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING:
         MEM_SERVICE_OBJECT_SESSION_REQUIRED_STRING("key", op->key);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_WRITE:
@@ -11176,7 +11198,9 @@ static bool mem_service_object_session_action_is_data_plane(uint32_t action)
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_READONLY ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_GUARD ||
            action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_CONFLICT ||
-           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR;
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_DESCRIPTOR ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING ||
+           action == MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING;
 }
 
 static int mem_service_object_session_validate_provider(
@@ -11399,6 +11423,12 @@ static int mem_service_object_session_unmap(
 static int mem_service_object_session_provider_close(
     struct mem_service_object_session_state *state)
 {
+    if (state->retired_probe_mapping.binding.mapped &&
+        mem_service_client_unmap_allocation(&state->channel,
+            &state->retired_probe_mapping)) {
+        fprintf(stderr, "mem_service object-session: retired_probe_cleanup_pending\n");
+        return -1;
+    }
     if (state->conflict_lifecycle.pending || state->conflict_mapping.binding.mapped) {
         if (mem_service_client_unmap_managed_allocation(state->client,
                 &state->channel, &state->conflict_mapping, &state->conflict_lifecycle,
@@ -11613,7 +11643,103 @@ static int mem_service_object_session_run_op(
     int rc = 0;
 
     memset(&view, 0, sizeof(view));
+    if (state->retired_probe_mapping.binding.mapped)
+        return mem_service_object_session_finish_data_op(config, index, op,
+            MEM_SERVICE_WIRE_STATUS_INTERNAL, "retired_probe_cleanup_pending",
+            0, 0, 0, false);
     switch (op->action) {
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_CAPTURE_MAPPING: {
+        if (state->has_captured_mapping)
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "capture_already_present",
+                0, 0, 0, false);
+        if (!state->mapped || state->mapped_reference || !state->mapped_read_verified ||
+            !state->has_view || strcmp(state->mapping.key, op->key) ||
+            strcmp(state->view.key, op->key) ||
+            state->mapping.generation != state->view.generation ||
+            (uintptr_t)state->mapping.base != state->view.address ||
+            state->mapping.len != state->view.size_bytes ||
+            !mem_service_object_session_find_holder(state, op->key,
+                state->mapping.generation, config->session_id))
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND, "verified_allocation_mapping_required",
+                0, 0, 0, false);
+        state->captured_allocation = state->view;
+        state->captured_address = (uintptr_t)state->mapping.base;
+        state->captured_len = state->mapping.len;
+        state->has_captured_mapping = true;
+        printf("mem_service object-session: session=%s mapping_capture=ok key=%s "
+               "generation=%llu address=0x%016llx len=%llu descriptor_checksum=0x%016llx\n",
+               config->session_id, op->key,
+               (unsigned long long)state->view.generation,
+               (unsigned long long)state->captured_address,
+               (unsigned long long)state->captured_len,
+               (unsigned long long)mem_service_provider_checksum64(
+                   state->view.descriptor, state->view.descriptor_len));
+        return mem_service_object_session_finish_data_op(config, index, op,
+            MEM_SERVICE_WIRE_STATUS_OK, NULL, 0, 0, 0, false);
+    }
+    case MEM_SERVICE_OBJECT_SESSION_ACTION_PROBE_RETIRED_MAPPING: {
+        const struct mem_service_client_allocation *old = &state->captured_allocation;
+        struct mem_service_client_allocation replacement;
+        uint8_t readable = 0;
+        int map_result, map_errno, fault_result = -1, cleanup_result = 0;
+        int fault_signal = 0;
+        if (!state->has_captured_mapping || strcmp(old->key, op->key))
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_NOT_FOUND, "captured_mapping_required",
+                0, 0, 0, false);
+        if (state->mapped || state->conflict_lifecycle.pending ||
+            !state->provider_ready || !state->replacement_generation ||
+            !mem_service_object_session_find_holder(state, state->replacement_key,
+                state->replacement_generation, config->session_id))
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "unmapped_replacement_holder_required",
+                0, 0, 0, false);
+        if (mem_service_client_inspect_allocation(client, old->key, &view, &status) ||
+            status != MEM_SERVICE_WIRE_STATUS_OK || strcmp(view.state, "retired") ||
+            view.generation != old->generation)
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "captured_retirement_unconfirmed",
+                0, 0, 0, false);
+        if (mem_service_client_inspect_allocation(client, state->replacement_key,
+                &replacement, &status) || status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(replacement.state, "active") || !replacement.provider_backed ||
+            replacement.generation != state->replacement_generation ||
+            replacement.address != state->captured_address)
+            return mem_service_object_session_finish_data_op(config, index, op,
+                MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "replacement_active_unconfirmed",
+                0, 0, 0, false);
+        /* Deliberately bypass the managed control gate for this diagnostic.
+         * The exact previously mapped descriptor must reach the provider. */
+        errno = 0;
+        map_result = mem_service_client_map_allocation(&state->channel, old,
+            MEM_SERVICE_CLIENT_MAP_READ, &state->retired_probe_mapping);
+        map_errno = errno;
+        if (!map_result) {
+            fault_result = mem_service_object_session_probe_fault(&readable,
+                state->retired_probe_mapping.base, false);
+            fault_signal = mem_service_probe_signal;
+        }
+        if (state->retired_probe_mapping.binding.mapped)
+            cleanup_result = mem_service_client_unmap_allocation(&state->channel,
+                &state->retired_probe_mapping);
+        rc = map_result || fault_result || cleanup_result;
+        printf("mem_service object-session: session=%s retired_mapping_probe=%s key=%s "
+               "generation=%llu replacement_key=%s replacement_generation=%llu "
+               "address=0x%016llx map_result=%d map_errno=%d signal=%d unmap_confirmed=%u\n",
+               config->session_id, rc ? "fail" : "pass", op->key,
+               (unsigned long long)old->generation, state->replacement_key,
+               (unsigned long long)state->replacement_generation,
+               (unsigned long long)state->captured_address, map_result, map_errno,
+               fault_signal, !map_result && !cleanup_result);
+        return mem_service_object_session_finish_data_op(config, index, op,
+            rc ? MEM_SERVICE_WIRE_STATUS_INTERNAL : MEM_SERVICE_WIRE_STATUS_OK,
+            cleanup_result ? "retired_probe_cleanup_pending" :
+            map_result ? "retired_map_rejection_unclassified" :
+            fault_result ? "retired_access_not_rejected" : NULL,
+            0, 0, 0, false);
+    }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_BEGIN_REFERENCE:
     case MEM_SERVICE_OBJECT_SESSION_ACTION_SEAL_REFERENCE: {
         struct mem_service_reference_request request = {0};
@@ -11983,6 +12109,7 @@ static int mem_service_object_session_run_op(
                 MEM_SERVICE_WIRE_STATUS_UNSUPPORTED, "mapping_fault_unavailable",
                 0, 0, 0, false);
         if (!probe) {
+            state->mapped_read_verified = false;
             state->mapped_reference = reference_map;
             state->mapped_content_version = reference_map ?
                 state->reference.object.object_version : supplied.version;
@@ -12299,6 +12426,17 @@ static int mem_service_object_session_run_op(
                 0,
                 false);
         }
+        if (op->has_data_seed || op->has_expect_checksum) {
+            state->mapped_read_verified = true;
+            if (state->has_captured_mapping && !state->mapped_reference &&
+                (uintptr_t)state->mapping.base == state->captured_address &&
+                state->mapping.len == state->captured_len &&
+                state->mapping.generation != state->captured_allocation.generation) {
+                snprintf(state->replacement_key, sizeof(state->replacement_key),
+                    "%s", state->mapping.key);
+                state->replacement_generation = state->mapping.generation;
+            }
+        }
         return mem_service_object_session_finish_data_op(
             config,
             index,
@@ -12576,7 +12714,7 @@ static int run_object_session(int argc, char **argv)
     }
     /* A session must end clean: unmap before release already ran per-op,
      * so a live mapping or holder here means the config itself leaked. */
-    if (state.mapped) {
+    if (state.mapped || state.retired_probe_mapping.binding.mapped) {
         end_failure = "active_mapping";
     }
     if (mem_service_object_session_report_holders(&state, config.session_id) &&

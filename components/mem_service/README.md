@@ -1,5 +1,19 @@
 # Memory Service Component
 
+## 退役 descriptor 的同进程诊断契约
+
+`object-session` 的 `capture_mapping key=<old>` 只保存当前完整 allocation
+映射的身份快照；调用前必须持有映射，并通过带 seed/checksum 的 read。
+每个 session 最多保存一份，不能接受外部地址或 descriptor，不复制 holder。
+旧对象退役、新一代对象同址映射并通过带期望值的 read、再解除映射后，可执行
+`probe_retired_mapping key=<old>`。新对象的 holder 必须保持，且查询确认旧代
+retired、新代 active。诊断将原始快照直接交给 provider 映射，随后要求目标
+地址的同步 CPU 读故障和真实 unmap 成功。普通 map 错误标为未分类失败；
+清理失败保留独立 binding 并阻止后续操作。调用方必须随后重新映射并校验新
+对象，排除 provider 整体不可用。loopback 只验证探针逻辑；真实 OBMM 结果
+须独立验收。该诊断不覆盖旧 GSVA 字段与新 export token 的组合、强制撤销、
+重启恢复或新映射仍存在时的裸指针隔离，不改变业务 SDK/wire。
+
 ## 解除映射后的 CPU 诊断契约
 
 `object-session` 的 `unmap key=<key> probe_unmapped=1` 显式启用同进程

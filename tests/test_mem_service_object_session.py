@@ -1014,6 +1014,127 @@ class MemServiceObjectSessionTests(unittest.TestCase):
         finally:
             self._stop_server(daemon)
 
+    def _retired_probe_ops(self, expected="internal"):
+        return [
+            "acquire key=obj-1 idempotency_key=old-acquire",
+            "map key=obj-1 flags=read",
+            "capture_mapping key=obj-1 expect_status=not_found",
+            f"read key=obj-1 offset=0 len=64 expect_checksum=0x{_fnv1a64(bytes(64)):016x}",
+            "capture_mapping key=obj-1",
+            "capture_mapping key=obj-1 expect_status=unsupported",
+            "unmap key=obj-1",
+            "release key=obj-1 idempotency_key=old-release",
+            "retire key=obj-1 idempotency_key=old-retire",
+            f"reclaim key=obj-1 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
+            "generation=1 confirmed=1",
+            "allocate key=obj-2 idempotency_key=new-allocate size_bytes=4096 capabilities=map",
+            f"publish key=obj-2 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
+            f"generation=2 descriptor_hex=feedface address={DATA_MAP_ADDRESS_DEC} "
+            f"address_len={DATA_MAP_LEN}",
+            "acquire key=obj-2 idempotency_key=new-acquire",
+            "probe_retired_mapping key=obj-1 expect_status=unsupported",
+            "map key=obj-2 flags=read",
+            f"read key=obj-2 offset=0 len=64 expect_checksum=0x{_fnv1a64(bytes(64)):016x}",
+            "probe_retired_mapping key=obj-1 expect_status=unsupported",
+            "unmap key=obj-2",
+            "probe_retired_mapping key=wrong expect_status=not_found",
+            f"probe_retired_mapping key=obj-1 expect_status={expected}",
+            "map key=obj-2 flags=read",
+            f"read key=obj-2 offset=0 len=64 expect_checksum=0x{_fnv1a64(bytes(64)):016x}",
+            "unmap key=obj-2",
+            "release key=obj-2 idempotency_key=new-release",
+            "retire key=obj-2 idempotency_key=new-retire",
+            f"reclaim key=obj-2 node_id={HOME_NODE} incarnation={HOME_INCARNATION} "
+            "generation=2 confirmed=1",
+            "stats",
+        ]
+
+    def _run_retired_probe_case(self, expected="internal"):
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("retired-probe.conf", self._connect,
+                self._retired_probe_ops(expected), header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.count("mapping_capture=ok"), 1)
+            self.assertIn("replacement_key=obj-2 replacement_generation=2", result.stdout)
+            stats = self._allocation_stats()
+            for key in ("live_refs", "import_mappings", "live_objects",
+                        "backing_allocated_bytes", "address_reserved_bytes"):
+                self.assertEqual(stats[key], "0", (key, result.stdout))
+            return result
+        finally:
+            self._stop_server(daemon)
+
+    def test_retired_mapping_probe_detects_accessible_old_descriptor(self):
+        result = self._run_retired_probe_case()
+        self.assertIn("retired_mapping_probe=fail", result.stdout)
+        self.assertIn("note=retired_access_not_rejected", result.stdout)
+        self.assertIn("signal=0 unmap_confirmed=1", result.stdout)
+        self.assertNotIn("retired_mapping_probe=pass", result.stdout)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "GNU linker wrapping required")
+    def test_retired_mapping_probe_catches_fault_and_rechecks_new_mapping(self):
+        self._compile_host_binary([
+            str(ROOT / "tests" / "mem_service_object_session_retired_fault.c"),
+            "-Wl,--wrap=mprotect", "-Wl,--wrap=munmap",
+        ])
+        result = self._run_retired_probe_case("ok")
+        self.assertIn("retired_mapping_probe=pass", result.stdout)
+        self.assertRegex(result.stdout, r"signal=(7|11) unmap_confirmed=1")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "GNU linker wrapping required")
+    def test_retired_mapping_probe_does_not_count_generic_map_error(self):
+        self._compile_host_binary([
+            str(ROOT / "tests" / "mem_service_object_session_retired_fault.c"),
+            "-DSESSION_TEST_RETIRED_MAP_ERROR", "-Wl,--wrap=mprotect", "-Wl,--wrap=munmap",
+        ])
+        result = self._run_retired_probe_case()
+        self.assertIn("note=retired_map_rejection_unclassified", result.stdout)
+        self.assertIn("signal=0 unmap_confirmed=0", result.stdout)
+        self.assertNotIn("retired_mapping_probe=pass", result.stdout)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "GNU linker wrapping required")
+    def test_retired_mapping_probe_preserves_failed_cleanup(self):
+        self._compile_host_binary([
+            str(ROOT / "tests" / "mem_service_object_session_retired_fault.c"),
+            "-DSESSION_TEST_RETIRED_CLEANUP_ERROR", "-Wl,--wrap=mprotect", "-Wl,--wrap=munmap",
+        ])
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("retired-cleanup.conf", self._connect,
+                self._retired_probe_ops(), header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("note=retired_probe_cleanup_pending", result.stdout)
+            self.assertIn("action=map key=obj-2 status=internal", result.stdout)
+            self.assertNotIn("retired_mapping_probe=pass", result.stdout)
+            self.assertNotIn("action=release key=obj-2", result.stdout)
+            self.assertEqual(self._allocation_stats()["live_refs"], "1")
+        finally:
+            self._stop_server(daemon)
+
+    def test_retired_mapping_probe_config_and_missing_capture(self):
+        for action in ("capture_mapping", "probe_retired_mapping"):
+            for extra in ("address=0x400000000", "descriptor_hex=00", "flags=read"):
+                config = self._write_session("bad-retired.conf", "unix:/unused",
+                    [f"{action} key=obj-1 {extra}"], header_extra="provider=session-loopback")
+                result = self._run_session(config)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("op field not allowed for action", result.stderr)
+        daemon = self._start_active_object()
+        try:
+            config = self._write_session("no-capture.conf", self._connect, [
+                "capture_mapping key=obj-1 expect_status=not_found",
+                "probe_retired_mapping key=obj-1 expect_status=not_found",
+            ], header_extra="provider=session-loopback")
+            result = self._run_session(config)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("mapping_capture=ok", result.stdout)
+            self.assertNotIn("retired_mapping_probe=", result.stdout)
+        finally:
+            self._stop_server(daemon)
+
     def test_unmapped_cpu_probe_config_is_explicit_and_scoped(self):
         for operation in (
             "unmap key=obj-1 probe_unmapped=0",

@@ -183,6 +183,14 @@ session 的 `provider_import_region_bytes` 同时作为 canary 大小，须满�
 结果只证明 CLI 探针机制，真实 OBMM 必须独立运行。该探针覆盖解除映射后、
 新映射建立前的 CPU 访问，不证明同址新映射建立后的裸指针隔离或旧 token 拒绝。
 
+旧 descriptor 实跑使用同一 session 的 `capture_mapping key=<old>` 和
+`probe_retired_mapping key=<old>`：先在完整 allocation 映射中校验数据并保存
+快照，再确认旧代退役、新代同址映射的数据正确，解除新映射但保持其 holder。
+探针检查两代状态后将保存的原 descriptor 直接交给 provider，要求 CPU 读故障
+及清理成功；普通 map 失败不算通过。调用方随后重新映射并校验新对象。探针
+拒绝手工地址/descriptor、V2 子视图及覆盖快照，清理失败保留 binding 并停止
+后续操作。该 CLI 诊断不改变受管理 SDK 的正常准入检查。
+
 受管理 map 在 BEGIN 事务创建前，通过既有只读 inspect-allocation
 查询核对服务端当前绑定：key/generation、ACTIVE、home/incarnation、size/alignment、
 capabilities、provider-backed、地址/范围和完整不透明 descriptor。任一绑定不匹配
