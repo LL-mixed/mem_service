@@ -75,6 +75,11 @@ V2 的 wire/SDK 入口已显式接入，实际 guest 与 W5 接入仍待验证�
 解码成功不授予 holder，不证明数据版本或 payload checksum。ub_sim 须在服务端
 绑定及 SDK acquire/map 接通后显式采用，当前默认消费者不变。
 
+V2 writer 在 stage 后可调用 `mem_service_mapping_owner_unmap`：它排空访问并
+解除映射，保留原 holder 以满足 SEAL 的唯一 owner 要求。调用失败时保留句柄
+重试；成功后禁止新 borrow，SEAL 仍须使用原 version 和幂等操作身份。最后
+使用 close/release/destroy 结束生命周期，不能把 unmap 当作完成内容发布。
+
 AM2 的统一访问 owner 采用新增中立 `mem_service_mapping_owner.h/.c`，显式链接
 该源文件及 `-pthread`。同一 provider channel 的多个 owner 共用 access domain；
 平台 setup/teardown 与域内运行分阶段，运行中不绕过 domain 调用 raw provider。

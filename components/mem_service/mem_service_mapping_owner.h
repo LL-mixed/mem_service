@@ -111,6 +111,14 @@ int mem_service_mapping_owner_inspect(
  * Success leaves an inspectable closed handle. Destroy only after all caller
  * threads have joined; destroy refuses any remaining mapping/holder/pin.
  */
+/* Stop new admission and unmap after all pins drain, but retain the holder.
+ * A V2 writer can then SEAL its staged references before calling close.
+ * Success grants neither new access nor publication. Retry uncertain cleanup
+ * on this same owner; destroy still refuses the retained holder. */
+int mem_service_mapping_owner_unmap(
+    struct mem_service_mapping_owner *owner,
+    enum mem_service_wire_status *status_out);
+
 int mem_service_mapping_owner_close(
     struct mem_service_mapping_owner *owner,
     enum mem_service_wire_status *status_out);

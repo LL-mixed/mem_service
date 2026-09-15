@@ -31,6 +31,8 @@ class MemServiceMappingOwnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("mapping_owner_native=pass threads=8 owners=2 callbacks=800", result.stdout)
         self.assertIn("scope=boundary-fixture", result.stdout)
+        self.assertIn("mapping_owner_unmap=pass holder_retained=1 retry_idempotent=1 "
+                      "admission_closed=1", result.stdout)
 
     def test_cli_rejects_unknown_arguments(self):
         for arguments in ([], ["--unknown"], ["--self-test", "extra"]):

@@ -45,6 +45,11 @@ V2 携带 allocation key/generation/home/incarnation/range/access 元数据；�
 授予访问权限，不验证 payload 内容，不提供服务端绑定或重启恢复保证。显式采用
 须等待相应服务/SDK 流程接通，不能把 V1 arena offset 当作 V2 allocation offset。
 
+受管理 V2 writer 可使用 `mem_service_mapping_owner_unmap` 在解除写入映射后
+保留 holder，再执行 SEAL，最后调用原 close 和 destroy。unmap 停止新 borrow，
+在 pins 未排空或清理不确定时保留 owner 供重试；它本身不发布内容。该接口为
+安装 SDK 的附加函数，不改变原 close 行为或自动切换 DS4 的 serving 路径。
+
 新增的中立 mapping owner 模块供受管理映射消费者显式采用，安装态通过
 `mapping_owner_sources` 与 `mapping_owner_libs` 查询，后者为 `-pthread`。
 原 `sdk_sources`、已有 public record/wire 布局和 DS4 transfer 热路径保持不变。

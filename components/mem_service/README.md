@@ -198,6 +198,13 @@ SDK 向 provider 请求逻辑视图长度，同时单独传递 backing 的完整
 
 ## 受管理访问 owner（AM2 实施契约）
 
+writer 可调用 `mem_service_mapping_owner_unmap` 停止新 borrow、排空 pins 并
+完成原映射解除，同时保留同一 owner 的 holder。该中间状态用于 V2 writer
+在全部 stage 后执行 SEAL；unmap 成功不代表内容已 seal。忙碌和不确定清理
+继续保留 owner，重试不得释放 holder 或建立新映射。成功后不能再 borrow，
+仍须在 SEAL 成功或明确放弃发布后调用原 close 释放 holder，再 destroy。
+旧 close 继续一次完成 unmap/release；公开结构、wire 和原调用行为保持不变。
+
 新增中立 SDK 模块 `mem_service_mapping_owner.h/.c`。一个 access domain 借用一个
 已就绪 provider channel，并用同一 mutex 串行化域内全部生命周期和 provider
 callback；channel、registry 和 endpoint 必须保留到 domain 销毁，域外不得并发

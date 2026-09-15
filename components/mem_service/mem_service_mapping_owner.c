@@ -306,9 +306,9 @@ int mem_service_mapping_owner_inspect(
     return 0;
 }
 
-int mem_service_mapping_owner_close(
+static int owner_drain(
     struct mem_service_mapping_owner *owner,
-    enum mem_service_wire_status *status_out)
+    enum mem_service_wire_status *status_out, bool release_holder)
 {
     if (status_out) *status_out = MEM_SERVICE_WIRE_STATUS_INTERNAL;
     if (!owner) return -EINVAL;
@@ -330,7 +330,7 @@ int mem_service_mapping_owner_close(
         }
         owner->stats.mapping_pending = false;
     }
-    if (owner->stats.holder_pending) {
+    if (release_holder && owner->stats.holder_pending) {
         struct mem_service_client_allocation released;
         rc = mem_service_client_release_object(&domain->client, owner->mapping.key,
             owner->release_operation, owner->lifecycle.session_id, true,
@@ -347,6 +347,20 @@ int mem_service_mapping_owner_close(
 out:
     domain_unlock(domain);
     return rc;
+}
+
+int mem_service_mapping_owner_unmap(
+    struct mem_service_mapping_owner *owner,
+    enum mem_service_wire_status *status_out)
+{
+    return owner_drain(owner, status_out, false);
+}
+
+int mem_service_mapping_owner_close(
+    struct mem_service_mapping_owner *owner,
+    enum mem_service_wire_status *status_out)
+{
+    return owner_drain(owner, status_out, true);
 }
 
 int mem_service_mapping_owner_destroy(struct mem_service_mapping_owner *owner)

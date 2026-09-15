@@ -114,7 +114,7 @@ static void mapping_inputs(unsigned i, struct mem_service_client_object_mapping 
     o->id = 10 + i; o->generation = 20 + i; o->state = 2; o->held = true;
     memset(o->bytes, 23 + i, sizeof(o->bytes));
     memset(mapping, 0, sizeof(*mapping));
-    snprintf(mapping->key, sizeof(mapping->key), "%s", o->key);
+    memcpy(mapping->key, o->key, sizeof(o->key));
     mapping->generation = o->generation;
     mapping->base = o->bytes; mapping->len = sizeof(o->bytes);
     mapping->flags = i ? MEM_SERVICE_CLIENT_MAP_READ :
@@ -125,7 +125,7 @@ static void mapping_inputs(unsigned i, struct mem_service_client_object_mapping 
     };
     memset(lifecycle, 0, sizeof(*lifecycle));
     snprintf(lifecycle->operation_id, sizeof(lifecycle->operation_id), "map-%u", i);
-    snprintf(lifecycle->session_id, sizeof(lifecycle->session_id), "%s", o->session);
+    memcpy(lifecycle->session_id, o->session, sizeof(o->session));
     lifecycle->pending = true;
     lifecycle->transaction = (struct mem_service_client_mapping_transaction){
         .mapping_id = o->id, .generation = o->generation, .state = 2,
@@ -265,6 +265,7 @@ static int self_test(void)
         assert(!mem_service_mapping_owner_inspect(owner[i], &stats));
         assert(stats.cpu_pins == 4 && stats.compute_pins == (i ? 0 : 1));
         assert(stats.in_flight_pins == (i ? 0 : 1));
+        assert(mem_service_mapping_owner_unmap(owner[i], &status) == -EBUSY);
         assert(mem_service_mapping_owner_close(owner[i], &status) == -EBUSY);
         assert(objects[i].unmaps == 0 && objects[i].held);
         struct mem_service_mapping_lease *blocked;
@@ -291,17 +292,28 @@ static int self_test(void)
     objects[0].unmap_failures = 1;
     objects[0].lost_releases = 1;
     struct mem_service_mapping_owner_stats stats;
-    assert(mem_service_mapping_owner_close(owner[0], &status) == MEM_SERVICE_MAPPING_CLEANUP_REQUIRED);
+    assert(mem_service_mapping_owner_unmap(owner[0], &status) == MEM_SERVICE_MAPPING_CLEANUP_REQUIRED);
     assert(!mem_service_mapping_owner_inspect(owner[0], &stats));
     assert(stats.closing && stats.mapping_pending && stats.holder_pending);
     assert(!stats.cpu_pins && !stats.compute_pins && !stats.in_flight_pins);
     assert(objects[0].held && !objects[0].releases && objects[0].unmaps == 1);
     assert(mem_service_mapping_owner_destroy(owner[0]) == -EBUSY);
+    assert(!mem_service_mapping_owner_unmap(owner[0], &status));
+    assert(status == MEM_SERVICE_WIRE_STATUS_OK);
+    assert(!mem_service_mapping_owner_unmap(owner[0], &status));
+    assert(!mem_service_mapping_owner_inspect(owner[0], &stats));
+    assert(stats.closing && !stats.mapping_pending && stats.holder_pending);
+    assert(objects[0].held && !objects[0].releases && objects[0].unmaps == 2);
+    assert(mem_service_mapping_owner_destroy(owner[0]) == -EBUSY);
+    assert(mem_service_mapping_owner_acquire(owner[0], MEM_SERVICE_MAPPING_ACCESS_CPU,
+        0, 16, MEM_SERVICE_CLIENT_MAP_READ, &lease, &view) == -ECANCELED);
+    assert(!lease && !view.base);
     assert(mem_service_mapping_owner_close(owner[0], &status) == MEM_SERVICE_MAPPING_CLEANUP_REQUIRED);
     assert(!mem_service_mapping_owner_inspect(owner[0], &stats));
     assert(!stats.mapping_pending && stats.holder_pending);
     assert(!objects[0].held && objects[0].releases == 1 && objects[0].unmaps == 2);
     assert(!mem_service_mapping_owner_close(owner[0], &status));
+    assert(!mem_service_mapping_owner_unmap(owner[0], &status));
     assert(!mem_service_mapping_owner_close(owner[0], &status));
     assert(objects[0].releases == 2 && objects[0].unmaps == 2);
     assert(!mem_service_mapping_owner_close(owner[1], &status));
@@ -313,6 +325,7 @@ static int self_test(void)
     assert(!mem_service_mapping_owner_destroy(owner[1]));
     assert(!mem_service_access_domain_destroy(domain));
     puts("mapping_owner_native=pass threads=8 owners=2 callbacks=800 scope=boundary-fixture");
+    puts("mapping_owner_unmap=pass holder_retained=1 retry_idempotent=1 admission_closed=1");
     return 0;
 }
 
