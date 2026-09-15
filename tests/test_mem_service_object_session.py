@@ -1670,11 +1670,13 @@ class MemServiceObjectSessionTests(unittest.TestCase):
             cleanup = self._write_session("capacity-cleanup.conf", self._connect, cleanup_ops)
             cleanup_r = self._run_session(cleanup)
             self.assertEqual(cleanup_r.returncode, 0, cleanup_r.stdout + cleanup_r.stderr)
-            # Even after every identity retired, late ALLOCATE is still a
-            # historical reply and cannot allocate a replacement generation.
+            # Retired history cannot grant the old allocation again. Reject
+            # without consuming a slot or allocating a replacement generation.
             replay_r = self._run_session(replay)
-            self.assertEqual(replay_r.returncode, 0, replay_r.stdout + replay_r.stderr)
+            self.assertNotEqual(replay_r.returncode, 0, replay_r.stdout + replay_r.stderr)
+            self.assertIn("status=version_conflict", replay_r.stdout)
             stats = self._allocation_stats()
+            self.assertEqual(stats["allocate_ok_count"], "32", stats)
             for field in ("live_objects", "in_flight", "live_refs", "backing_allocated_bytes",
                           "idempotency_cleanup_reserved", "idempotency_reservation_deficit"):
                 self.assertEqual(stats[field], "0", stats)

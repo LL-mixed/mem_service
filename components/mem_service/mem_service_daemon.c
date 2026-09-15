@@ -1320,7 +1320,8 @@ static int mem_service_store_import_record(struct mem_service *svc,
         return -1;
     }
     if (record->kind == MEM_SERVICE_RECORD_MANAGED_VIEW &&
-        !svc->managed_recovery_required) return -1;
+        !svc->managed_recovery_required && svc->managed.next_generation == 1)
+        return -1;
     slot = mem_service_find_record(svc, record->key);
     if (slot == NULL) {
         slot = mem_service_alloc_record(svc);
@@ -4095,14 +4096,22 @@ static int mem_service_managed_store_checkpoint(
          * Keep all obligations; ordinary cleanup cannot revive the payload. */
         for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
             struct mem_service_managed_allocation *a = &scratch->entries[i];
-            if (!a->in_use || a->state == MEM_SERVICE_MANAGED_STATE_RETIRED)
-                continue;
+            if (!a->in_use) continue;
+            if (a->state == MEM_SERVICE_MANAGED_STATE_RETIRED &&
+                !a->holder_count && !a->provider_backed && !a->descriptor_len &&
+                !a->address && !a->address_len && !a->content_writing) continue;
             if (a->state != MEM_SERVICE_MANAGED_STATE_QUARANTINED)
                 scratch->quarantine_events++;
             a->state = MEM_SERVICE_MANAGED_STATE_QUARANTINED;
+            required = true;
         }
+        for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i)
+            if (scratch->mappings[i].state != MEM_SERVICE_MANAGED_MAPPING_NONE)
+                required = true;
         *output = *scratch;
-        *recovery = true;
+        /* A fully drained checkpoint has no payload to resurrect. Preserve
+         * an existing uncertainty flag even when its tables look empty. */
+        *recovery = required;
     }
     free(scratch);
     return rc;
@@ -13820,6 +13829,30 @@ static enum mem_service_wire_status mem_service_try_idempotency_replay(
         return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
     }
 
+    /* Historical success cannot expose a retired/replaced allocation's
+     * descriptor. Apply this to both the hot cache and archived replies;
+     * cleanup receipts remain replayable without reviving any resource. */
+    if (record->status == MEM_SERVICE_WIRE_STATUS_OK &&
+        (operation == MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT ||
+         operation == MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT ||
+         operation == MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION)) {
+        char allocation_key[MEM_SERVICE_MANAGED_KEY_LEN];
+        uint64_t generation = 0;
+        struct mem_service_managed_view allocation;
+        if (!mem_service_payload_get_string(record->response, "key",
+                allocation_key, sizeof(allocation_key)) ||
+            !mem_service_payload_get_u64_checked(record->response,
+                "generation", &generation) || !generation ||
+            mem_service_managed_inspect(&svc->managed, allocation_key, &allocation) !=
+                MEM_SERVICE_MANAGED_RESULT_OK ||
+            allocation.generation != generation ||
+            allocation.state == MEM_SERVICE_MANAGED_STATE_RETIRED ||
+            allocation.state == MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+            snprintf(response, response_len,
+                     "status=version_conflict\nreason=managed_generation_retired\n");
+            return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+        }
+    }
     svc->metrics.idempotency_replay_count += 1U;
     if (response != NULL && response_len > 0) {
         size_t copy_len = record->response_len;

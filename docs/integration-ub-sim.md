@@ -461,3 +461,10 @@ python3 guest-linux/aarch64/scripts/run_w5_lingqu_shmem_pto.py \
 全部 4096-byte tile 均出现 2 次 `TLOAD`、1 次 `TSTORE`、1 次 fence，且
 `segment_payload_staging_bytes=0`、精确公式校验通过、输出以
 `payload_mode=in_place` 发布、无残留 QEMU。
+
+服务完整排空后，managed checkpoint 可在无 recovery 标记、无资源或 mapping
+义务时重新接纳新代际；provider 目录仍须重新建立。`allocate-object`、
+`acquire-object`、`publish-allocation` 的成功历史应答若指向已退役或替换的
+代际，返回 `version_conflict`，reason 为 `managed_generation_retired`。
+调用方须创建新的操作身份，不能依赖旧成功应答重新取得资源。未排空 checkpoint
+仍保持隔离；此变更不恢复 worker 或旧映射，不替代实际 kernel/fencing 验收。

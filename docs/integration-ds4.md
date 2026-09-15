@@ -388,6 +388,12 @@ DS4 当前推理/KV 路径不因此自动切换到 V2。控制回执不代表 pa
 安装边界可使用 `make -C apps/mem_service installed-reference-protocol-smoke`
 验证，该目标编译安装目录中的公开头和 client/provider 源码。
 
+已排空 managed checkpoint 的服务重启允许新代际接纳，前提为无既有 recovery
+标记、无资源或 mapping 义务，并重新满足 provider readiness。历史分配、获取
+或发布成功应答指向已退役或被替换代际时，返回 `version_conflict` 与
+`managed_generation_retired`；旧清理回执仍可重放。DS4 不应使用历史 descriptor
+恢复 payload。活跃对象、未知资源和故障隔离的恢复要求保持不变。
+
 | 症状 | 排查 |
 | --- | --- |
 | `cannot open payload provider config` | `--dist-payload-config` 路径错误或不可读 |

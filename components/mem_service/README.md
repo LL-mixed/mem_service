@@ -810,6 +810,15 @@ append 成功要求文件与创建目录项均已同步；不确定写入使句�
 generation 的重放前准入继续执行。managed backing 恢复、地址重用及真实百轮
 仍须独立完成 drain/epoch/旧上下文验收。
 
+managed checkpoint 重启时保留已有 recovery 标记，并隔离所有非终态分配及
+仍带 holder/backing/descriptor/address/写入义务的终态记录。仅当所有分配已
+完整回收、无 mapping 事务且原 recovery 标记为零时，允许接纳新分配；provider
+目录不从 checkpoint 恢复，须重新注册才能满足对应 readiness。历史视图仍由
+当前分配代际校验，载入历史视图不恢复 payload。`allocate-object`、
+`acquire-object` 和 `publish-allocation` 的成功重放统一核对当前代际；已退役、
+被替换或隔离的分配返回 `version_conflict / managed_generation_retired`，同时
+保留历史记录，清理应答仍可精确重放。该行为覆盖内存缓存与磁盘重放历史。
+
 `mem_service` is being split toward a product-grade Lingqu data service that can
 run as a guest component and as a host-side service for streaming LLM inference
 and LLM pre-training data paths.

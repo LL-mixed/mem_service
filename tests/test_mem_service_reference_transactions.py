@@ -63,6 +63,34 @@ class ReferenceTransactionTests(unittest.TestCase):
         self.assertIn("store load failed", run.stderr)
         self.assertEqual(store.read_text(), damaged)
 
+    def test_drained_restart_keeps_historical_view_but_does_not_restore_its_payload(self):
+        store = self.fixture.root / "drained-references.store"
+        self.fixture._stop_server(self.daemon)
+        self.daemon = self.fixture._start_active_object(logical_size=ALLOCATION_BYTES,
+            extra_config=f"store={store}")
+        self._holder("acquire", "producer")
+        self._publish()
+        expected = self._reference()
+        self._holder("release", "producer")
+        config = self.fixture._write_session("drain-reference.conf", self.connect, [
+            "retire key=obj-1 idempotency_key=drain-reference expected_generation=1",
+            f"reclaim key=obj-1 node_id={fixtures.HOME_NODE} "
+            f"incarnation={fixtures.HOME_INCARNATION} generation=1 confirmed=1",
+        ])
+        run = self.fixture._run_session(config)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        for attempt in range(2):
+            self.fixture._stop_server(self.daemon)
+            self.daemon = self.fixture._start_home_daemon(extra_config=f"store={store}")
+            stats = self.fixture._allocation_stats()
+            self.assertEqual(stats["managed_recovery_required"], "0", stats)
+            self.assertEqual(stats["live_objects"], "0", stats)
+            self.fixture._register_home(incarnation=fixtures.HOME_INCARNATION + attempt + 1)
+            self._transition("resolve", success=False)
+            saved = fixtures._parse_kv(store.read_text())
+            self.assertEqual(saved["managed_reference_part0"] +
+                             saved["managed_reference_part1"], expected)
+
     def _holder(self, action, session):
         result = self.fixture._run_client(
             f"{action}-object", "--key", "obj-1", "--session-id", session,

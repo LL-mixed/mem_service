@@ -122,6 +122,83 @@ class HistoryDaemonTests(unittest.TestCase):
                       self.holder("acquire", "after-checkpoint", success=False))
         self.assertEqual(self.fixture._allocation_stats()["live_refs"], "0")
 
+    def drained_restart(self, archived):
+        self.cycles(40 if archived else 1, mapping=True)
+        if archived:
+            self.assert_archived()
+        cleanup_reply = self.holder("release", "release-0")
+
+        def retire(generation, incarnation):
+            config = self.fixture._write_session(
+                "drain.conf", self.fixture._connect, [
+                    f"retire key=obj-1 idempotency_key=drain-{generation} "
+                    f"expected_generation={generation}",
+                    f"reclaim key=obj-1 node_id={fixtures.HOME_NODE} "
+                    f"incarnation={incarnation} generation={generation} confirmed=1",
+                ])
+            run = self.fixture._run_session(config)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            stats = self.fixture._allocation_stats()
+            for field in ("live_objects", "live_refs", "in_flight", "import_mappings",
+                          "backing_allocated_bytes", "address_reserved_bytes"):
+                self.assertEqual(stats[field], "0", stats)
+
+        def reject_old_grants():
+            old_allocate = self.fixture._run_session(self.fixture.root / "producer.conf")
+            self.assertNotEqual(old_allocate.returncode, 0, old_allocate.stdout)
+            self.assertIn("status=version_conflict", old_allocate.stdout)
+            old_acquire = self.holder("acquire", "acquire-0", success=False)
+            self.assertIn("managed_generation_retired", old_acquire)
+            self.assertEqual(self.holder("release", "release-0"), cleanup_reply)
+
+        retire(1, fixtures.HOME_INCARNATION)
+        reject_old_grants()
+        for generation in (2, 3):
+            self.stop()
+            self.daemon = self.fixture._start_home_daemon(extra_config=f"store={self.store}")
+            stats = self.fixture._allocation_stats()
+            self.assertEqual(stats["managed_recovery_required"], "0", stats)
+            not_ready = self.fixture._run_client("status", "--connect", self.fixture._connect)
+            self.assertIn("data_plane_ready=0", not_ready.stdout)
+            self.assertIn("provider_active_count=0", not_ready.stdout)
+            incarnation = fixtures.HOME_INCARNATION + generation
+            self.fixture._register_home(incarnation=incarnation)
+            reject_old_grants()
+            allocate = self.fixture._run_client(
+                "allocate-object", "--key", "obj-1", "--session-id", "producer",
+                "--size-bytes", "4096", "--capabilities", "1",
+                "--idempotency-key", f"new-allocation-{generation}",
+                "--connect", self.fixture._connect)
+            self.assertEqual(allocate.returncode, 0, allocate.stdout + allocate.stderr)
+            value = fixtures._parse_kv(allocate.stdout)
+            self.assertEqual(value["generation"], str(generation), value)
+            self.assertEqual(value["state"], "allocating", value)
+            self.assertEqual(value["provider_incarnation"], str(incarnation), value)
+            # Reusing the key must not make an archived generation current.
+            reject_old_grants()
+            retire(generation, incarnation)
+
+    def test_drained_checkpoint_restarts_with_fresh_generations_and_rejects_old_cache_grants(self):
+        self.drained_restart(archived=False)
+
+    def test_drained_checkpoint_restarts_with_fresh_generations_and_rejects_archived_grants(self):
+        self.drained_restart(archived=True)
+
+    def test_reclaimed_checkpoint_does_not_require_live_resource_recovery(self):
+        config = self.fixture._write_session("retired-only.conf", self.fixture._connect, [
+            "retire key=obj-1 idempotency_key=retired-only expected_generation=1",
+            f"reclaim key=obj-1 node_id={fixtures.HOME_NODE} "
+            f"incarnation={fixtures.HOME_INCARNATION} generation=1 confirmed=1",
+        ])
+        run = self.fixture._run_session(config)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.stop()
+        self.daemon = self.fixture._start_home_daemon(extra_config=f"store={self.store}")
+        stats = self.fixture._allocation_stats()
+        self.assertEqual(stats["managed_recovery_required"], "0", stats)
+        self.assertEqual(stats["quarantined_objects"], "0", stats)
+        self.assertEqual(stats["live_objects"], "0", stats)
+
     def assert_restart_rejected(self):
         self.stop()
         run = subprocess.run([
