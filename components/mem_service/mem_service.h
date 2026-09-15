@@ -92,7 +92,7 @@ struct mem_service_record {
     uint32_t member_count;
     char member_block_hashes[MEM_SERVICE_MAX_GROUP_MEMBERS][96];
     /* Explicit V2 binding; never interpret its allocation offset as an arena
-     * offset. Managed allocation/reference restart recovery is not yet wired. */
+     * offset. Restored bindings remain unavailable pending resource reconciliation. */
     struct lingqu_object_ref_wire_v2 managed_ref;
 };
 
@@ -205,6 +205,8 @@ struct mem_service {
     struct mem_service_replay_history *replay_history;
     bool replay_history_enabled;
     bool managed_recovery_required;
+    /* An uncertain checkpoint write forbids further state changes until restart. */
+    bool managed_store_failed;
     uint64_t replay_history_count;
     uint64_t replay_history_checksum;
     struct mem_service_provider_registry providers;

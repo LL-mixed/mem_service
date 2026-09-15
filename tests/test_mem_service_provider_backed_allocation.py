@@ -86,6 +86,109 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
         ]
         subprocess.run(cmd, cwd=REPO_ROOT, check=True, capture_output=True, text=True)
 
+    def test_small_store_restart_preserves_managed_obligations(self):
+        """Restart must retain resource identity even without replay archiving."""
+        store = self.root / "managed.snapshot"
+        proc = self._start_home_daemon(f"store={store}")
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            generation = self._allocate_bound("restart-held", "restart-allocate")
+            self.assertEqual(self._publish("restart-held", generation).returncode, 0)
+            acquired = self._run_client(
+                "acquire-object", "--key", "restart-held",
+                "--session-id", "session-a", "--expected-generation", str(generation),
+                "--idempotency-key", "restart-acquire", "--connect", self._connect)
+            self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
+            self._allocate_bound("restart-pending", "restart-pending-allocate")
+
+            def mapping(action, mapping_id):
+                result = self._run_client(
+                    "mapping-transition", "--key", "restart-held",
+                    "--session-id", "session-a", "--generation", str(generation),
+                    "--mapping-id", str(mapping_id), "--action", action,
+                    "--idempotency-key", "restart-map-" + action,
+                    "--connect", self._connect)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return _parse_kv(result.stdout)
+
+            mapping_id = int(mapping("begin", 0)["mapping_id"])
+            mapping("confirm", mapping_id)
+            original = self._inspect("restart-held")
+            lost = self._run_client(
+                "provider-deregister", "--node-id", HOME_NODE,
+                "--incarnation", str(HOME_INCARNATION), "--connect", self._connect)
+            self.assertEqual(lost.returncode, 0, lost.stdout + lost.stderr)
+            before = self._stats()
+            self.assertEqual(before["quarantined_objects"], "2")
+            self.assertEqual(before["import_mappings"], "1")
+            self.assertEqual(before["managed_recovery_required"], "1")
+            for restart in range(2):
+                self._stop_server(proc)
+                proc = None
+                proc = self._start_home_daemon(f"store={store}")
+                after = self._stats()
+                for field in ("quarantined_objects", "quarantined_bytes",
+                              "live_refs", "export_mappings", "import_mappings",
+                              "managed_recovery_required"):
+                    self.assertEqual(after[field], before[field], (restart, field))
+                inspected = self._run_client(
+                    "inspect-allocation", "--key", "restart-held",
+                    "--connect", self._connect)
+                self.assertEqual(inspected.returncode, 0, inspected.stdout)
+                self.assertEqual(_parse_kv(inspected.stdout)["generation"], str(generation))
+                current = _parse_kv(inspected.stdout)
+                for field in ("descriptor_hex", "address", "address_len",
+                              "home_node", "provider_incarnation", "live_refs"):
+                    self.assertEqual(current[field], original[field], field)
+                self.assertEqual(mapping("inspect", mapping_id)["mapping_id"], str(mapping_id))
+                self.assertEqual(self._register_home(8 + restart).returncode, 0)
+                new = self._allocate("restart-new", "restart-new-allocate")
+                self.assertNotEqual(new.returncode, 0, new.stdout)
+                self.assertIn("managed_reconciliation_required", new.stdout + new.stderr)
+        finally:
+            if proc is not None:
+                self._stop_server(proc)
+
+    def test_checkpoint_keeps_unpublished_intent_and_rejects_damage(self):
+        store = self.root / "intent.snapshot"
+        proc = self._start_home_daemon(f"store={store}")
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            generation = self._allocate_bound("pending", "pending-allocate")
+            # The acknowledged intent must survive without graceful shutdown.
+            proc.kill()
+            proc.wait(timeout=10)
+        finally:
+            self._stop_server(proc)
+        saved = store.read_bytes()
+        self.assertTrue(saved.startswith(b"mem_service_store_managed_v1\n"))
+        self.assertTrue(saved.endswith(b"managed_store_complete=1\n"))
+        proc = self._start_home_daemon(f"store={store}")
+        try:
+            view = self._inspect("pending")
+            self.assertEqual(view["generation"], str(generation))
+            self.assertEqual(view["state"], "quarantined")
+            stats = self._stats()
+            self.assertEqual(stats["in_flight"], "1")
+            self.assertEqual(stats["quarantined_objects"], "1")
+            self.assertEqual(stats["quarantined_bytes"], "0")
+        finally:
+            self._stop_server(proc)
+        corrupted = bytearray(saved)
+        position = saved.index(b"\n", saved.index(b"\n") + 1) + 1
+        corrupted[position] = ord("1") if corrupted[position] == ord("0") else ord("0")
+        for name, data in (("checksum", bytes(corrupted)),
+                           ("truncated", saved[:-25]),
+                           ("trailing", saved + b"managed_store_complete=1\n")):
+            with self.subTest(damage=name):
+                store.write_bytes(data)
+                run = subprocess.run(
+                    [str(self.binary), "serve", "--config", str(self.root / "pba.conf")],
+                    capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("store load failed", run.stderr)
+                self.assertEqual(store.read_bytes(), data)
+
     def _run_client(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [str(self.binary), *args],

@@ -1,5 +1,26 @@
 # Memory Service Component
 
+## Managed store 恢复实施约定
+
+`serve --store` 必须在首次受管理分配起保存完整分配表、原操作身份、holder、
+mapping 事务、代际上界和隔离状态，不依赖幂等缓存归档触发。采用独立版本化
+store magic，旧服务拒绝读取；保留原 metadata-only store 兼容路径。持久确认
+须先于成功应答及 provider 工作交付；不确定写入停止新的资源状态变更。
+重启仅恢复资源身份和待对账义务，不恢复进程指针、provider 注册或数据就绪。
+未终结对象进入隔离，已有引用和映射继续计量，重复重启不得清零或重复分配。
+完整资源回收和重新加入仍须经 provider/kernel 实际对账与 fencing 证明。
+回归沿用真实 daemon/CLI 的 provider-backed allocation 测试；合成 descriptor
+只用于控制状态验证，不能当作物理 backing 恢复证据。
+
+候选实现使用 `mem_service_store_managed_v1` 保存字段级编码的分配表及完整 V2
+record 绑定，附校验和与完整结束标记；未知版本、截断、损坏及多余尾部拒绝。
+资源状态和精确应答在同一原子 snapshot 中确认，该格式不重放旧 reply-only
+journal 覆盖快照。历史归档仍用原 `.replay-history` 及前缀校验。写入不确定
+后禁止继续变更或向 provider 交付新工作；修复文件路径不自动解除该状态。
+原 wire 完整/分页 snapshot 不携带此恢复域，已有 managed 状态时拒绝导出及
+覆盖。旧 metadata-only store 保持兼容；缺少资源状态的旧 managed store
+不能直接恢复数据就绪。core 消费者须重新构建，wire 与 client record ABI 不变。
+
 ## Provider 失联的运行期隔离
 
 目录租约到期、成功注销或 incarnation 替换必须在旧登记消失前后同一串行化域

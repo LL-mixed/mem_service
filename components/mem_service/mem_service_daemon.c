@@ -36,6 +36,7 @@
 #define MEM_SERVICE_TCP_SPEC_PREFIX "tcp:"
 #define MEM_SERVICE_STORE_MAGIC "mem_service_store_v1"
 #define MEM_SERVICE_HISTORY_STORE_MAGIC "mem_service_store_history_v1"
+#define MEM_SERVICE_MANAGED_STORE_MAGIC "mem_service_store_managed_v1"
 #define MEM_SERVICE_JOURNAL_MAGIC "mem_service_journal_v1"
 #define MEM_SERVICE_STORE_SCHEMA_VERSION 1
 #define MEM_SERVICE_STORE_MAX_KNOWN_SCHEMA_VERSION 1
@@ -156,6 +157,9 @@ struct mem_service_store_import_state {
     bool in_record;
     bool in_idempotency;
     bool in_audit;
+    char managed_reference_hex[513];
+    uint64_t managed_reference_checksum;
+    unsigned int managed_reference_fields;
 };
 
 static int mem_service_expect_u64(const char *name, uint64_t actual, uint64_t expected)
@@ -1315,6 +1319,8 @@ static int mem_service_store_import_record(struct mem_service *svc,
     if (record->key[0] == '\0' || record->kind == 0) {
         return -1;
     }
+    if (record->kind == MEM_SERVICE_RECORD_MANAGED_VIEW &&
+        !svc->managed_recovery_required) return -1;
     slot = mem_service_find_record(svc, record->key);
     if (slot == NULL) {
         slot = mem_service_alloc_record(svc);
@@ -1535,16 +1541,34 @@ static int mem_service_import_store_line(struct mem_service *svc,
     if (line[0] == '\0') {
         return 0;
     }
+    /* Replay responses can contain a full V2 reference on one line. Keep
+     * its exact bytes instead of truncating through the generic field buffer. */
+    if (state->in_idempotency && strncmp(line, "response_line=", 14) == 0)
+        return mem_service_append_idempotency_response_line(&state->idempotency,
+                                                            line + 14);
     if (strcmp(line, "record_begin") == 0) {
         if (state->in_record || state->in_idempotency || state->in_audit) {
             return -1;
         }
         memset(&state->record, 0, sizeof(state->record));
+        memset(state->managed_reference_hex, 0, sizeof(state->managed_reference_hex));
+        state->managed_reference_fields = 0;
+        state->managed_reference_checksum = 0;
         state->record.in_use = true;
         state->in_record = true;
         return 0;
     }
     if (strcmp(line, "record_end") == 0) {
+        if (state->in_record && state->record.kind == MEM_SERVICE_RECORD_MANAGED_VIEW &&
+            (state->managed_reference_fields != 7U ||
+             mem_service_wire_checksum(state->managed_reference_hex, 512) !=
+                 state->managed_reference_checksum ||
+             mem_service_reference_decode_hex(state->managed_reference_hex,
+                                               &state->record.managed_ref) != 0 ||
+             state->record.version != state->record.managed_ref.object.object_version))
+            return -1;
+        if (state->record.kind != MEM_SERVICE_RECORD_MANAGED_VIEW &&
+            state->managed_reference_fields) return -1;
         if (!state->in_record ||
             mem_service_store_import_record(svc, &state->record) != 0) {
             return -1;
@@ -1593,6 +1617,22 @@ static int mem_service_import_store_line(struct mem_service *svc,
         return -1;
     }
     if (state->in_record) {
+        if (!strcmp(name, "managed_reference_part0") ||
+            !strcmp(name, "managed_reference_part1")) {
+            unsigned int part = name[strlen(name) - 1] == '1' ? 1U : 0U;
+            if (strlen(value) != 256 || (state->managed_reference_fields & (1U << part)))
+                return -1;
+            memcpy(state->managed_reference_hex + part * 256U, value, 256);
+            state->managed_reference_fields |= 1U << part;
+            return 0;
+        }
+        if (!strcmp(name, "managed_reference_checksum")) {
+            if ((state->managed_reference_fields & 4U) ||
+                !mem_service_payload_get_u64_checked(line, name,
+                    &state->managed_reference_checksum)) return -1;
+            state->managed_reference_fields |= 4U;
+            return 0;
+        }
         return mem_service_parse_store_record_field(&state->record, name, value);
     }
     if (state->in_idempotency) {
@@ -3846,14 +3886,241 @@ static int mem_service_read_history_checkpoint(FILE *file, const char *name,
     return strcmp(line, canonical) == 0 ? 0 : -1;
 }
 
+/* A bounded, canonical, pointer-free checkpoint inside the atomic store.
+ * Hex lines keep the surrounding store text readable. The checksum detects
+ * accidental damage; it is not authentication. All integers are little-endian.
+ * Parsing occurs into heap scratch and commits only after full validation. */
+struct mem_service_managed_store_io {
+    FILE *file;
+    bool reading;
+    uint64_t checksum;
+};
+
+static int mem_service_managed_store_bytes(
+    struct mem_service_managed_store_io *io, void *data, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+    unsigned char *bytes = data;
+    char line[MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN * 2U + 1U];
+    size_t i;
+    if (len > MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN) return -1;
+    if (io->reading) {
+        if (fread(line, 1, len * 2U + 1U, io->file) != len * 2U + 1U ||
+            line[len * 2U] != '\n') return -1;
+        for (i = 0; i < len; ++i) {
+            const char *hi = memchr(hex, line[i * 2U], 16);
+            const char *lo = memchr(hex, line[i * 2U + 1U], 16);
+            if (hi == NULL || lo == NULL) return -1;
+            bytes[i] = (unsigned char)(((hi - hex) << 4) | (lo - hex));
+        }
+    } else {
+        for (i = 0; i < len; ++i) {
+            line[i * 2U] = hex[bytes[i] >> 4];
+            line[i * 2U + 1U] = hex[bytes[i] & 15U];
+        }
+        line[len * 2U] = '\n';
+        if (fwrite(line, 1, len * 2U + 1U, io->file) != len * 2U + 1U)
+            return -1;
+    }
+    for (i = 0; i < len * 2U + 1U; ++i) {
+        io->checksum ^= (unsigned char)line[i];
+        io->checksum *= UINT64_C(1099511628211);
+    }
+    return 0;
+}
+
+static int mem_service_managed_store_number(
+    struct mem_service_managed_store_io *io, uint64_t *value)
+{
+    unsigned char bytes[8];
+    size_t i;
+    for (i = 0; i < 8; ++i) bytes[i] = (unsigned char)(*value >> (i * 8U));
+    if (mem_service_managed_store_bytes(io, bytes, sizeof(bytes)) != 0) return -1;
+    *value = 0;
+    for (i = 0; i < 8; ++i) *value |= (uint64_t)bytes[i] << (i * 8U);
+    return 0;
+}
+
+static int mem_service_managed_store_string(
+    struct mem_service_managed_store_io *io, char *value, size_t size)
+{
+    size_t i;
+    bool ended = false;
+    if (mem_service_managed_store_bytes(io, value, size) != 0) return -1;
+    for (i = 0; i < size; ++i) {
+        if (value[i] == '\0') ended = true;
+        else if (ended) return -1;
+    }
+    return ended ? 0 : -1;
+}
+
+static int mem_service_managed_store_table(
+    struct mem_service_managed_store_io *io,
+    struct mem_service_managed_table *table, bool *recovery)
+{
+    size_t i, j, k;
+    uint64_t checksum;
+#define MS_NUMBER(field, maximum) do { \
+    uint64_t value = (field); \
+    if (mem_service_managed_store_number(io, &value) != 0 || \
+        value > (maximum)) return -1; \
+    (field) = value; \
+} while (0)
+#define MS_STRING(field) do { \
+    if (mem_service_managed_store_string(io, (field), sizeof(field)) != 0) \
+        return -1; \
+} while (0)
+    MS_NUMBER(*recovery, 1);
+    MS_NUMBER(table->next_generation, UINT64_MAX);
+    MS_NUMBER(table->next_mapping_id, UINT64_MAX);
+    if (!table->next_generation || !table->next_mapping_id) return -1;
+    MS_NUMBER(table->allocate_ok_count, UINT64_MAX);
+    MS_NUMBER(table->acquire_ok_count, UINT64_MAX);
+    MS_NUMBER(table->release_ok_count, UINT64_MAX);
+    MS_NUMBER(table->retire_ok_count, UINT64_MAX);
+    MS_NUMBER(table->allocate_rejected_count, UINT64_MAX);
+    MS_NUMBER(table->acquire_rejected_count, UINT64_MAX);
+    MS_NUMBER(table->release_rejected_count, UINT64_MAX);
+    MS_NUMBER(table->retire_rejected_count, UINT64_MAX);
+    MS_NUMBER(table->publish_ok_count, UINT64_MAX);
+    MS_NUMBER(table->publish_rejected_count, UINT64_MAX);
+    MS_NUMBER(table->reclaim_ok_count, UINT64_MAX);
+    MS_NUMBER(table->reclaim_rejected_count, UINT64_MAX);
+    MS_NUMBER(table->quarantine_events, UINT64_MAX);
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        struct mem_service_managed_allocation *a = &table->entries[i];
+        MS_NUMBER(a->in_use, 1);
+        if (!a->in_use) continue;
+        MS_NUMBER(a->state, MEM_SERVICE_MANAGED_STATE_QUARANTINED);
+        MS_STRING(a->key);
+        MS_STRING(a->allocate_idempotency_key);
+        MS_STRING(a->owner_session);
+        MS_NUMBER(a->generation, UINT64_MAX);
+        MS_NUMBER(a->version, UINT64_MAX);
+        MS_NUMBER(a->size_bytes, UINT64_MAX);
+        MS_NUMBER(a->alignment_bytes, UINT64_MAX);
+        MS_NUMBER(a->capabilities, MEM_SERVICE_MANAGED_CAP_VALID_MASK);
+        MS_NUMBER(a->holder_count, MEM_SERVICE_MANAGED_MAX_HOLDERS);
+        for (j = 0; j < a->holder_count; ++j) {
+            MS_STRING(a->holders[j].session_id);
+            MS_NUMBER(a->holders[j].generation, UINT64_MAX);
+            if (!a->holders[j].session_id[0] ||
+                a->holders[j].generation != a->generation) return -1;
+            for (k = 0; k < j; ++k)
+                if (!strcmp(a->holders[j].session_id, a->holders[k].session_id))
+                    return -1;
+        }
+        MS_NUMBER(a->provider_incarnation, UINT64_MAX);
+        MS_STRING(a->home_node_id);
+        MS_NUMBER(a->provider_backed, 1);
+        MS_NUMBER(a->address, UINT64_MAX);
+        MS_NUMBER(a->address_len, UINT64_MAX);
+        MS_NUMBER(a->descriptor_len, MEM_SERVICE_MANAGED_DESCRIPTOR_MAX_LEN);
+        if (mem_service_managed_store_bytes(io, a->descriptor,
+                                            a->descriptor_len) != 0) return -1;
+        MS_NUMBER(a->reference_mode, 1);
+        MS_NUMBER(a->content_writing, 1);
+        if (!a->state || !a->key[0] || !a->allocate_idempotency_key[0] ||
+            !a->generation || a->generation >= table->next_generation ||
+            !a->version || !a->size_bytes || !a->capabilities ||
+            (a->alignment_bytes & (a->alignment_bytes - 1U)) ||
+            a->address > UINT64_MAX - a->address_len ||
+            (a->home_node_id[0] && !a->provider_incarnation) ||
+            (a->provider_backed && (!a->home_node_id[0] ||
+             !a->descriptor_len || a->address_len < a->size_bytes)) ||
+            (a->content_writing && !a->reference_mode)) return -1;
+        for (j = 0; j < i; ++j)
+            if (table->entries[j].in_use &&
+                (!strcmp(a->key, table->entries[j].key) ||
+                 a->generation == table->entries[j].generation)) return -1;
+    }
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        struct mem_service_managed_mapping *m = &table->mappings[i];
+        bool holder_found = false;
+        MS_NUMBER(m->state, MEM_SERVICE_MANAGED_MAPPING_CLOSING);
+        if (!m->state) continue;
+        MS_NUMBER(m->id, UINT64_MAX);
+        MS_NUMBER(m->generation, UINT64_MAX);
+        MS_STRING(m->key);
+        MS_STRING(m->session_id);
+        if (!m->id || m->id >= table->next_mapping_id) return -1;
+        for (j = 0; j < i; ++j)
+            if (table->mappings[j].state && table->mappings[j].id == m->id)
+                return -1;
+        for (j = 0; j < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++j) {
+            const struct mem_service_managed_allocation *a = &table->entries[j];
+            if (!a->in_use || strcmp(a->key, m->key) ||
+                a->generation != m->generation) continue;
+            for (k = 0; k < a->holder_count; ++k)
+                if (!strcmp(a->holders[k].session_id, m->session_id))
+                    holder_found = true;
+        }
+        if (!holder_found) return -1;
+    }
+#undef MS_NUMBER
+#undef MS_STRING
+    checksum = io->checksum;
+    {
+        const uint64_t expected = checksum;
+        if (mem_service_managed_store_number(io, &checksum) != 0 ||
+            checksum != expected) return -1;
+    }
+    return 0;
+}
+
+static bool mem_service_has_managed_checkpoint(const struct mem_service *svc)
+{
+    return svc->managed.next_generation != 1 ||
+           svc->managed.next_mapping_id != 1 || svc->managed_recovery_required;
+}
+
+static int mem_service_managed_store_checkpoint(
+    FILE *file, const struct mem_service_managed_table *input,
+    struct mem_service_managed_table *output, bool *recovery)
+{
+    bool reading = output != NULL;
+    struct mem_service_managed_table *scratch = calloc(1, sizeof(*scratch));
+    struct mem_service_managed_store_io io = {
+        .file = file, .reading = reading,
+        .checksum = UINT64_C(14695981039346656037),
+    };
+    bool required = *recovery;
+    size_t i;
+    int rc;
+    if (scratch == NULL) return -1;
+    if (!reading) *scratch = *input;
+    rc = mem_service_managed_store_table(&io, scratch, &required);
+    if (rc == 0 && reading) {
+        /* Persisted identities do not prove any live provider or CPU mapping.
+         * Keep all obligations; ordinary cleanup cannot revive the payload. */
+        for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+            struct mem_service_managed_allocation *a = &scratch->entries[i];
+            if (!a->in_use || a->state == MEM_SERVICE_MANAGED_STATE_RETIRED)
+                continue;
+            if (a->state != MEM_SERVICE_MANAGED_STATE_QUARANTINED)
+                scratch->quarantine_events++;
+            a->state = MEM_SERVICE_MANAGED_STATE_QUARANTINED;
+        }
+        *output = *scratch;
+        *recovery = true;
+    }
+    free(scratch);
+    return rc;
+}
+
 static int mem_service_load_store(struct mem_service *svc,
                                   const char *store_path,
-                                  bool *legacy_schema_out)
+                                  bool *legacy_schema_out,
+                                  bool *managed_checkpoint_out)
 {
     FILE *file;
-    char line[512];
+    char line[MEM_SERVICE_IDEMPOTENCY_RESPONSE_LEN + 32U];
     struct mem_service_store_import_state state;
     bool saw_schema_version = false;
+    bool managed_checkpoint = false;
+    bool managed_complete = false;
+
+    *managed_checkpoint_out = false;
 
     if (legacy_schema_out != NULL) {
         *legacy_schema_out = false;
@@ -3870,7 +4137,27 @@ static int mem_service_load_store(struct mem_service *svc,
         return -1;
     }
     mem_service_trim_line(line);
-    if (strcmp(line, MEM_SERVICE_HISTORY_STORE_MAGIC) == 0) {
+    managed_checkpoint = strcmp(line, MEM_SERVICE_MANAGED_STORE_MAGIC) == 0;
+    if (managed_checkpoint) {
+        uint64_t history_enabled = 0;
+        if (mem_service_read_history_checkpoint(file, "replay_history_enabled",
+                &history_enabled) != 0 || history_enabled > 1 ||
+            mem_service_managed_store_checkpoint(file, NULL, &svc->managed,
+                &svc->managed_recovery_required) != 0) {
+            fclose(file);
+            return -1;
+        }
+        if (history_enabled) {
+            if (mem_service_read_history_checkpoint(file, "replay_history_count",
+                    &svc->replay_history_count) != 0 ||
+                mem_service_read_history_checkpoint(file, "replay_history_checksum",
+                    &svc->replay_history_checksum) != 0 ||
+                mem_service_history_open(svc, store_path, false) != 0) {
+                fclose(file);
+                return -1;
+            }
+        }
+    } else if (strcmp(line, MEM_SERVICE_HISTORY_STORE_MAGIC) == 0) {
         if (mem_service_read_history_checkpoint(file, "replay_history_count",
                 &svc->replay_history_count) != 0 ||
             mem_service_read_history_checkpoint(file, "replay_history_checksum",
@@ -3888,6 +4175,11 @@ static int mem_service_load_store(struct mem_service *svc,
     memset(&state, 0, sizeof(state));
     while (fgets(line, sizeof(line), file) != NULL) {
         mem_service_trim_line(line);
+        if (managed_checkpoint && !state.in_record && !state.in_idempotency &&
+            !state.in_audit && !strcmp(line, "managed_store_complete=1")) {
+            managed_complete = true;
+            break;
+        }
         if (line[0] == '\0') {
             continue;
         }
@@ -3911,10 +4203,16 @@ static int mem_service_load_store(struct mem_service *svc,
             return -1;
         }
     }
+    if ((managed_checkpoint &&
+        (!managed_complete || !saw_schema_version || fgetc(file) != EOF)) || ferror(file)) {
+        fclose(file);
+        return -1;
+    }
     fclose(file);
     if (legacy_schema_out != NULL && !saw_schema_version) {
         *legacy_schema_out = true;
     }
+    *managed_checkpoint_out = managed_checkpoint;
     return state.in_record || state.in_idempotency || state.in_audit ? -1 : 0;
 }
 
@@ -3971,10 +4269,12 @@ static int mem_service_load_durable_store(struct mem_service *svc,
                                           const char *store_path)
 {
     bool legacy_schema = false;
+    bool managed_checkpoint = false;
     char history_path[512];
     struct stat history_stat;
 
-    if (mem_service_load_store(svc, store_path, &legacy_schema) != 0) {
+    if (mem_service_load_store(svc, store_path, &legacy_schema,
+                               &managed_checkpoint) != 0) {
         mem_service_history_close(svc);
         return -1;
     }
@@ -3983,9 +4283,22 @@ static int mem_service_load_durable_store(struct mem_service *svc,
         (mem_service_history_path(store_path, history_path, sizeof(history_path)) != 0 ||
          lstat(history_path, &history_stat) == 0 || errno != ENOENT))
         return -1;
-    if (mem_service_load_journal(svc, store_path) != 0) {
+    /* This format commits state and replies in one atomic snapshot. Any
+     * legacy journal predates that snapshot and cannot override it. */
+    if (!managed_checkpoint && mem_service_load_journal(svc, store_path) != 0) {
         mem_service_history_close(svc);
         return -1;
+    }
+    if (!managed_checkpoint) {
+        size_t i;
+        /* Old stores cannot reconstruct missing allocation ownership. Do not
+         * reinterpret their successful managed replies as a fresh namespace. */
+        for (i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
+            const struct mem_service_idempotency_record *r = &svc->idempotency_records[i];
+            if (r->in_use && r->operation >= MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT &&
+                r->operation <= MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION)
+                svc->managed_recovery_required = true;
+        }
     }
     if (legacy_schema &&
         (mem_service_save_store(svc, store_path) != 0 ||
@@ -4080,6 +4393,15 @@ static int mem_service_save_record(FILE *file, const struct mem_service_record *
                 record->object_backend_block_bytes,
                 record->object_backend_block_checksum) < 0) {
         return -1;
+    }
+    if (record->kind == MEM_SERVICE_RECORD_MANAGED_VIEW) {
+        char hex[513];
+        if (mem_service_reference_encode_hex(&record->managed_ref, hex, sizeof(hex)) != 0 ||
+            fprintf(file, "managed_reference_part0=%.256s\n"
+                          "managed_reference_part1=%.256s\n"
+                          "managed_reference_checksum=%u\n",
+                    hex, hex + 256, mem_service_wire_checksum(hex, 512)) < 0)
+            return -1;
     }
     for (i = 0; i < record->member_count && i < MEM_SERVICE_MAX_GROUP_MEMBERS; ++i) {
         if (fprintf(file, "member%u=%s\n", i, record->member_block_hashes[i]) < 0) {
@@ -4292,6 +4614,8 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
     size_t i;
     uint64_t first_sequence = 1;
     uint64_t sequence;
+    bool managed_checkpoint = mem_service_has_managed_checkpoint(svc);
+    bool recovery = svc->managed_recovery_required;
 
     if (store_path == NULL || store_path[0] == '\0') {
         return 0;
@@ -4307,10 +4631,21 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
     if (file == NULL) {
         return -1;
     }
+    if (managed_checkpoint &&
+        (fprintf(file, "%s\nreplay_history_enabled=%u\n",
+                 MEM_SERVICE_MANAGED_STORE_MAGIC,
+                 svc->replay_history_enabled ? 1U : 0U) < 0 ||
+         mem_service_managed_store_checkpoint(file, &svc->managed, NULL,
+                                              &recovery) != 0)) {
+        fclose(file);
+        unlink(tmp_path);
+        return -1;
+    }
     if (svc->replay_history_enabled &&
-        fprintf(file, "%s\nreplay_history_count=%" PRIu64
+        fprintf(file, "%sreplay_history_count=%" PRIu64
                 "\nreplay_history_checksum=%" PRIu64 "\n",
-                MEM_SERVICE_HISTORY_STORE_MAGIC, svc->replay_history_count,
+                managed_checkpoint ? "" : MEM_SERVICE_HISTORY_STORE_MAGIC "\n",
+                svc->replay_history_count,
                 svc->replay_history_checksum) < 0) {
         fclose(file);
         unlink(tmp_path);
@@ -4322,7 +4657,8 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
                 "record_count=%zu\n"
                 "audit_next_sequence=%" PRIu64 "\n"
                 "audit_event_count=%" PRIu64 "\n",
-                svc->replay_history_enabled ? "" : MEM_SERVICE_STORE_MAGIC "\n",
+                (managed_checkpoint || svc->replay_history_enabled)
+                    ? "" : MEM_SERVICE_STORE_MAGIC "\n",
                 MEM_SERVICE_STORE_SCHEMA_VERSION,
                 svc->record_count,
                 svc->audit_next_sequence,
@@ -4357,6 +4693,11 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
             unlink(tmp_path);
             return -1;
         }
+    }
+    if (managed_checkpoint && fputs("managed_store_complete=1\n", file) == EOF) {
+        fclose(file);
+        unlink(tmp_path);
+        return -1;
     }
     if (fflush(file) != 0 || fsync(fileno(file)) != 0) {
         fclose(file);
@@ -10536,6 +10877,11 @@ static enum mem_service_wire_status mem_service_export_snapshot(struct mem_servi
                  "status=unsupported\nreason=external_replay_history_required\n");
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
+    if (mem_service_has_managed_checkpoint(svc)) {
+        snprintf(response, response_len,
+                 "status=unsupported\nreason=managed_checkpoint_required\n");
+        return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
+    }
     if (response_len == 0) {
         return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
     }
@@ -10617,6 +10963,11 @@ static enum mem_service_wire_status mem_service_export_snapshot_page(
     bool complete = true;
     bool stopped_on_capacity = false;
 
+    if (mem_service_has_managed_checkpoint(svc)) {
+        snprintf(response, response_len,
+                 "status=unsupported\nreason=managed_checkpoint_required\n");
+        return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
+    }
     if (response_len <= MEM_SERVICE_SNAPSHOT_PAGE_HEADER_RESERVE) {
         return MEM_SERVICE_WIRE_STATUS_CAPACITY_EXCEEDED;
     }
@@ -10695,7 +11046,7 @@ static bool mem_service_has_managed_identity(const struct mem_service *svc)
 {
     size_t i;
 
-    if (svc->replay_history_enabled) return true;
+    if (svc->replay_history_enabled || mem_service_has_managed_checkpoint(svc)) return true;
     for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
         if (svc->managed.entries[i].in_use)
             return true;
@@ -13680,6 +14031,7 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
     bool audit_retention_pruned = false;
     bool checkpoint_retention_pruned = false;
     bool record_retention_pruned = false;
+    uint64_t quarantine_before = svc->managed.quarantine_events;
     enum mem_service_wire_status status;
     struct mem_service_provider_directory_poll directory_poll =
         mem_service_managed_directory_poll(svc, start_ms);
@@ -13693,7 +14045,18 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
      * Setting idempotency_handled skips dispatch below while leaving
      * pending_idempotency NULL so no outcome is recorded.
      */
-    if (mem_service_operation_gated_managed_data_op(operation, payload) &&
+    if (svc->managed_store_failed &&
+        operation != MEM_SERVICE_WIRE_OP_HEALTH &&
+        operation != MEM_SERVICE_WIRE_OP_READY &&
+        operation != MEM_SERVICE_WIRE_OP_STATUS &&
+        operation != MEM_SERVICE_WIRE_OP_ALLOCATION_STATS &&
+        operation != MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION &&
+        operation != MEM_SERVICE_WIRE_OP_PROVIDER_STATUS) {
+        snprintf(response, response_len,
+                 "status=internal\nreason=managed_store_write_uncertain\n");
+        status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        idempotency_handled = true;
+    } else if (mem_service_operation_gated_managed_data_op(operation, payload) &&
         svc->managed_recovery_required &&
         operation != MEM_SERVICE_WIRE_OP_RELEASE_OBJECT &&
         operation != MEM_SERVICE_WIRE_OP_RETIRE_OBJECT) {
@@ -13821,7 +14184,24 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
         audit_retention_pruned =
             mem_service_apply_audit_retention(svc, limits->max_audit_events);
     }
-    if (audit_appended && store_path != NULL &&
+    if (store_path != NULL && mem_service_has_managed_checkpoint(svc)) {
+        /* One atomic checkpoint owns both resource state and exact replies.
+         * The legacy reply-only journal must never commit ahead of allocation
+         * state. The single dispatch domain prevents poll from handing out an
+         * intent until this checkpoint has completed. */
+        if (!svc->managed_store_failed &&
+            (audit_appended || quarantine_before != svc->managed.quarantine_events ||
+             operation == MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION ||
+             operation == MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION) &&
+            mem_service_save_store(svc, store_path) != 0) {
+            svc->managed_store_failed = true;
+            svc->managed_recovery_required = true;
+            svc->durable_ready = false;
+            status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+            snprintf(response, response_len,
+                     "status=internal\nreason=managed_store_write_uncertain\n");
+        }
+    } else if (audit_appended && store_path != NULL &&
         (mem_service_append_journal(store_path,
                                     pending_idempotency,
                                     audit_event) != 0 ||
@@ -13864,7 +14244,10 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                 "mem_service retention: compact_journal failed operation=%u\n",
                 (unsigned int)operation);
     }
+    /* Managed snapshots already include retention above. Never retry a
+     * potentially committed write through the legacy retention path. */
     if (checkpoint_retention_pruned && store_path != NULL &&
+        !mem_service_has_managed_checkpoint(svc) &&
         (mem_service_save_store(svc, store_path) != 0 ||
          mem_service_compact_journal_now(store_path) != 0)) {
         fprintf(stderr,
@@ -13872,6 +14255,7 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
                 (unsigned int)operation);
     }
     if (record_retention_pruned && store_path != NULL &&
+        !mem_service_has_managed_checkpoint(svc) &&
         (mem_service_save_store(svc, store_path) != 0 ||
          mem_service_compact_journal_now(store_path) != 0)) {
         fprintf(stderr,

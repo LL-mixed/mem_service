@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+managed store 候选增加版本化完整资源身份和 V2 绑定持久化，重启后保持隔离、
+等待实际对账，不能直接恢复 payload 访问。旧二进制拒绝新磁盘格式；原 wire
+snapshot 导出/覆盖不能替代该恢复域。本次 core 改动须重新构建服务，不改变
+安装 client record/wire ABI，也不改变 DS4 的 transfer 热路径。
+
 managed daemon 新增运行期 provider 失联隔离，重新注册不能恢复旧分配；
 managed 数据请求可能返回 managed_reconciliation_required，已有映射清理和
 引用释放仍执行原事务检查。core 新增失联状态迁移 API，现有公开结构、wire、

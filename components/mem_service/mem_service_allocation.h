@@ -48,10 +48,10 @@
  * - QUARANTINED isolates resources whose rollback could not be confirmed;
  *   they are counted separately in stats and never reused.
  *
- * Durability: the table is volatile in M1.1. Durable restore of managed
- * allocations lands together with the provider-backed reserve/release in
- * M1.2; a daemon restart therefore starts with an empty managed table and
- * zero backing (fail-closed for data operations).
+ * Durability: the daemon checkpoints identities, holders and mapping
+ * transactions through its versioned store. Restored nonterminal entries
+ * remain quarantined pending provider reconciliation. Process backing
+ * callbacks, registrations and mapping pointers are never restored.
  *
  * Backing: reserve/release are delegated either to an in-process backing
  * provider interface (test fixtures) or to the bound home provider

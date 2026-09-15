@@ -10,6 +10,12 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+managed store 候选持久化完整 allocation、holder、mapping、代际及 V2 绑定，
+恢复后保留隔离资源并报告 managed_recovery_required。磁盘 magic 独立升级，
+旧服务拒绝读取；原 wire snapshot 导出/覆盖不能替代该恢复域。写入不确定后
+停止状态变更，provider/kernel 对账仍须实际验证。core 消费者必须重新链接，
+安装 client/wire ABI 不变；本段不表示故障恢复矩阵已经验收。
+
 运行期 provider 失联会隔离该 home 的未终结分配，以及尚无节点归属的活跃 holder
 所引用的其他 provider 分配；保留所有映射与引用，锁存 managed_recovery_required。
 重新注册不解除隔离。查询和已有 mapping 清理仍可执行，release/retire 不再被目录

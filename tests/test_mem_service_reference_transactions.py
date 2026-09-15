@@ -17,9 +17,9 @@ class ReferenceTransactionTests(unittest.TestCase):
         self.fixture = fixtures.MemServiceObjectSessionTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
-        daemon = self.fixture._start_active_object(logical_size=ALLOCATION_BYTES,
+        self.daemon = self.fixture._start_active_object(logical_size=ALLOCATION_BYTES,
             extra_config="record_retention=latest:1")
-        self.addCleanup(self.fixture._stop_server, daemon)
+        self.addCleanup(lambda: self.fixture._stop_server(self.daemon))
         self.serial = 0
         self.connect = self.fixture._connect
         self._holder("acquire", "producer")
@@ -27,6 +27,41 @@ class ReferenceTransactionTests(unittest.TestCase):
     def _nonce(self):
         self.serial += 1
         return f"reference-{self.serial}"
+
+    def test_restart_preserves_full_v2_view_without_reactivating_payload(self):
+        store = self.fixture.root / "references.store"
+        self.fixture._stop_server(self.daemon)
+        self.daemon = self.fixture._start_active_object(logical_size=ALLOCATION_BYTES,
+            extra_config=f"store={store}")
+        self._holder("acquire", "producer")
+        self._publish()
+        expected = self._reference()
+
+        def saved_reference():
+            self.assertIn("response_line=reference_hex=" + expected + "\n",
+                          store.read_text())
+            fields = fixtures._parse_kv(store.read_text())
+            return fields["managed_reference_part0"] + fields["managed_reference_part1"]
+
+        self.assertEqual(saved_reference(), expected)
+        self.fixture._stop_server(self.daemon)
+        self.daemon = self.fixture._start_home_daemon(extra_config=f"store={store}")
+        self._holder("release", "producer")  # rewrites the restored checkpoint
+        self.assertEqual(saved_reference(), expected)
+        self.fixture._stop_server(self.daemon)
+        self.daemon = self.fixture._start_home_daemon(extra_config=f"store={store}")
+        self.assertEqual(self.fixture._allocation_stats()["quarantined_objects"], "1")
+        self.assertEqual(self.fixture._allocation_stats()["live_refs"], "0")
+        self._transition("resolve", success=False)
+        self.fixture._stop_server(self.daemon)
+        damaged = store.read_text().replace("managed_reference_part0=", "managed_reference_part0=f", 1)
+        store.write_text(damaged)
+        run = subprocess.run(
+            [str(self.fixture.binary), "serve", "--config", str(self.fixture.root / "daemon.conf")],
+            capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("store load failed", run.stderr)
+        self.assertEqual(store.read_text(), damaged)
 
     def _holder(self, action, session):
         result = self.fixture._run_client(

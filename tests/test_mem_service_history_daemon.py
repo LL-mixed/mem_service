@@ -65,7 +65,8 @@ class HistoryDaemonTests(unittest.TestCase):
         self.assertGreaterEqual(int(stats["idempotency_history_records"]), 60, stats)
         self.assertLess(int(stats["idempotency_used"]), 64, stats)
         self.assertEqual(stats["idempotency_history_failed"], "0", stats)
-        self.assertEqual(self.store.read_text().splitlines()[0], "mem_service_store_history_v1")
+        self.assertEqual(self.store.read_text().splitlines()[0], "mem_service_store_managed_v1")
+        self.assertIn("replay_history_enabled=1\n", self.store.read_text())
         return stats
 
     def test_hundred_mapping_lifecycles_keep_original_replies_and_cleanup(self):
@@ -110,15 +111,16 @@ class HistoryDaemonTests(unittest.TestCase):
         self.store.rename(saved)
         self.store.mkdir()
         reply = self.holder("acquire", "after-checkpoint", success=False)
-        self.assertIn("replay_history_unavailable", reply)
+        self.assertIn("managed_store_write_uncertain", reply)
         after = self.fixture._allocation_stats()
         self.assertEqual(after["idempotency_used"], before["idempotency_used"])
         self.assertEqual(after["live_refs"], "0")
         self.store.rmdir()
         saved.rename(self.store)
-        self.holder("acquire", "after-checkpoint")
-        self.holder("release", "after-checkpoint-release")
-        self.assert_archived()
+        # Restoring the path cannot make an uncertain durable transition safe.
+        self.assertIn("managed_store_write_uncertain",
+                      self.holder("acquire", "after-checkpoint", success=False))
+        self.assertEqual(self.fixture._allocation_stats()["live_refs"], "0")
 
     def assert_restart_rejected(self):
         self.stop()
@@ -156,8 +158,8 @@ class HistoryDaemonTests(unittest.TestCase):
         self.assertIn("external_replay_history_required", export.stdout)
         self.stop()
         self.daemon = self.fixture._start_home_daemon(extra_config=f"store={self.store}")
-        # Runtime allocation entries are empty after restart. The persisted
-        # history itself must still block both full and paged replacement.
+        # Restored quarantined allocations and replay history both retain
+        # their identities; neither full nor paged restore may replace them.
         for padding in (0, 5000):
             snapshot = self.fixture._write_config(
                 f"restore-{padding}.snapshot",
