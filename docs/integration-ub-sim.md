@@ -10,6 +10,13 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+OBMM worker 的 state_file 改为版本化完整资源记录，每个阶段同步对象/provider
+身份、segment、export 回执及 descriptor。新增 provider CLI
+`inspect-allocation-state --config <path>`，只读核对完整日志及原配置身份；
+损坏、半写、旧格式或并发 writer 拒绝。结果明确 physical_state=unknown，
+不能据此恢复数据准入或删除日志。既有 state_file 仍阻止 worker 直接重启。
+该改动要求重建 managed worker，业务 SDK/wire 与 DS4 transfer 路径不变。
+
 managed store 候选持久化完整 allocation、holder、mapping、代际及 V2 绑定，
 恢复后保留隔离资源并报告 managed_recovery_required。磁盘 magic 独立升级，
 旧服务拒绝读取；原 wire snapshot 导出/覆盖不能替代该恢复域。写入不确定后

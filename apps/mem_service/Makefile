@@ -39,7 +39,7 @@ MEM_SERVICE_PROVIDER_OBMM_CLI := $(ROOT)/components/mem_service/providers/mem_se
 ifneq ($(strip $(GVA_MANAGER_ROOT)),)
 MEM_SERVICE_OBMM_WORKER_SRCS := $(ROOT)/components/mem_service/providers/mem_service_provider_obmm_worker.c $(GVA_MANAGER_ROOT)/gva_manager.c $(MEM_SERVICE_CLIENT) $(MEM_SERVICE_WIRE_CLIENT)
 MEM_SERVICE_OBMM_WORKER_FLAGS := -DMEM_SERVICE_OBMM_MANAGED_WORKER -I$(GVA_MANAGER_ROOT)
-MEM_SERVICE_OBMM_WORKER_HEADERS := $(GVA_MANAGER_ROOT)/gva_manager.h
+MEM_SERVICE_OBMM_WORKER_HEADERS := $(GVA_MANAGER_ROOT)/gva_manager.h $(ROOT)/components/mem_service/providers/mem_service_provider_obmm_worker_ledger.h
 endif
 MEM_SERVICE_OBMM_BUILD_CONFIG := $(ROOT)/out/mem_service/obmm-provider.build-config
 MEM_SERVICE_PROVIDER_ROCE := $(ROOT)/components/mem_service/providers/mem_service_provider_roce.c

@@ -12,28 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-struct worker_config {
-    char connect[256];
-    char node[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
-    char state[1024];
-    uint64_t incarnation;
-    uint64_t readiness_generation;
-    uint64_t allocation_granularity_bytes;
-    bool fast_allocation;
-};
-
-struct worker_reservation {
-    bool occupied;
-    bool export_no_backing;
-    char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
-    uint64_t generation;
-    struct obmm_gsva_segment_desc_v1 segment;
-    struct obmm_cmd_export exported;
-    struct mem_service_provider_descriptor descriptor;
-};
+#include "mem_service_provider_obmm_worker_ledger.h"
 
 enum worker_allocate_result {
     WORKER_ALLOCATE_ERROR = -1,
@@ -105,31 +88,45 @@ done:
     return result;
 }
 
-static int record_phase(int fd, uint64_t generation, const char *phase,
+static int record_phase(int fd, const struct worker_config *config,
+                         const struct mem_service_client_allocation *work,
+                         const struct worker_reservation *reservation,
+                         uint64_t generation, const char *phase,
                          uint64_t segment, uint64_t exported)
 {
-    char line[192];
-    int length = snprintf(line, sizeof(line),
-        "generation=%" PRIu64 " phase=%s segment=%" PRIu64 " export=%" PRIu64 "\n",
-        generation, phase, segment, exported);
+    struct worker_ledger_entry entry = {0};
+    unsigned char frame[WORKER_LEDGER_FRAME_BYTES];
+    off_t end = lseek(fd, 0, SEEK_END);
     size_t written = 0;
-    if (length < 0 || (size_t)length >= sizeof(line)) return -1;
-    printf("obmm-worker %s", line);
-    fflush(stdout);
-    while (written < (size_t)length) {
-        ssize_t n = write(fd, line + written, (size_t)length - written);
+    if (!config || !phase || strlen(phase) >= sizeof(entry.phase) ||
+        end < 0 || end % WORKER_LEDGER_FRAME_BYTES ||
+        (work && work->generation != generation)) return -1;
+    entry.sequence = (uint64_t)end / WORKER_LEDGER_FRAME_BYTES + 1;
+    entry.config = *config;
+    if (work) entry.work = *work;
+    if (reservation) entry.reservation = *reservation;
+    strcpy(entry.phase, phase);
+    if (ledger_encode(frame, &entry)) return -1;
+    while (written < sizeof(frame)) {
+        ssize_t n = write(fd, frame + written, sizeof(frame) - written);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return -1;
         written += (size_t)n;
     }
-    return fsync(fd);
+    if (fsync(fd)) return -1;
+    printf("obmm-worker generation=%" PRIu64 " phase=%s segment=%" PRIu64
+           " export=%" PRIu64 "\n", generation, phase, segment, exported);
+    fflush(stdout);
+    return 0;
 }
 
-static int create_state(const char *path)
+static int create_state(const struct worker_config *config)
 {
+    const char *path = config->state;
     char parent[1024];
     char *slash;
     int fd, directory;
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
 
     strcpy(parent, path);
     slash = strrchr(parent, '/');
@@ -138,15 +135,107 @@ static int create_state(const char *path)
     else *slash = 0;
     fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) return -1;
+    if (fcntl(fd, F_SETLK, &lock)) { close(fd); return -1; }
     directory = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (directory < 0 || fsync(directory) != 0 ||
-        record_phase(fd, 0, "worker-start", 0, 0) != 0) {
+        record_phase(fd, config, NULL, NULL, 0, "worker-start", 0, 0) != 0) {
         if (directory >= 0) close(directory);
         close(fd);
         return -1;
     }
     close(directory);
     return fd;
+}
+
+static int ledger_read_entry(int fd, uint64_t sequence,
+    const struct worker_config *config, struct worker_ledger_entry *entry)
+{
+    static const char *phases[] = {
+        "worker-start", "reserve-intent", "reserve-empty", "reserve-unknown",
+        "reserved", "export-no-backing", "export-unknown", "exported", "published",
+        "release-intent", "unexported", "retired", "reclaimed", "cancel-empty",
+        "cancel-confirmed", "capacity-reject-intent", "unbacked-retire-intent",
+        "unbacked-retired"
+    };
+    unsigned char frame[WORKER_LEDGER_FRAME_BYTES];
+    size_t received = 0, i;
+    while (received < sizeof(frame)) {
+        ssize_t n = read(fd, frame + received, sizeof(frame) - received);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        received += (size_t)n;
+    }
+    if (ledger_decode(frame, entry) || entry->sequence != sequence ||
+        strcmp(entry->config.node, config->node) ||
+        entry->config.incarnation != config->incarnation ||
+        entry->config.readiness_generation != config->readiness_generation ||
+        entry->config.allocation_granularity_bytes != config->allocation_granularity_bytes)
+        return -1;
+    for (i = 0; i < sizeof(phases) / sizeof(phases[0]); i++)
+        if (!strcmp(entry->phase, phases[i])) break;
+    if (i == sizeof(phases) / sizeof(phases[0])) return -1;
+    if (sequence == 1) {
+        if (i != 0 || entry->work.generation || entry->work.key[0] ||
+            entry->reservation.segment.segment_id || entry->reservation.exported.mem_id)
+            return -1;
+    } else if (!i || !entry->work.key[0] || !entry->work.generation ||
+               !entry->work.size_bytes || entry->work.capabilities != MEM_SERVICE_MANAGED_CAP_MAP)
+        return -1;
+    return 0;
+}
+
+int mem_service_provider_obmm_inspect_allocation_state(const char *config_path)
+{
+    struct worker_config config;
+    struct worker_ledger_entry entry;
+    struct stat before, after;
+    struct flock lock = {.l_type = F_RDLCK, .l_whence = SEEK_SET};
+    uint64_t count, sequence;
+    int fd, pass, result = 1;
+
+    if (read_config(config_path, &config)) return 2;
+    fd = open(config.state, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) goto done;
+    if (fcntl(fd, F_SETLK, &lock) || fstat(fd, &before) || !S_ISREG(before.st_mode) ||
+        before.st_size <= 0 || before.st_size % WORKER_LEDGER_FRAME_BYTES) goto done;
+    count = (uint64_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
+    /* Validate the entire file before emitting any resource inventory. */
+    for (pass = 0; pass < 2; pass++) {
+        if (lseek(fd, 0, SEEK_SET) != 0) goto done;
+        for (sequence = 1; sequence <= count; sequence++) {
+            size_t i;
+            if (ledger_read_entry(fd, sequence, &config, &entry)) goto done;
+            if (!pass) continue;
+            printf("obmm-worker-ledger: sequence=%" PRIu64 " phase=%s node=%s "
+                   "incarnation=%" PRIu64 " key=%s generation=%" PRIu64
+                   " logical_bytes=%" PRIu64 " alignment=%" PRIu64
+                   " segment=%" PRIu64 " epoch=%" PRIu64 " address=%" PRIu64
+                   " bytes=%" PRIu64 " export=%" PRIu64 " export_token=%u descriptor_hex=",
+                   sequence, entry.phase, entry.config.node, entry.config.incarnation,
+                   entry.work.key[0] ? entry.work.key : "-", entry.work.generation,
+                   entry.work.size_bytes, entry.work.alignment_bytes,
+                   (uint64_t)entry.reservation.segment.segment_id,
+                   (uint64_t)entry.reservation.segment.epoch,
+                   (uint64_t)entry.reservation.segment.home_va,
+                   (uint64_t)entry.reservation.segment.size,
+                   (uint64_t)entry.reservation.exported.mem_id,
+                   entry.reservation.exported.tokenid);
+            for (i = 0; i < entry.reservation.descriptor.len; i++)
+                printf("%02x", entry.reservation.descriptor.bytes[i]);
+            putchar('\n');
+        }
+        if (fstat(fd, &after) || before.st_size != after.st_size ||
+            before.st_mtime != after.st_mtime || before.st_ctime != after.st_ctime) goto done;
+    }
+    if (ferror(stdout)) goto done;
+    printf("obmm-worker-ledger: status=ok version=1 entries=%" PRIu64
+           " physical_state=unknown reconciliation_required=1\n", count);
+    result = 0;
+done:
+    if (fd >= 0) close(fd);
+    if (result) fprintf(stderr, "obmm-worker-ledger: status=failed physical_state=unknown "
+                        "reconciliation_required=1\n");
+    return result;
 }
 
 static int allocate_work(int device, int journal,
@@ -190,7 +279,8 @@ static int allocate_work(int device, int journal,
     /* The kernel owns interval selection and reuse. This zero request must
      * not be replaced by a second worker-side address allocator. */
     request.requested_home_va = 0;
-    if (record_phase(journal, work->generation, "reserve-intent", 0, 0)) return -1;
+    if (record_phase(journal, config, work, reservation,
+                     work->generation, "reserve-intent", 0, 0)) return -1;
     reservation->occupied = true;
     strcpy(reservation->key, work->key);
     reservation->generation = work->generation;
@@ -207,18 +297,21 @@ static int allocate_work(int device, int journal,
          * an interval. Lost output (EFAULT) and contradictory output remain
          * unknown, even if no segment ID is visible to this process. */
         if (errno == ENOSPC && !memcmp(&request.desc, &empty, sizeof(empty))) {
-            if (record_phase(journal, work->generation, "reserve-empty", 0, 0))
+            if (record_phase(journal, config, work, reservation,
+                             work->generation, "reserve-empty", 0, 0))
                 return WORKER_ALLOCATE_ERROR;
             memset(reservation, 0, sizeof(*reservation));
             return WORKER_ALLOCATE_CAPACITY;
         }
         reservation->segment = request.desc;
-        (void)record_phase(journal, work->generation, "reserve-unknown",
+        (void)record_phase(journal, config, work, reservation,
+                           work->generation, "reserve-unknown",
                            request.desc.segment_id, 0);
         return -1;
     }
     reservation->segment = request.desc;
-    if (record_phase(journal, work->generation, "reserved", request.desc.segment_id, 0)) return -1;
+    if (record_phase(journal, config, work, reservation,
+                     work->generation, "reserved", request.desc.segment_id, 0)) return -1;
     if (request.desc.home_va < aperture->base ||
         request.desc.home_va - aperture->base > aperture->size ||
         request.desc.size > aperture->size - (request.desc.home_va - aperture->base)) return -1;
@@ -228,19 +321,26 @@ static int allocate_work(int device, int journal,
         reservation->exported = exported;
         if (export_result == 1) {
             reservation->export_no_backing = true;
-            if (record_phase(journal, work->generation, "export-no-backing",
+            if (record_phase(journal, config, work, reservation,
+                             work->generation, "export-no-backing",
                              request.desc.segment_id, 0)) return -1;
             return WORKER_ALLOCATE_BACKING_EMPTY;
         }
-        (void)record_phase(journal, work->generation, "export-unknown",
+        (void)record_phase(journal, config, work, reservation,
+                           work->generation, "export-unknown",
                            request.desc.segment_id, exported.mem_id);
         return -1;
     }
     reservation->exported = exported;
-    if (record_phase(journal, work->generation, "exported",
-                      request.desc.segment_id, exported.mem_id) ||
-        mem_service_provider_obmm_encode_gsva(&request.desc, &exported, &descriptor)) return -1;
+    if (mem_service_provider_obmm_encode_gsva(&request.desc, &exported, &descriptor)) {
+        (void)record_phase(journal, config, work, reservation,
+                           work->generation, "export-unknown",
+                           request.desc.segment_id, exported.mem_id);
+        return -1;
+    }
     reservation->descriptor = descriptor;
+    if (record_phase(journal, config, work, reservation, work->generation, "exported",
+                     request.desc.segment_id, exported.mem_id)) return -1;
     if (mem_service_client_publish_allocation(client, work->key, config->node,
             config->incarnation, work->generation, descriptor.bytes, descriptor.len,
             request.desc.home_va, request.desc.size, &published, &status) ||
@@ -250,7 +350,7 @@ static int allocate_work(int device, int journal,
         published.address != request.desc.home_va || published.address_len != request.desc.size ||
         published.descriptor_len != descriptor.len ||
         memcmp(published.descriptor, descriptor.bytes, descriptor.len)) return -1;
-    if (record_phase(journal, work->generation, "published",
+    if (record_phase(journal, config, work, reservation, work->generation, "published",
                       request.desc.segment_id, exported.mem_id)) return -1;
     printf("obmm-worker generation=%" PRIu64 " state=%s address=%#" PRIx64
            " size=%" PRIu64 "\n", work->generation, published.state,
@@ -278,22 +378,24 @@ static int reclaim_work(int device, int journal,
         work->descriptor_len != reservation->descriptor.len ||
         !work->descriptor_len || work->descriptor_len > sizeof(work->descriptor) ||
         memcmp(work->descriptor, reservation->descriptor.bytes, work->descriptor_len)) return -1;
-    if (record_phase(journal, work->generation, "release-intent",
+    if (record_phase(journal, config, work, reservation, work->generation, "release-intent",
                      reservation->segment.segment_id, reservation->exported.mem_id) ||
         gva_manager_unexport_segment(device, &reservation->segment, &reservation->exported) ||
-        record_phase(journal, work->generation, "unexported",
+        record_phase(journal, config, work, reservation, work->generation, "unexported",
                      reservation->segment.segment_id, reservation->exported.mem_id)) return -1;
     retire.version = OBMM_GSVA_ABI_VERSION;
     retire.segment_id = reservation->segment.segment_id;
     retire.epoch = reservation->segment.epoch;
     retire.timeout_ms = 5000;
     if (gva_manager_retire_segment(device, &retire) ||
-        record_phase(journal, work->generation, "retired", retire.segment_id, 0)) return -1;
+        record_phase(journal, config, work, reservation,
+                     work->generation, "retired", retire.segment_id, 0)) return -1;
     if (mem_service_client_reclaim_allocation(client, work->key, config->node,
             config->incarnation, work->generation, true, &reclaimed, &status) ||
         status != MEM_SERVICE_WIRE_STATUS_OK || strcmp(reclaimed.state, "retired") ||
         reclaimed.generation != work->generation ||
-        record_phase(journal, work->generation, "reclaimed", retire.segment_id, 0)) return -1;
+        record_phase(journal, config, work, reservation,
+                     work->generation, "reclaimed", retire.segment_id, 0)) return -1;
     printf("obmm-worker generation=%" PRIu64 " state=retired size=%" PRIu64 "\n",
            work->generation, (uint64_t)reservation->segment.size);
     fflush(stdout);
@@ -311,12 +413,13 @@ static int cancel_unreserved_work(int journal, const struct worker_config *confi
         work->address || work->address_len || !work->generation ||
         strcmp(work->home_node, config->node) ||
         work->provider_incarnation != config->incarnation) return -1;
-    if (record_phase(journal, work->generation, "cancel-empty", 0, 0) ||
+    if (record_phase(journal, config, work, NULL, work->generation, "cancel-empty", 0, 0) ||
         mem_service_client_reclaim_allocation(client, work->key, config->node,
             config->incarnation, work->generation, true, &reclaimed, &status) ||
         status != MEM_SERVICE_WIRE_STATUS_OK || strcmp(reclaimed.state, "retired") ||
         reclaimed.generation != work->generation ||
-        record_phase(journal, work->generation, "cancel-confirmed", 0, 0)) return -1;
+        record_phase(journal, config, work, NULL,
+                     work->generation, "cancel-confirmed", 0, 0)) return -1;
     return 0;
 }
 
@@ -339,11 +442,15 @@ static int cancel_unbacked_work(int journal, const struct worker_config *config,
     length = snprintf(operation, sizeof(operation), "obmm-capacity-%" PRIu64 "-%" PRIu64,
                       config->incarnation, work->generation);
     if (length < 0 || (size_t)length >= sizeof(operation) ||
-        record_phase(journal, work->generation, "capacity-reject-intent", 0, 0) ||
+        record_phase(journal, config, work, NULL,
+                     work->generation, "capacity-reject-intent", 0, 0) ||
         mem_service_client_retire_object(client, work->key, operation, true,
                                         work->generation, &cancelled, &status) ||
         status != MEM_SERVICE_WIRE_STATUS_OK ||
         strcmp(cancelled.key, work->key) || cancelled.generation != work->generation ||
+        cancelled.size_bytes != work->size_bytes ||
+        cancelled.alignment_bytes != work->alignment_bytes ||
+        cancelled.capabilities != work->capabilities ||
         cancel_unreserved_work(journal, config, client, &cancelled)) return -1;
     printf("obmm-worker generation=%" PRIu64 " state=retired reason=%s "
            "size=%" PRIu64 " alignment=%" PRIu64 "\n",
@@ -375,9 +482,11 @@ static int rollback_unbacked_work(int device, int journal, const struct worker_c
     retire.segment_id = reservation->segment.segment_id;
     retire.epoch = reservation->segment.epoch;
     retire.timeout_ms = 5000;
-    if (record_phase(journal, work->generation, "unbacked-retire-intent", retire.segment_id, 0) ||
+    if (record_phase(journal, config, work, reservation,
+                     work->generation, "unbacked-retire-intent", retire.segment_id, 0) ||
         gva_manager_retire_segment(device, &retire) ||
-        record_phase(journal, work->generation, "unbacked-retired", retire.segment_id, 0) ||
+        record_phase(journal, config, work, reservation,
+                     work->generation, "unbacked-retired", retire.segment_id, 0) ||
         cancel_unbacked_work(journal, config, client, work, "backing_allocation")) return -1;
     memset(reservation, 0, sizeof(*reservation));
     return 0;
@@ -411,7 +520,7 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
         !(aperture.flags & OBMM_GSVA_APERTURE_F_ACTIVE)) goto done;
     reservations = calloc(MEM_SERVICE_MANAGED_MAX_ALLOCATIONS, sizeof(*reservations));
     if (!reservations) goto done;
-    journal = create_state(config.state);
+    journal = create_state(&config);
     if (journal < 0) goto done;
     printf("obmm-worker address_reuse=kernel-confirmed home_policy=single-owner "
            "forced_revoke=unsupported recovery=quarantine\n");

@@ -1,5 +1,9 @@
 # ds4 使用侧适配手册
 
+OBMM managed worker 新增版本化资源日志及 `inspect-allocation-state` 运维
+命令，供平台恢复对账使用。该 opt-in provider 命令不改变中立 SDK/wire、
+RoCE/TCP 或 DS4 transfer 路径，也不授予映射或解除隔离。
+
 managed store 候选增加版本化完整资源身份和 V2 绑定持久化，重启后保持隔离、
 等待实际对账，不能直接恢复 payload 访问。旧二进制拒绝新磁盘格式；原 wire
 snapshot 导出/覆盖不能替代该恢复域。本次 core 改动须重新构建服务，不改变

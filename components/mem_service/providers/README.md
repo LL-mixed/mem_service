@@ -76,6 +76,21 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+### Worker 持久资源记录
+
+`serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
+每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
+segment 身份、实际 export 回执和已构造的 opaque descriptor；不序列化指针。
+记录带严格递增序号、零保留区和校验和，每条记录同步后才进入下一资源操作。
+写入或同步不确定后停止 worker，保留原文件；不得删除半写尾部或推断资源为空。
+旧文本日志继续拒绝作为可恢复记录。stdout 的原阶段行保持兼容。
+
+`inspect-allocation-state --config <path>` 只读校验完整日志，核对配置中的原
+node/incarnation 和粒度，逐条展示资源身份；损坏、截断、并发写入及格式不匹配
+返回失败。该命令不登记 provider、不打开设备、不恢复指针或解除隔离；
+`physical_state=unknown` 明确表示日志校验尚未完成 kernel/provider 对账。
+worker 继续拒绝使用已有 state_file 启动，直到独立恢复协议证明可安全处理资源。
+
 ### 固定地址子区间
 
 严格 GSVA 的固定地址请求以视图首字节为 requested_address，必须精确等于
