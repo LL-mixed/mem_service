@@ -21,6 +21,7 @@ int main(int argc, char **argv)
     in.config.incarnation = UINT64_MAX - 1;
     in.config.readiness_generation = 37;
     in.config.allocation_granularity_bytes = 2097152;
+    for (i = 0; i < 16; i++) in.config.kernel_instance[i] = (unsigned char)(i + 1);
     strcpy(in.work.key, "object-identity");
     in.work.generation = UINT64_C(0x1234567887654321);
     in.work.size_bytes = 65536;
@@ -47,13 +48,14 @@ int main(int argc, char **argv)
     in.reservation.descriptor.len = 96;
     for (i = 0; i < 96; i++) in.reservation.descriptor.bytes[i] = (unsigned char)(i * 17);
     assert(!ledger_encode(frame, &in));
-    assert(!memcmp(frame, "obmm-worker-ledger-v1", sizeof("obmm-worker-ledger-v1") - 1));
+    assert(!memcmp(frame, "obmm-worker-ledger-v2", sizeof("obmm-worker-ledger-v2") - 1));
     if (!strcmp(argv[2], "roundtrip")) {
         assert(!ledger_decode(frame, &out));
         assert(out.sequence == in.sequence);
         assert(!strcmp(out.phase, in.phase));
         assert(!strcmp(out.config.node, in.config.node));
         assert(out.config.incarnation == in.config.incarnation);
+        assert(!memcmp(out.config.kernel_instance, in.config.kernel_instance, 16));
         assert(!strcmp(out.work.key, in.work.key));
         assert(out.work.generation == in.work.generation);
         assert(!memcmp(&out.reservation.segment, &in.reservation.segment,
@@ -62,6 +64,13 @@ int main(int argc, char **argv)
                        sizeof(in.reservation.exported)));
         assert(!memcmp(out.reservation.descriptor.bytes, in.reservation.descriptor.bytes, 96));
         assert(!ledger_encode(copy, &out) && !memcmp(copy, frame, sizeof(frame)));
+    } else if (!strcmp(argv[2], "birth-identity")) {
+        memcpy(copy, frame, sizeof(frame));
+        memcpy(copy, "obmm-worker-ledger-v1", sizeof("obmm-worker-ledger-v1") - 1);
+        reseal(copy);
+        assert(ledger_decode(copy, &out));
+        memset(in.config.kernel_instance, 0, 16);
+        assert(ledger_encode(copy, &in));
     } else if (!strcmp(argv[2], "corruption")) {
         for (i = 0; i < sizeof(frame); i++) {
             memcpy(copy, frame, sizeof(frame));

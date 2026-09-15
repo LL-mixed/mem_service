@@ -1,5 +1,8 @@
 # ds4 使用侧适配手册
 
+OBMM worker 日志 v2 增加内核实例身份及 `reconcile-allocation-state` 只读
+核对入口，需要匹配的 OBMM 平台；不改变 DS4、RoCE/TCP 或安装 client ABI。
+
 OBMM managed worker 新增版本化资源日志及 `inspect-allocation-state` 运维
 命令，供平台恢复对账使用。该 opt-in provider 命令不改变中立 SDK/wire、
 RoCE/TCP 或 DS4 transfer 路径，也不授予映射或解除隔离。

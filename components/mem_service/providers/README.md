@@ -78,6 +78,16 @@ or service readiness.
 
 ### Worker 持久资源记录
 
+日志 v2 在首次资源操作前通过平台枚举接口取得 16-byte kernel_instance，
+并在所有帧中保存同一值。零身份、跨帧身份变化及旧 v1 格式均拒绝；旧日志
+保留供原版本离线检查，不能凭当前内核补写出生身份。平台不支持枚举或返回
+无效结果时，worker 在创建日志和刷新 provider 前停止。
+`reconcile-allocation-state --config <path>` 只读关联完整日志与一致内核库存，
+按对象 generation 保留最后记录及最后已知资源身份，逐项比较完整 segment
+与当前 export 绑定。缺失、不同内核实例、忙碌或身份冲突均拒绝；库存中未被
+日志认领的 segment 单独计数，禁止擅自回收。该阶段不修改 service/kernel，
+不恢复 worker、不提供 fencing 证明，成功匹配仍保持 reconciliation_required。
+
 `serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
 每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
 segment 身份、实际 export 回执和已构造的 opaque descriptor；不序列化指针。

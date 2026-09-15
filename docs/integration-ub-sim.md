@@ -10,6 +10,11 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+worker 日志 v2 要求平台版本化 segment 枚举接口，并在分配前持久保存内核
+实例身份。SDK 的 vendored UAPI 同步平台对应声明，必须匹配支持该 ioctl 的
+内核及 gva_manager。旧日志不自动升级；新增 `reconcile-allocation-state`
+只读比较资源身份，不解除隔离或恢复 worker，业务 SDK/wire 不变。
+
 OBMM worker 的 state_file 改为版本化完整资源记录，每个阶段同步对象/provider
 身份、segment、export 回执及 descriptor。新增 provider CLI
 `inspect-allocation-state --config <path>`，只读核对完整日志及原配置身份；

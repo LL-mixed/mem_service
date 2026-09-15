@@ -26,9 +26,9 @@ class RepositoryContractTests(unittest.TestCase):
             "common/obmm_common.h":
                 "1bcb8627b9712c274256e63b0abe20f51ebad8db2bbbeea089b602f7fd62dc2c",
             "kernel_ub/include/uapi/ub/gsva.h":
-                "eddda83cb2d3e6da65ce7afa81bcb29466115428cd5dc50a4fd0b5aa8676f8a6",
+                "65a58c319f284e920ce5fdaab5b7d695a1dfec037ececaeb85b69f896f6e42ab",
             "kernel_ub/include/uapi/ub/obmm.h":
-                "cbf21ea39a4f6256379d656d68f1bf4158077cc73314bf7a11332aabb82218f9",
+                "a39b3cf927c7a2c3a385dd44a39b2cb880075aa53090bb0b85ee01108be801b9",
         }
 
         for relative_path, expected in expected_files.items():

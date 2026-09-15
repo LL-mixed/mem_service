@@ -148,7 +148,7 @@ static int create_state(const struct worker_config *config)
 }
 
 static int ledger_read_entry(int fd, uint64_t sequence,
-    const struct worker_config *config, struct worker_ledger_entry *entry)
+    struct worker_config *config, struct worker_ledger_entry *entry)
 {
     static const char *phases[] = {
         "worker-start", "reserve-intent", "reserve-empty", "reserve-unknown",
@@ -178,8 +178,10 @@ static int ledger_read_entry(int fd, uint64_t sequence,
         if (i != 0 || entry->work.generation || entry->work.key[0] ||
             entry->reservation.segment.segment_id || entry->reservation.exported.mem_id)
             return -1;
+        memcpy(config->kernel_instance, entry->config.kernel_instance, 16);
     } else if (!i || !entry->work.key[0] || !entry->work.generation ||
-               !entry->work.size_bytes || entry->work.capabilities != MEM_SERVICE_MANAGED_CAP_MAP)
+               !entry->work.size_bytes || entry->work.capabilities != MEM_SERVICE_MANAGED_CAP_MAP ||
+               memcmp(config->kernel_instance, entry->config.kernel_instance, 16))
         return -1;
     return 0;
 }
@@ -228,13 +230,159 @@ int mem_service_provider_obmm_inspect_allocation_state(const char *config_path)
             before.st_mtime != after.st_mtime || before.st_ctime != after.st_ctime) goto done;
     }
     if (ferror(stdout)) goto done;
-    printf("obmm-worker-ledger: status=ok version=1 entries=%" PRIu64
-           " physical_state=unknown reconciliation_required=1\n", count);
+    printf("obmm-worker-ledger: status=ok version=2 entries=%" PRIu64
+           " physical_state=unknown reconciliation_required=1 kernel_instance=", count);
+    for (pass = 0; pass < 16; pass++) printf("%02x", config.kernel_instance[pass]);
+    putchar('\n');
     result = 0;
 done:
     if (fd >= 0) close(fd);
     if (result) fprintf(stderr, "obmm-worker-ledger: status=failed physical_state=unknown "
                         "reconciliation_required=1\n");
+    return result;
+}
+
+static int ledger_order(const void *left, const void *right)
+{
+    const struct worker_ledger_entry *a = left, *b = right;
+    if (a->work.generation != b->work.generation)
+        return a->work.generation < b->work.generation ? -1 : 1;
+    return a->sequence < b->sequence ? -1 : a->sequence != b->sequence;
+}
+
+/* Matching is evidence only: it never authorizes release, publish or reuse. */
+static const char *reconcile_resource(const struct worker_ledger_entry *last,
+    const struct worker_reservation *saved, const struct obmm_cmd_gsva_enumerate_v1 *actual)
+{
+    struct obmm_gsva_segment_desc_v1 expected = saved->segment;
+    struct mem_service_provider_descriptor encoded;
+    bool retired = !strcmp(last->phase, "retired") || !strcmp(last->phase, "reclaimed") ||
+        !strcmp(last->phase, "unbacked-retired") || !strcmp(last->phase, "cancel-confirmed");
+    bool exported = !strcmp(last->phase, "exported") || !strcmp(last->phase, "published");
+    bool reserved = !strcmp(last->phase, "reserved") ||
+        !strcmp(last->phase, "export-no-backing") || !strcmp(last->phase, "unexported");
+    if (!actual || (!retired && !exported && !reserved)) return NULL;
+    if (retired) expected.flags = (expected.flags & ~OBMM_GSVA_SEG_F_ACTIVE) |
+                                  OBMM_GSVA_SEG_F_RETIRED;
+    if (memcmp(&expected, &actual->desc, sizeof(expected)) ||
+        (actual->resource_flags & OBMM_GSVA_RESOURCE_EXPORT_BUSY)) return NULL;
+    if (retired)
+        return !actual->resource_flags && !actual->export_mem_id ? "retired-record" : NULL;
+    if (actual->resource_flags != OBMM_GSVA_RESOURCE_ADDRESS_RESERVED) return NULL;
+    if (reserved) return !actual->export_mem_id ? "reserved-no-export" : NULL;
+    if (!saved->exported.mem_id || actual->export_mem_id != saved->exported.mem_id ||
+        actual->export_token_id != saved->exported.tokenid ||
+        mem_service_provider_obmm_encode_gsva(&saved->segment, &saved->exported, &encoded) ||
+        encoded.len != saved->descriptor.len ||
+        memcmp(encoded.bytes, saved->descriptor.bytes, encoded.len)) return NULL;
+    return "export-bound";
+}
+
+int mem_service_provider_obmm_reconcile_allocation_state(const char *config_path)
+{
+    enum { limit = 65536 };
+    struct worker_config config;
+    struct worker_ledger_entry *entries = NULL;
+    struct obmm_cmd_gsva_enumerate_v1 *inventory = NULL;
+    struct obmm_cmd_gsva_enumerate_v1 cursor = {.version = OBMM_GSVA_ABI_VERSION};
+    struct stat before, after;
+    struct flock lock = {.l_type = F_RDLCK, .l_whence = SEEK_SET};
+    unsigned char *claimed = NULL;
+    const char **matches = NULL;
+    const char *reason = "journal-invalid";
+    size_t count = 0, records = 0, groups = 0, unclaimed = 0, i, j;
+    int fd = -1, device = -1, result = 1;
+
+    if (read_config(config_path, &config)) return 2;
+    fd = open(config.state, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 || fcntl(fd, F_SETLK, &lock) || fstat(fd, &before) ||
+        !S_ISREG(before.st_mode) || before.st_size <= 0 ||
+        before.st_size % WORKER_LEDGER_FRAME_BYTES ||
+        before.st_size / WORKER_LEDGER_FRAME_BYTES > limit) goto done;
+    count = (size_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
+    entries = calloc(count, sizeof(*entries));
+    inventory = calloc(limit, sizeof(*inventory));
+    claimed = calloc(limit, 1);
+    matches = calloc(count, sizeof(*matches));
+    if (!entries || !inventory || !claimed || !matches) goto done;
+    for (i = 0; i < count; i++)
+        if (ledger_read_entry(fd, i + 1, &config, &entries[i])) goto done;
+    device = open("/dev/obmm", O_RDONLY | O_CLOEXEC);
+    reason = "inventory-unavailable";
+    if (device < 0) goto done;
+    for (;;) {
+        if (gva_manager_enumerate_segments(device, &cursor)) goto done;
+        reason = "kernel-instance-mismatch";
+        if (memcmp(config.kernel_instance, cursor.kernel_instance, 16)) goto done;
+        reason = "inventory-unavailable";
+        if (cursor.flags == OBMM_GSVA_ENUM_END) break;
+        if (records == limit) goto done;
+        inventory[records++] = cursor;
+    }
+    qsort(entries, count, sizeof(*entries), ledger_order);
+    reason = "resource-unresolved";
+    for (i = 1; i < count;) {
+        struct worker_reservation saved = {0};
+        size_t begin = i, found = records;
+        const struct worker_ledger_entry *last;
+        while (i < count && entries[i].work.generation == entries[begin].work.generation) {
+            const struct worker_ledger_entry *e = &entries[i];
+            if (strcmp(e->work.key, entries[begin].work.key) ||
+                e->work.size_bytes != entries[begin].work.size_bytes ||
+                e->work.alignment_bytes != entries[begin].work.alignment_bytes) goto done;
+            if (e->reservation.segment.segment_id) {
+                if (saved.segment.segment_id &&
+                    memcmp(&saved.segment, &e->reservation.segment, sizeof(saved.segment))) goto done;
+                saved = e->reservation;
+            }
+            i++;
+        }
+        last = &entries[i - 1];
+        if (!saved.segment.segment_id) {
+            if (strcmp(last->phase, "cancel-confirmed") &&
+                strcmp(last->phase, "reserve-empty") &&
+                strcmp(last->phase, "capacity-reject-intent") &&
+                strcmp(last->phase, "cancel-empty")) goto done;
+            matches[i - 1] = "no-recorded-segment";
+        } else {
+            for (j = 0; j < records; j++)
+                if (inventory[j].desc.segment_id == saved.segment.segment_id) {
+                    if (found != records) goto done;
+                    found = j;
+                }
+            if (found == records || claimed[found]) goto done;
+            matches[i - 1] = reconcile_resource(last, &saved, &inventory[found]);
+            if (!matches[i - 1]) goto done;
+            claimed[found] = 1;
+        }
+        groups++;
+    }
+    /* Check both sources once more before publishing any matching result. */
+    reason = "snapshot-changed";
+    if (gva_manager_enumerate_segments(device, &cursor) ||
+        cursor.flags != OBMM_GSVA_ENUM_END || fstat(fd, &after) ||
+        before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) goto done;
+    for (j = 0; j < records; j++) if (!claimed[j]) unclaimed++;
+    for (i = 1; i < count; i++) if (matches[i])
+        printf("obmm-worker-reconcile: key=%s generation=%" PRIu64
+               " phase=%s match=%s\n", entries[i].work.key, entries[i].work.generation,
+               entries[i].phase, matches[i]);
+    printf("obmm-worker-reconcile: status=matched objects=%zu kernel_records=%zu "
+           "unclaimed_records=%zu revision=%" PRIu64 " kernel_instance=",
+           groups, records, unclaimed, (uint64_t)cursor.revision);
+    for (i = 0; i < 16; i++) printf("%02x", config.kernel_instance[i]);
+    printf(" scope=segment-export-records fencing_verified=0 reconciliation_required=1\n");
+    if (!ferror(stdout)) result = 0;
+done:
+    if (device >= 0) close(device);
+    if (fd >= 0) close(fd);
+    free(entries); free(inventory); free(claimed); free(matches);
+    if (result) fprintf(stderr, "obmm-worker-reconcile: status=failed reason=%s "
+                        "fencing_verified=0 reconciliation_required=1\n", reason);
     return result;
 }
 
@@ -499,6 +647,7 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
     struct mem_service_client_provider_directory directory;
     struct mem_service_client_allocation work;
     struct obmm_cmd_gsva_aperture aperture = {0};
+    struct obmm_cmd_gsva_enumerate_v1 birth = {.version = OBMM_GSVA_ABI_VERSION};
     struct sigaction action = {0}, old_int, old_term;
     const struct timespec interval = {.tv_nsec = 100000000};
     enum mem_service_wire_status status;
@@ -518,6 +667,8 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
     device = open("/dev/obmm", O_RDWR | O_CLOEXEC);
     if (device < 0 || ioctl(device, OBMM_CMD_GSVA_APERTURE_QUERY, &aperture) ||
         !(aperture.flags & OBMM_GSVA_APERTURE_F_ACTIVE)) goto done;
+    if (gva_manager_enumerate_segments(device, &birth)) goto done;
+    memcpy(config.kernel_instance, birth.kernel_instance, 16);
     reservations = calloc(MEM_SERVICE_MANAGED_MAX_ALLOCATIONS, sizeof(*reservations));
     if (!reservations) goto done;
     journal = create_state(&config);

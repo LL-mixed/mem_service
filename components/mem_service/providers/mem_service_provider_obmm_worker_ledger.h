@@ -16,6 +16,7 @@ struct worker_config {
     uint64_t readiness_generation;
     uint64_t allocation_granularity_bytes;
     bool fast_allocation;
+    unsigned char kernel_instance[16];
 };
 
 struct worker_reservation {
@@ -127,6 +128,11 @@ static int ledger_fields(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
     if (encode) memcpy(frame + offset, r->descriptor.bytes, r->descriptor.len);
     else memcpy(r->descriptor.bytes, frame + offset, sizeof(r->descriptor.bytes));
     offset += sizeof(r->descriptor.bytes);
+    if (encode) memcpy(frame + offset, entry->config.kernel_instance, 16);
+    else memcpy(entry->config.kernel_instance, frame + offset, 16);
+    offset += 16;
+    for (i = 0; i < 16 && !entry->config.kernel_instance[i]; i++) {}
+    if (i == 16) return -1;
 #undef FIELD
 #undef STRING
     return offset <= WORKER_LEDGER_FRAME_BYTES - 8 ? 0 : -1;
@@ -136,7 +142,7 @@ static int ledger_encode(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
                          struct worker_ledger_entry *entry)
 {
     memset(frame, 0, WORKER_LEDGER_FRAME_BYTES);
-    memcpy(frame, "obmm-worker-ledger-v1", sizeof("obmm-worker-ledger-v1") - 1);
+    memcpy(frame, "obmm-worker-ledger-v2", sizeof("obmm-worker-ledger-v2") - 1);
     if (ledger_fields(frame, entry, true)) return -1;
     ledger_u64(frame + WORKER_LEDGER_FRAME_BYTES - 8,
                ledger_checksum(frame, WORKER_LEDGER_FRAME_BYTES - 8), true);

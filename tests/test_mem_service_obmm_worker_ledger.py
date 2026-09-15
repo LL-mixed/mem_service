@@ -37,5 +37,8 @@ class ObmmWorkerLedgerTest(unittest.TestCase):
     def test_every_byte_corruption_rejected(self):
         self.run_case('corruption')
 
+    def test_zero_birth_identity_and_old_version_rejected(self):
+        self.run_case('birth-identity')
+
     def test_noncanonical_frames_and_process_pointers_rejected(self):
         self.run_case('canonical')

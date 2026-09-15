@@ -25,16 +25,19 @@ and run the full standalone and downstream contract tests.
 ## kernel_ub UAPI sources
 
 - Source repository: `ub_sim` submodule `guest-linux/kernel_ub`
-- Source revision: `d7898f5e0b682d5af7ff76de9a8592c717f544b7`
+- Source revision: `d9492ed29eb84bc47f6016323118b18c6ea6cd8c`
 - Checked GSVA export v1 adds a fixed-width 120-byte request and a separate
   ioctl. The copied headers match this tested kernel revision. Kernels that
   lack the new ioctl cannot provide managed-worker allocation receipts.
+- Segment enumeration v1 adds a 144-byte request with kernel-instance identity,
+  revision-bound cursor and active/retired export-resource records. Worker
+  ledger v2 requires this interface before creating its first persistent frame.
 - `kernel_ub/include/uapi/ub/gsva.h`
   - SHA-256:
-    `eddda83cb2d3e6da65ce7afa81bcb29466115428cd5dc50a4fd0b5aa8676f8a6`
+    `65a58c319f284e920ce5fdaab5b7d695a1dfec037ececaeb85b69f896f6e42ab`
 - `kernel_ub/include/uapi/ub/obmm.h`
   - SHA-256:
-    `cbf21ea39a4f6256379d656d68f1bf4158077cc73314bf7a11332aabb82218f9`
+    `a39b3cf927c7a2c3a385dd44a39b2cb880075aa53090bb0b85ee01108be801b9`
 
 The aggregate directory checksum is calculated from files sorted by name.
 Each input line is `<sha256><two spaces><repository-relative path><newline>`.
