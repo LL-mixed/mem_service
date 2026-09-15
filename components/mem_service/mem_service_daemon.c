@@ -10177,6 +10177,32 @@ static size_t mem_service_count_record_kind(const struct mem_service *svc,
     return count;
 }
 
+static void mem_service_note_provider_loss(
+    struct mem_service *svc, const char *node_id, uint64_t incarnation)
+{
+    size_t changed = mem_service_managed_provider_lost(
+        &svc->managed, node_id, incarnation);
+
+    if (changed != 0) {
+        svc->managed_recovery_required = true;
+    }
+}
+
+static struct mem_service_provider_directory_poll mem_service_managed_directory_poll(
+    struct mem_service *svc, uint64_t now_ms)
+{
+    /* Observe loss before poll erases the previous provider identity. */
+    for (size_t i = 0; i < MEM_SERVICE_PROVIDER_DIRECTORY_MAX_PROVIDERS; ++i) {
+        const struct mem_service_provider_directory_entry *entry =
+            &svc->provider_directory.entries[i];
+        if (entry->in_use && !mem_service_provider_directory_lookup_active(
+                &svc->provider_directory, entry->node_id, now_ms, NULL)) {
+            mem_service_note_provider_loss(svc, entry->node_id, entry->incarnation);
+        }
+    }
+    return mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+}
+
 static enum mem_service_wire_status mem_service_status(struct mem_service *svc,
                                                        char *response,
                                                        size_t response_len)
@@ -10197,9 +10223,7 @@ static enum mem_service_wire_status mem_service_status(struct mem_service *svc,
      * per-node providers, every one of them must hold a fresh
      * registration before data operations are reported as ready.
      */
-    directory_poll = mem_service_provider_directory_poll(
-        &svc->provider_directory,
-        mem_service_monotonic_ms());
+    directory_poll = mem_service_managed_directory_poll(svc, mem_service_monotonic_ms());
     data_plane_ready =
         !svc->managed_recovery_required &&
         mem_service_provider_registry_data_plane_ready(&svc->providers) &&
@@ -11613,14 +11637,16 @@ static bool mem_service_managed_data_plane_gate(
     char *response,
     size_t response_len)
 {
-    if (mem_service_provider_directory_data_ops_allowed(
-            &svc->provider_directory,
-            mem_service_monotonic_ms())) {
+    struct mem_service_provider_directory_poll poll =
+        mem_service_managed_directory_poll(svc, mem_service_monotonic_ms());
+    if (poll.ready && !svc->managed_recovery_required) {
         return true;
     }
     snprintf(response,
              response_len,
-             "status=internal\nreason=data_plane_not_ready\n");
+             "status=internal\nreason=%s\n",
+             svc->managed_recovery_required ? "managed_reconciliation_required"
+                                            : "data_plane_not_ready");
     return false;
 }
 
@@ -11760,9 +11786,6 @@ static enum mem_service_wire_status mem_service_release_object(
                                            response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
-    if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
-        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
-    }
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
     (void)mem_service_payload_get_string(payload,
                                          "session_id",
@@ -11798,9 +11821,6 @@ static enum mem_service_wire_status mem_service_retire_object(
                                            response,
                                            response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
-    }
-    if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
-        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
     }
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
     has_expected_generation = mem_service_payload_get_u64_checked(
@@ -12308,6 +12328,8 @@ static enum mem_service_wire_status mem_service_provider_register(
     uint64_t capabilities;
     uint64_t now_ms;
     bool replaced = false;
+    uint64_t previous_incarnation = 0;
+    const struct mem_service_provider_directory_entry *previous;
     struct mem_service_provider_directory_poll poll;
     enum mem_service_provider_directory_result result;
 
@@ -12326,6 +12348,11 @@ static enum mem_service_wire_status mem_service_provider_register(
         mem_service_payload_get_u64(payload, "readiness_generation", 0);
     capabilities = mem_service_payload_get_u64(payload, "capabilities", 0);
     now_ms = mem_service_monotonic_ms();
+    (void)mem_service_managed_directory_poll(svc, now_ms);
+    previous = mem_service_provider_directory_find(&svc->provider_directory, node_id);
+    if (previous != NULL) {
+        previous_incarnation = previous->incarnation;
+    }
     result = mem_service_provider_directory_register(&svc->provider_directory,
                                                      node_id,
                                                      incarnation,
@@ -12339,7 +12366,10 @@ static enum mem_service_wire_status mem_service_provider_register(
                                                      response,
                                                      response_len);
     }
-    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    if (replaced) {
+        mem_service_note_provider_loss(svc, node_id, previous_incarnation);
+    }
+    poll = mem_service_managed_directory_poll(svc, now_ms);
     snprintf(response,
              response_len,
              "status=ok\n"
@@ -12390,6 +12420,7 @@ static enum mem_service_wire_status mem_service_provider_refresh(
     readiness_generation =
         mem_service_payload_get_u64(payload, "readiness_generation", 0);
     now_ms = mem_service_monotonic_ms();
+    (void)mem_service_managed_directory_poll(svc, now_ms);
     result = mem_service_provider_directory_refresh(&svc->provider_directory,
                                                     node_id,
                                                     incarnation,
@@ -12401,7 +12432,7 @@ static enum mem_service_wire_status mem_service_provider_refresh(
                                                      response,
                                                      response_len);
     }
-    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    poll = mem_service_managed_directory_poll(svc, now_ms);
     snprintf(response,
              response_len,
              "status=ok\n"
@@ -12452,7 +12483,8 @@ static enum mem_service_wire_status mem_service_provider_deregister(
                                                      response,
                                                      response_len);
     }
-    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    mem_service_note_provider_loss(svc, node_id, incarnation);
+    poll = mem_service_managed_directory_poll(svc, now_ms);
     snprintf(response,
              response_len,
              "status=ok\n"
@@ -12486,7 +12518,7 @@ static enum mem_service_wire_status mem_service_provider_status(
 
     (void)payload;
     now_ms = mem_service_monotonic_ms();
-    poll = mem_service_provider_directory_poll(&svc->provider_directory, now_ms);
+    poll = mem_service_managed_directory_poll(svc, now_ms);
     used = (size_t)snprintf(
         response,
         response_len,
@@ -13649,6 +13681,8 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
     bool checkpoint_retention_pruned = false;
     bool record_retention_pruned = false;
     enum mem_service_wire_status status;
+    struct mem_service_provider_directory_poll directory_poll =
+        mem_service_managed_directory_poll(svc, start_ms);
 
     /*
      * The fail-closed data-plane gate for managed data operations runs
@@ -13668,9 +13702,8 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
         status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
         idempotency_handled = true;
     } else if (mem_service_operation_gated_managed_data_op(operation, payload) &&
-        !mem_service_provider_directory_data_ops_allowed(
-            &svc->provider_directory,
-            mem_service_monotonic_ms())) {
+        operation != MEM_SERVICE_WIRE_OP_RELEASE_OBJECT &&
+        operation != MEM_SERVICE_WIRE_OP_RETIRE_OBJECT && !directory_poll.ready) {
         snprintf(response,
                  response_len,
                  "status=internal\nreason=data_plane_not_ready\n");
@@ -13767,7 +13800,8 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
         if (pending_idempotency != NULL &&
             !(status == MEM_SERVICE_WIRE_STATUS_INTERNAL &&
               response != NULL &&
-              strstr(response, "reason=data_plane_not_ready") != NULL)) {
+              (strstr(response, "reason=data_plane_not_ready") != NULL ||
+               strstr(response, "reason=managed_reconciliation_required") != NULL))) {
             mem_service_complete_idempotency_record(pending_idempotency,
                                                     operation,
                                                     payload,

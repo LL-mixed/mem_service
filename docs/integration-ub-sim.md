@@ -10,6 +10,12 @@ qemu+UB PP 运行。`ds4` 的安装态 SDK 消费方式见
 
 ## 1. 消费契约：`MEM_SERVICE_ROOT`
 
+运行期 provider 失联会隔离该 home 的未终结分配，以及尚无节点归属的活跃 holder
+所引用的其他 provider 分配；保留所有映射与引用，锁存 managed_recovery_required。
+重新注册不解除隔离。查询和已有 mapping 清理仍可执行，release/retire 不再被目录
+readiness 拦住，但仍检查原代际与事务。该 core 源码变更不修改 wire 或结构布局，
+须重新链接；完整持久化对账与实际 guest 故障恢复仍须独立验证。
+
 V2 writer 的 `object-session` 顺序为 acquire、`begin_reference key=<allocation>
 generation=<g> version=<old-version> idempotency_key=<id>`、map/write、
 `publish_reference key=<logical> offset=<n> len=<n> kind=<n> owner=<n> producer=<n>

@@ -119,6 +119,13 @@ class ReferenceTransactionTests(unittest.TestCase):
         self._mapping("cancel", mapping_id, session="producer")
         self.fixture._register_home()
         self._transition("map-begin", nonce=nonce, success=False)
+        self._transition("map-begin", success=False)
+        self._holder("release", "producer")
+        self.assertEqual(self.fixture._allocation_stats()["managed_recovery_required"], "1")
+        self.assertEqual(self.fixture._allocation_stats()["idempotency_reservation_deficit"], "0")
+
+    def test_reference_mapping_retains_cleanup_capacity_without_provider_loss(self):
+        self._publish()
         pending = self._transition("map-begin")
         for _ in range(80):
             result = self.fixture._run_client(
@@ -255,8 +262,10 @@ class ReferenceTransactionTests(unittest.TestCase):
         self._transition("acquire", session="reader2", nonce=retry, success=False)
         self._transition("resolve", success=False)
         self.fixture._register_home()
-        self._transition("acquire", session="reader", nonce=nonce)
-        self._transition("acquire", session="reader2", nonce=retry)
+        self._transition("acquire", session="reader", nonce=nonce, success=False)
+        self._transition("acquire", session="reader2", nonce=retry, success=False)
+        self.assertEqual(self.fixture._allocation_stats()["live_refs"], "2")
+        self.assertEqual(self.fixture._allocation_stats()["managed_recovery_required"], "1")
         self.fixture._register_home(incarnation=fixtures.HOME_INCARNATION + 1)
         self._transition("resolve", success=False)
         self._transition("acquire", session="reader", nonce=nonce, success=False)

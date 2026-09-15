@@ -306,6 +306,17 @@ int mem_service_managed_table_register_backing(
 void mem_service_managed_table_unregister_backing(
     struct mem_service_managed_table *table);
 
+/* Quarantine unresolved allocations after a confirmed directory loss event.
+ * Besides this home instance, retain all provider allocations with holders:
+ * holder sessions currently have no authoritative node binding. No resource,
+ * reference or mapping is released. Returns newly quarantined entry count.
+ * The caller owns serialization and must latch data admission off if nonzero.
+ */
+size_t mem_service_managed_provider_lost(
+    struct mem_service_managed_table *table,
+    const char *node_id,
+    uint64_t incarnation);
+
 enum mem_service_managed_result mem_service_managed_allocate(
     struct mem_service_managed_table *table,
     const struct mem_service_managed_request *request,

@@ -92,6 +92,37 @@ static struct mem_service_managed_allocation *mem_service_managed_select_slot(
     return first_retired;
 }
 
+size_t mem_service_managed_provider_lost(
+    struct mem_service_managed_table *table,
+    const char *node_id,
+    uint64_t incarnation)
+{
+    size_t changed = 0;
+
+    if (table == NULL || incarnation == 0 ||
+        !mem_service_managed_string_valid(node_id, MEM_SERVICE_MANAGED_NODE_ID_LEN)) {
+        return 0;
+    }
+    for (size_t i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        struct mem_service_managed_allocation *entry = &table->entries[i];
+
+        if (!entry->in_use || entry->home_node_id[0] == '\0' ||
+            entry->state == MEM_SERVICE_MANAGED_STATE_RETIRED ||
+            entry->state == MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+            continue;
+        }
+        if (entry->holder_count == 0 &&
+            (strcmp(entry->home_node_id, node_id) != 0 ||
+             entry->provider_incarnation != incarnation)) {
+            continue;
+        }
+        entry->state = MEM_SERVICE_MANAGED_STATE_QUARANTINED;
+        table->quarantine_events += 1U;
+        changed += 1U;
+    }
+    return changed;
+}
+
 static void mem_service_managed_fill_view(
     const struct mem_service_managed_allocation *entry,
     struct mem_service_managed_view *view_out)
@@ -936,7 +967,15 @@ void mem_service_managed_stats_snapshot(
         case MEM_SERVICE_MANAGED_STATE_QUARANTINED:
             stats_out->quarantined_objects += 1U;
             stats_out->quarantined_bytes +=
-                entry->provider_backed ? entry->address_len : entry->size_bytes;
+                entry->provider_backed ? entry->address_len :
+                entry->home_node_id[0] ? 0 : entry->size_bytes;
+            stats_out->live_refs += entry->holder_count;
+            if (entry->provider_backed) {
+                stats_out->export_mappings += 1U;
+            } else if (entry->home_node_id[0]) {
+                /* An unpublished reservation is still an unresolved intent. */
+                stats_out->in_flight += 1U;
+            }
             break;
         case MEM_SERVICE_MANAGED_STATE_RETIRED:
         default:

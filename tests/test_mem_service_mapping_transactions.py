@@ -240,8 +240,9 @@ class MemServiceMappingTransactionTests(unittest.TestCase):
         self._mapping("finish", token)
         self._counts(0, 0)
         self.fixture._register_home()
-        retry = int(self._mapping("begin", nonce=nonce)["mapping_id"])
-        self._mapping("cancel", retry)
+        self._mapping("begin", nonce=nonce, success=False)
+        self._mapping("begin", success=False)
+        self.assertEqual(self.fixture._allocation_stats()["managed_recovery_required"], "1")
         self._holder("release", "owner")
 
     def test_release_manifest_lists_every_schema_operation(self):

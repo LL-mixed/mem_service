@@ -1,5 +1,10 @@
 # ds4 使用侧适配手册
 
+managed daemon 新增运行期 provider 失联隔离，重新注册不能恢复旧分配；
+managed 数据请求可能返回 managed_reconciliation_required，已有映射清理和
+引用释放仍执行原事务检查。core 新增失联状态迁移 API，现有公开结构、wire、
+client/provider SDK 布局及 DS4 transfer 路径保持不变。此项不证明持久化恢复。
+
 可选 V2 writer SDK 新增 `mem_service_client_prepare_managed_reference()`，从
 当前完整读写映射准备只读视图引用；仅在 provider publish 确认后返回完整 V2。
 调用者冻结 payload，保留引用用于 stage 重试，确认 unmap 后 seal。该函数沿用

@@ -239,6 +239,130 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             "--after-generation", str(after), "--connect", self._connect,
         )
 
+    def test_provider_loss_preserves_resources_and_blocks_reactivation(self):
+        for loss in ("home-deregister", "home-replace", "peer-deregister"):
+            with self.subTest(loss=loss):
+                proc = self._start_home_daemon()
+                try:
+                    self.assertEqual(self._register_home().returncode, 0)
+                    generation = self._allocate_bound("held", "held-allocate")
+                    self.assertEqual(self._publish("held", generation).returncode, 0)
+                    self._allocate_bound("pending", "pending-allocate")
+                    acquire_args = ("acquire-object", "--key", "held",
+                        "--session-id", "session-a", "--idempotency-key", "held-acquire",
+                        "--expected-generation", str(generation), "--connect", self._connect)
+                    self.assertEqual(self._run_client(*acquire_args).returncode, 0)
+
+                    def transition(action, mapping_id):
+                        return self._run_client("mapping-transition", "--key", "held",
+                            "--session-id", "session-a", "--generation", str(generation),
+                            "--mapping-id", str(mapping_id), "--action", action,
+                            "--idempotency-key", "held-" + action, "--connect", self._connect)
+
+                    begun = transition("begin", 0)
+                    self.assertEqual(begun.returncode, 0, begun.stdout + begun.stderr)
+                    mapping_id = int(_parse_kv(begun.stdout)["mapping_id"])
+                    self.assertEqual(transition("confirm", mapping_id).returncode, 0)
+                    before = self._inspect("held")
+                    wrong = self._run_client("provider-deregister", "--node-id", HOME_NODE,
+                        "--incarnation", "99", "--connect", self._connect)
+                    self.assertNotEqual(wrong.returncode, 0)
+                    self.assertEqual(self._stats()["managed_recovery_required"], "0")
+
+                    node = HOME_NODE
+                    if loss == "peer-deregister":
+                        node = "node-b"
+                        peer = self._run_client("provider-register", "--node-id", node,
+                            "--incarnation", "7", "--readiness-generation", "1",
+                            "--capabilities", "1", "--connect", self._connect)
+                        self.assertEqual(peer.returncode, 0)
+                    if loss == "home-replace":
+                        lost = self._register_home(8)
+                    else:
+                        lost = self._run_client("provider-deregister", "--node-id", node,
+                            "--incarnation", "7", "--connect", self._connect)
+                    self.assertEqual(lost.returncode, 0, lost.stdout + lost.stderr)
+                    after = self._inspect("held")
+                    self.assertEqual(after["state"], "quarantined")
+                    for field in ("generation", "provider_incarnation", "descriptor_hex",
+                                  "address", "address_len", "live_refs"):
+                        self.assertEqual(after[field], before[field], field)
+                    stats = self._stats()
+                    self.assertEqual(stats["managed_recovery_required"], "1")
+                    self.assertEqual(stats["quarantined_bytes"], "4096")
+                    self.assertEqual(stats["quarantined_objects"],
+                                     "1" if loss == "peer-deregister" else "2")
+                    self.assertEqual(stats["live_refs"], "1")
+                    self.assertEqual(stats["import_mappings"], "1")
+                    self.assertEqual(stats["export_mappings"], "1")
+                    self.assertEqual(stats["in_flight"], "1")
+                    release_args = ("release-object", "--key", "held",
+                        "--session-id", "session-a", "--expected-generation", str(generation),
+                        "--idempotency-key", "held-release", "--connect", self._connect)
+                    self.assertIn("reason=state_conflict", self._run_client(*release_args).stdout)
+                    self.assertEqual(transition("close", mapping_id).returncode, 0)
+                    self.assertEqual(transition("finish", mapping_id).returncode, 0)
+                    # A fresh operation ID follows the earlier rejected release.
+                    release_args = tuple("held-release-final" if x == "held-release" else x
+                                         for x in release_args)
+                    self.assertEqual(self._run_client(*release_args).returncode, 0)
+                    self.assertEqual(self._register_home().returncode, 0)
+                    for rejected in (self._allocate("fresh", "fresh-allocate"),
+                                     self._run_client(*acquire_args)):
+                        self.assertIn("reason=managed_reconciliation_required", rejected.stdout)
+                    # The typed mapping CLI exposes the stable status, not the
+                    # daemon's free-text reason; verify its actual contract.
+                    rejected = transition("confirm", mapping_id)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("status=internal", rejected.stdout)
+                    self.assertIn("state=quarantined", self._reclaim("held", generation, 1).stdout)
+                    self.assertEqual(self._stats()["live_refs"], "0")
+                    self.assertEqual(self._stats()["import_mappings"], "0")
+                    self.assertEqual(self._stats()["quarantined_bytes"], "4096")
+                finally:
+                    self._stop_server(proc)
+
+    def test_expired_registration_cannot_revive_pending_allocation(self):
+        config = self._write_config("expiry.conf", self._unix_config(
+            f"required_provider={HOME_NODE}\nprovider_lease_ms=1000\n"
+            f"allocation_home_provider={HOME_NODE}"))
+        proc = self._start_daemon(config)
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            self._allocate_bound("pending", "expiry-allocate")
+            time.sleep(1.1)
+            # First request after expiry is registration, with no preceding status poll.
+            self.assertEqual(self._register_home().returncode, 0)
+            self.assertEqual(self._inspect("pending")["state"], "quarantined")
+            stats = self._stats()
+            self.assertEqual(stats["quarantined_objects"], "1")
+            self.assertEqual(stats["quarantined_bytes"], "0")
+            self.assertEqual(stats["in_flight"], "1")
+            self.assertEqual(stats["managed_recovery_required"], "1")
+            self.assertIn("reason=managed_reconciliation_required",
+                          self._allocate("pending", "expiry-allocate").stdout)
+        finally:
+            self._stop_server(proc)
+
+    def test_provider_loss_after_drain_does_not_latch_recovery(self):
+        proc = self._start_home_daemon()
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            generation = self._allocate_bound("done", "done-allocate")
+            self.assertEqual(self._publish("done", generation).returncode, 0)
+            retired = self._run_client("retire-object", "--key", "done",
+                "--idempotency-key", "done-retire", "--connect", self._connect)
+            self.assertEqual(retired.returncode, 0)
+            self.assertEqual(self._reclaim("done", generation, 1).returncode, 0)
+            lost = self._run_client("provider-deregister", "--node-id", HOME_NODE,
+                "--incarnation", "7", "--connect", self._connect)
+            self.assertEqual(lost.returncode, 0)
+            self.assertEqual(self._stats()["managed_recovery_required"], "0")
+            self.assertEqual(self._register_home().returncode, 0)
+            self.assertEqual(self._allocate("fresh", "fresh-allocate").returncode, 0)
+        finally:
+            self._stop_server(proc)
+
     def test_poll_enumerates_pending_without_consuming_work(self):
         proc = self._start_home_daemon()
         try:
