@@ -54,6 +54,8 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 self.assertIn("obmm_fixed_subrange=pass views=4 rejected=10 "
                               "file_alias=1 readonly=1 resources=0", result.stdout)
                 self.assertIn("obmm_cleanup_ownership=pass", result.stdout)
+                self.assertIn("obmm_cached_visibility=pass readonly=1 readwrite=1 "
+                              "bounds=1 ioctl_failure=1", result.stdout)
                 self.assertIn("obmm_compute_mapping_pins=pass no_alias=1 deferred_cleanup=1",
                               result.stdout)
                 self.assertIn("retained_handle_conflict=pass", result.stdout)
@@ -66,6 +68,10 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                                          capture_output=True, text=True, timeout=10)
                 self.assertEqual(focused.returncode, 0, focused.stderr)
                 self.assertIn("obmm_fixed_subrange=pass views=4 rejected=10", focused.stdout)
+                cached = subprocess.run([str(binary), "--cached-visibility"],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(cached.returncode, 0, cached.stderr)
+                self.assertIn("obmm_cached_visibility=pass", cached.stdout)
 
     def _compile(self, compiler: str, output: pathlib.Path, linux_backend=None) -> None:
         if linux_backend is None:

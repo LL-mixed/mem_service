@@ -866,7 +866,9 @@ static int mem_service_obmm_update_range(
     command.end = (end + page_size - 1U) & ~(page_size - 1U);
     command.mem_state = (slot->map_osync ? OBMM_SHM_MEM_NORMAL_NC
                                         : OBMM_SHM_MEM_NORMAL) |
-                        OBMM_SHM_MEM_READWRITE;
+                        ((slot->view_access & MEM_SERVICE_MAPPING_FLAG_WRITE)
+                             ? OBMM_SHM_MEM_READWRITE
+                             : OBMM_SHM_MEM_READONLY);
     command.cache_ops = cache_op;
     return ioctl(slot->region.fd, OBMM_SHMDEV_UPDATE_RANGE, &command) == 0
                ? 0

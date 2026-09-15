@@ -9,6 +9,9 @@
 static unsigned import_calls, event_calls;
 static bool import_fails, ioctl_fails, event_fails;
 static uint32_t last_event;
+static unsigned update_calls;
+static bool update_readonly;
+static struct obmm_cmd_update_range last_update;
 
 static bool cleanup_mode, open_fails, unimport_fails, unexport_fails, close_fails;
 static unsigned cleanup_imports, cleanup_unimports, cleanup_unexports, cleanup_closes;
@@ -143,8 +146,20 @@ int __wrap_ioctl(int fd, unsigned long op, ...)
 {
     va_list args;
     struct obmm_cmd_gsva_event_v1 *event;
-    assert(fd == 42 && op == OBMM_CMD_GSVA_EVENT_V1);
     va_start(args, op);
+    if (op == OBMM_SHMDEV_UPDATE_RANGE) {
+        assert(fd == 43);
+        last_update = *va_arg(args, struct obmm_cmd_update_range *);
+        va_end(args);
+        ++update_calls;
+        if (ioctl_fails || (update_readonly &&
+            (last_update.mem_state & OBMM_SHM_MEM_READWRITE))) {
+            errno = EACCES;
+            return -1;
+        }
+        return 0;
+    }
+    assert(fd == 42 && op == OBMM_CMD_GSVA_EVENT_V1);
     event = va_arg(args, struct obmm_cmd_gsva_event_v1 *);
     va_end(args);
     event_calls++;
@@ -640,6 +655,61 @@ static void test_fixed_subrange_mapping(void)
     puts("obmm_fixed_subrange=pass views=4 rejected=10 file_alias=1 readonly=1 resources=0");
 }
 
+static void test_cached_visibility_permissions(void)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t *bytes = mmap(NULL, page * 3, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(bytes != MAP_FAILED);
+    memset(bytes, 0x63, page * 3);
+    struct mem_service_obmm_context context = {0};
+    struct mem_service_obmm_mapping_slot *slot = &context.mappings[0];
+    *slot = (struct mem_service_obmm_mapping_slot){
+        .active = true, .handle = 1, .view_offset = page + 17,
+        .view_len = page, .region = {.addr = bytes, .len = page * 3, .fd = 43},
+        .descriptor = {.strict_gsva = true, .access_flags = 3},
+    };
+    struct mem_service_mapping_range_request range = {
+        .mapping_handle = 1, .offset = 13, .len = page - 26, .timeout_ms = 2,
+        .expected_checksum = mem_service_provider_checksum64(
+            bytes + slot->view_offset + 13, page - 26),
+    };
+    for (unsigned writable = 0; writable < 2; ++writable) {
+        slot->view_access = MEM_SERVICE_MAPPING_FLAG_READ |
+            (writable ? MEM_SERVICE_MAPPING_FLAG_WRITE : 0);
+        update_readonly = !writable;
+        struct mem_service_visibility_completion completion = {0};
+        unsigned calls = update_calls;
+        assert(!mem_service_obmm_provider_wait_range_visible(&context, &range, &completion));
+        assert(update_calls == calls + 1);
+        assert(last_update.start == (uintptr_t)bytes + page);
+        assert(last_update.end == (uintptr_t)bytes + page * 3);
+        assert(last_update.mem_state == (OBMM_SHM_MEM_NORMAL |
+            (writable ? OBMM_SHM_MEM_READWRITE : OBMM_SHM_MEM_READONLY)));
+        assert(last_update.cache_ops == OBMM_SHM_CACHE_INVAL);
+        assert(completion.visible_bytes == range.len &&
+               completion.checksum == range.expected_checksum);
+        if (writable) {
+            assert(!mem_service_obmm_provider_publish_range(&context, &range, &completion));
+            assert(last_update.cache_ops == OBMM_SHM_CACHE_WB_INVAL);
+        }
+        memset(&completion, 0xa5, sizeof(completion));
+        struct mem_service_visibility_completion saved = completion;
+        ioctl_fails = true;
+        assert(mem_service_obmm_provider_invalidate_range(&context, &range, &completion));
+        assert(!memcmp(&saved, &completion, sizeof(saved)));
+        ioctl_fails = false;
+        calls = update_calls;
+        range.len = page;
+        assert(mem_service_obmm_provider_invalidate_range(&context, &range, &completion));
+        assert(update_calls == calls);
+        range.len = page - 26;
+    }
+    update_readonly = false;
+    assert(!munmap(bytes, page * 3));
+    puts("obmm_cached_visibility=pass readonly=1 readwrite=1 bounds=1 ioctl_failure=1");
+}
+
 static void test_logical_view_page_guards(void)
 {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
@@ -680,6 +750,10 @@ static void test_logical_view_page_guards(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--cached-visibility")) {
+        test_cached_visibility_permissions();
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--fixed-subrange")) {
         test_fixed_subrange_mapping();
         return 0;
@@ -729,6 +803,7 @@ int main(int argc, char **argv)
     assert(mem_service_obmm_provider_publish_range(&context, &range, &completion));
     assert(mem_service_obmm_provider_invalidate_range(&context, &range, &completion));
     assert(!event_calls); /* Invalid ranges cannot start coherence operations. */
+    test_cached_visibility_permissions();
     test_logical_view_page_guards();
     test_fixed_subrange_mapping();
     test_import_and_partial_view_cleanup();

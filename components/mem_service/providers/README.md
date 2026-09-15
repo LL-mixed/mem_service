@@ -103,6 +103,12 @@ worker 继续拒绝使用已有 state_file 启动，直到独立恢复协议证�
 
 ### 固定地址子区间
 
+缓存刷新必须保持当前视图的权限：`UPDATE_RANGE` 对 READ 视图使用 READONLY，
+对可写视图使用 READWRITE，不能从 backing 的较宽权限推导访问权。刷新页范围
+仍从实际 view offset 和请求范围计算，检查失败不能报告可见。`--cached-visibility`
+无设备夹具核对只读 home 刷新、可写刷新、页对齐与 ioctl 失败；实际 guest 的
+只读发布结果消费须独立验收。
+
 严格 GSVA 的固定地址请求以视图首字节为 requested_address，必须精确等于
 descriptor 的 remote_uba 加 offset；offset 与 len 继续受完整 backing 边界约束。
 provider 保留完整地址 reservation，仅开放覆盖视图的页，并返回精确的视图
