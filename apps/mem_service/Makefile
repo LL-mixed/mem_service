@@ -1035,7 +1035,7 @@ install-smoke: install
 	grep -q '^release_readiness_gate=release-readiness-fixtures$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^host_daemon_artifact_smoke=host-artifact-smoke$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^wire_schema_manifest=share/lingqu/mem_service/wire-schema.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
-	grep -q '^wire_schema_manifest_checksum=0xb0964fb0$$' $(INSTALL_DATADIR)/release-manifest.txt
+	grep -q '^wire_schema_manifest_checksum=0x5c6a250d$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_output_schema=share/lingqu/mem_service/admin-output-schema.txt$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_output_schema_len=7648$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^admin_output_schema_checksum=0xd4f33080$$' $(INSTALL_DATADIR)/release-manifest.txt
@@ -1201,7 +1201,7 @@ install-smoke: install
 	grep -q '^example_source=share/lingqu/mem_service/examples/mem_service_serving_example.c$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^example_source=share/lingqu/mem_service/examples/mem_service_pretraining_example.c$$' $(INSTALL_DATADIR)/release-manifest.txt
 	grep -q '^mem_service_wire_schema_manifest_version=1$$' $(INSTALL_DATADIR)/wire-schema.txt
-	grep -q '^operation_count=39$$' $(INSTALL_DATADIR)/wire-schema.txt
+	grep -q '^operation_count=40$$' $(INSTALL_DATADIR)/wire-schema.txt
 	grep -q '^field_count=229$$' $(INSTALL_DATADIR)/wire-schema.txt
 	grep -q '^oneof_field=resolve_kv_segment.0.block_hash$$' $(INSTALL_DATADIR)/wire-schema.txt
 	grep -q '^mem_service_admin_output_schema_version=1$$' $(INSTALL_DATADIR)/admin-output-schema.txt
@@ -1350,7 +1350,7 @@ install-smoke: install
 	grep -q '^new_client_old_server_policy=certified$$' $(INSTALL_DATADIR)/api-abi-policy.txt
 	grep -q '^mem_service_compat_matrix_version=1$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^wire_version_current=1$$' $(INSTALL_DATADIR)/compat-matrix.txt
-	grep -q '^wire_schema_manifest_checksum=0xb0964fb0$$' $(INSTALL_DATADIR)/compat-matrix.txt
+	grep -q '^wire_schema_manifest_checksum=0x5c6a250d$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^idempotency_conflict_status=version_conflict$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^idempotency_persistence=store-journal-and-full-snapshot$$' $(INSTALL_DATADIR)/compat-matrix.txt
 	grep -q '^audit_log_persistence=store-journal-and-full-snapshot$$' $(INSTALL_DATADIR)/compat-matrix.txt

@@ -325,6 +325,21 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             "--connect", self._connect,
         )
 
+    def _fence_holder(self, key: str, generation: int,
+                      current_incarnation: int, fenced_incarnation: int,
+                      idempotency_key: str,
+                      node_id: str = SECOND_HOME_NODE) -> subprocess.CompletedProcess:
+        return self._run_client(
+            "fence-allocation-holder",
+            "--key", key,
+            "--node-id", node_id,
+            "--incarnation", str(current_incarnation),
+            "--generation", str(generation),
+            "--fenced-incarnation", str(fenced_incarnation),
+            "--idempotency-key", idempotency_key,
+            "--connect", self._connect,
+        )
+
     def _poll_recovery(self, current_incarnation: int,
                        fenced_incarnation: int,
                        after_generation: int = 0,
@@ -647,12 +662,14 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
                     self._stop_server(proc)
 
     def test_recovery_rejects_live_holder_then_drains_after_rejoin(self):
+        store = self.root / "recovery.store"
         config = self._write_config(
             "recovery.conf",
             self._unix_config(
                 f"required_provider={HOME_NODE}\n"
                 f"required_provider={SECOND_HOME_NODE}\n"
                 "provider_lease_ms=30000\n"
+                f"store={store}\n"
                 f"allocation_home_provider={HOME_NODE}"
             ),
         )
@@ -704,11 +721,50 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             denied = self._recover("recover-held", generation,
                                    HOME_INCARNATION, HOME_INCARNATION, 0)
             self.assertNotEqual(denied.returncode, 0)
-            self.assertIn("reason=holder_fence_required", denied.stdout)
+            self.assertIn("reason=holder_fence_receipt_required", denied.stdout)
             self.assertEqual(self._stats()["import_mappings"], "1")
 
+            replacement = SECOND_HOME_INCARNATION + 1
             self.assertEqual(self._register_home(
-                SECOND_HOME_INCARNATION + 1, SECOND_HOME_NODE).returncode, 0)
+                replacement, SECOND_HOME_NODE).returncode, 0)
+            still_denied = self._recover("recover-held", generation,
+                                         HOME_INCARNATION,
+                                         HOME_INCARNATION, 0)
+            self.assertNotEqual(still_denied.returncode, 0)
+            self.assertIn("reason=holder_fence_receipt_required",
+                          still_denied.stdout)
+            wrong = self._fence_holder("recover-held", generation,
+                                       replacement,
+                                       SECOND_HOME_INCARNATION + 99,
+                                       "recover-fence-wrong")
+            self.assertNotEqual(wrong.returncode, 0)
+            self.assertIn("reason=not_holder", wrong.stdout)
+            fenced = self._fence_holder("recover-held", generation,
+                                        replacement,
+                                        SECOND_HOME_INCARNATION,
+                                        "recover-fence")
+            self.assertEqual(fenced.returncode, 0,
+                             fenced.stdout + fenced.stderr)
+            fenced_view = _parse_kv(fenced.stdout)
+            self.assertEqual(fenced_view["fenced_holder_count"], "1")
+            self.assertEqual(fenced_view["fenced_mapping_count"], "1")
+            self.assertEqual(fenced_view["live_refs"], "0")
+            self.assertEqual(self._stats()["import_mappings"], "0")
+
+            self._stop_server(proc)
+            proc = self._start_daemon(config)
+            self.assertEqual(self._register_home().returncode, 0)
+            self.assertEqual(self._register_home(
+                replacement, SECOND_HOME_NODE).returncode, 0)
+            replay = self._fence_holder("recover-held", generation,
+                                        replacement,
+                                        SECOND_HOME_INCARNATION,
+                                        "recover-fence")
+            self.assertEqual(replay.returncode, 0,
+                             replay.stdout + replay.stderr)
+            self.assertEqual(_parse_kv(replay.stdout)["fenced_holder_count"],
+                             "1")
+            self.assertEqual(self._inspect("recover-held")["live_refs"], "0")
             prepared = self._recover("recover-held", generation,
                                      HOME_INCARNATION, HOME_INCARNATION, 0)
             self.assertEqual(prepared.returncode, 0,

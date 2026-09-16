@@ -614,7 +614,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
         self.assertIn("MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 17613U", cli_source)
         self.assertIn(
-            "MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xb0964fb0U",
+            "MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x5c6a250dU",
             cli_source,
         )
         self.assertIn("MEM_SERVICE_ADMIN_OUTPUT_SCHEMA_EXPECTED_LEN 7648U", cli_source)
@@ -1170,7 +1170,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("print-compat-matrix", cli_makefile)
         self.assertIn("print-compat-baseline-v1", cli_makefile)
         self.assertIn("print-compat-old-new-matrix", cli_makefile)
-        self.assertIn("wire_schema_manifest_checksum=0xb0964fb0", release_manifest)
+        self.assertIn("wire_schema_manifest_checksum=0x5c6a250d", release_manifest)
         self.assertIn("release_script_root=share/lingqu/mem_service/scripts", release_manifest)
         self.assertIn(
             "release_script=share/lingqu/mem_service/scripts/"
@@ -1477,7 +1477,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn("metrics_http_listeners=1", cli_source)
         self.assertIn("client_retry_policies=1", cli_source)
         self.assertIn("client_api_profiles=2", cli_source)
-        self.assertIn("operation_count=39", (CLI_DIR / "wire-schema.txt").read_text())
+        self.assertIn("operation_count=40", (CLI_DIR / "wire-schema.txt").read_text())
         self.assertIn("field_count=229", (CLI_DIR / "wire-schema.txt").read_text())
         self.assertIn(
             "field=resolve_runtime_handoff.expected_owner type=u32 required=0",
@@ -1784,7 +1784,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         compat_matrix = (CLI_DIR / "compat-matrix.txt").read_text()
         self.assertIn("mem_service_compat_matrix_version=1", compat_matrix)
         self.assertIn("wire_version_current=1", compat_matrix)
-        self.assertIn("wire_schema_manifest_checksum=0xb0964fb0", compat_matrix)
+        self.assertIn("wire_schema_manifest_checksum=0x5c6a250d", compat_matrix)
         self.assertIn("compat_matrix_checksum=0xef0fb6d9", (CLI_DIR / "compat-baseline-v1.txt").read_text())
         self.assertIn("compat_baseline_checksum=0xa4c8146c", (CLI_DIR / "compat-old-new-matrix.txt").read_text())
         self.assertIn("idempotency_conflict_status=version_conflict", compat_matrix)

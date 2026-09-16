@@ -938,19 +938,20 @@ enum mem_service_managed_result mem_service_managed_recover(
         table->reclaim_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
-
+    if (entry->holder_count != 0 || entry->content_writing) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    }
     for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
-        struct mem_service_managed_mapping *mapping = &table->mappings[i];
+        const struct mem_service_managed_mapping *mapping = &table->mappings[i];
 
         if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_NONE &&
             mapping->generation == entry->generation &&
             strcmp(mapping->key, entry->key) == 0) {
-            memset(mapping, 0, sizeof(*mapping));
+            table->reclaim_rejected_count += 1U;
+            return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
         }
     }
-    memset(entry->holders, 0, sizeof(entry->holders));
-    entry->holder_count = 0;
-    entry->content_writing = false;
     if (backing_gone) {
         entry->descriptor_len = 0;
         memset(entry->descriptor, 0, sizeof(entry->descriptor));
@@ -962,6 +963,104 @@ enum mem_service_managed_result mem_service_managed_recover(
         entry->state = MEM_SERVICE_MANAGED_STATE_RETIRING;
     }
     table->reclaim_ok_count += 1U;
+    mem_service_managed_fill_view(entry, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+enum mem_service_managed_result mem_service_managed_fence_holder(
+    struct mem_service_managed_table *table,
+    const char *key,
+    uint64_t generation,
+    const char *holder_node_id,
+    uint64_t fenced_incarnation,
+    uint32_t *fenced_holders_out,
+    uint32_t *fenced_mappings_out,
+    struct mem_service_managed_view *view_out)
+{
+    struct mem_service_managed_allocation *entry;
+    bool owner_fenced = false;
+    uint32_t fenced_holders = 0;
+    uint32_t fenced_mappings = 0;
+    uint32_t holder;
+    uint32_t write = 0;
+    size_t mapping_index;
+
+    if (fenced_holders_out != NULL) *fenced_holders_out = 0;
+    if (fenced_mappings_out != NULL) *fenced_mappings_out = 0;
+    if (table == NULL || generation == 0 || fenced_incarnation == 0 ||
+        !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN) ||
+        !mem_service_managed_string_valid(holder_node_id,
+                                          MEM_SERVICE_MANAGED_NODE_ID_LEN)) {
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    entry = mem_service_managed_find(table, key);
+    if (entry == NULL) return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    if (entry->generation != generation)
+        return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    if (entry->state != MEM_SERVICE_MANAGED_STATE_QUARANTINED)
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+
+    for (holder = 0; holder < entry->holder_count; ++holder) {
+        const struct mem_service_managed_holder *binding =
+            &entry->holders[holder];
+
+        if (binding->provider_incarnation == fenced_incarnation &&
+            strcmp(binding->node_id, holder_node_id) == 0) {
+            if (binding->generation != generation)
+                return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+            fenced_holders += 1U;
+            if (strcmp(binding->session_id, entry->owner_session) == 0)
+                owner_fenced = true;
+        }
+    }
+    if (fenced_holders == 0) return MEM_SERVICE_MANAGED_RESULT_NOT_HOLDER;
+
+    for (mapping_index = 0;
+         mapping_index < MEM_SERVICE_MANAGED_MAX_MAPPINGS;
+         ++mapping_index) {
+        struct mem_service_managed_mapping *mapping =
+            &table->mappings[mapping_index];
+        bool owned_by_fenced_holder = false;
+
+        if (mapping->state == MEM_SERVICE_MANAGED_MAPPING_NONE ||
+            mapping->generation != generation ||
+            strcmp(mapping->key, key) != 0) {
+            continue;
+        }
+        for (holder = 0; holder < entry->holder_count; ++holder) {
+            const struct mem_service_managed_holder *binding =
+                &entry->holders[holder];
+
+            if (binding->provider_incarnation == fenced_incarnation &&
+                strcmp(binding->node_id, holder_node_id) == 0 &&
+                strcmp(binding->session_id, mapping->session_id) == 0) {
+                owned_by_fenced_holder = true;
+                break;
+            }
+        }
+        if (owned_by_fenced_holder) {
+            memset(mapping, 0, sizeof(*mapping));
+            fenced_mappings += 1U;
+        }
+    }
+
+    for (holder = 0; holder < entry->holder_count; ++holder) {
+        const struct mem_service_managed_holder *binding =
+            &entry->holders[holder];
+
+        if (binding->provider_incarnation == fenced_incarnation &&
+            strcmp(binding->node_id, holder_node_id) == 0) {
+            continue;
+        }
+        if (write != holder) entry->holders[write] = *binding;
+        write += 1U;
+    }
+    memset(&entry->holders[write], 0,
+           (entry->holder_count - write) * sizeof(entry->holders[0]));
+    entry->holder_count = write;
+    if (owner_fenced) entry->content_writing = false;
+    if (fenced_holders_out != NULL) *fenced_holders_out = fenced_holders;
+    if (fenced_mappings_out != NULL) *fenced_mappings_out = fenced_mappings;
     mem_service_managed_fill_view(entry, view_out);
     return MEM_SERVICE_MANAGED_RESULT_OK;
 }

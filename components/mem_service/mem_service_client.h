@@ -651,7 +651,7 @@ int mem_service_client_reclaim_allocation(
     enum mem_service_wire_status *status_out);
 
 /* Recovery reclaim is issued by the currently active home provider after
- * all remaining holder providers have rejoined with fresh incarnations.
+ * every old holder-provider identity has a durable physical fencing receipt.
  * current_incarnation identifies the caller; fenced_incarnation must match
  * the allocation's original home. backing_gone is valid only when the home
  * incarnation changed. */
@@ -663,6 +663,22 @@ int mem_service_client_recover_allocation(
     uint64_t generation,
     uint64_t fenced_incarnation,
     bool backing_gone,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+
+/* Submit the replacement provider's durable receipt for physical revocation
+ * of one exact old holder-provider identity. The provider must complete or
+ * prove absence of its local mappings, cache, TLB and device accesses before
+ * calling this API. A fresh idempotency key makes success replay-safe across
+ * daemon or client restart. */
+int mem_service_client_fence_allocation_holder(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *holder_node_id,
+    uint64_t current_incarnation,
+    uint64_t generation,
+    uint64_t fenced_incarnation,
+    const char *idempotency_key,
     struct mem_service_client_allocation *allocation_out,
     enum mem_service_wire_status *status_out);
 

@@ -36,10 +36,10 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 17843U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xca6611b5U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 39U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 233U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 18318U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0x5c6a250dU
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 40U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 239U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
@@ -152,6 +152,7 @@ static void usage(const char *argv0)
     printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
     printf(" [recover-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --fenced-incarnation <u64> --backing-gone <0|1>]");
+    printf(" [fence-allocation-holder --key <key> --node-id <id> --incarnation <u64> --generation <u64> --fenced-incarnation <u64> --idempotency-key <key>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
     printf(" [poll-recovery --node-id <id> --incarnation <u64> --fenced-incarnation <u64> --after-generation <u64>]");
     printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
@@ -2421,7 +2422,7 @@ static int run_version_fixture_check(void)
         strstr(manifest, "service_version=" MEM_SERVICE_RELEASE_VERSION "\n") == NULL ||
         strstr(manifest, "version_contract=text-kv\n") == NULL ||
         strstr(manifest, "wire_version=1\n") == NULL ||
-        strstr(manifest, "wire_schema_manifest_checksum=0xb0964fb0\n") == NULL ||
+        strstr(manifest, "wire_schema_manifest_checksum=0x5c6a250d\n") == NULL ||
         strstr(manifest, "api_abi_policy_checksum=0x5e460a87\n") == NULL ||
         strstr(manifest, "package_manifest_checksum=0x") == NULL ||
         strstr(manifest, "release_manifest_command=release-manifest\n") == NULL ||
@@ -5517,7 +5518,7 @@ static int run_release_manifest(void)
     printf("operation=query_training_artifact:%u\n",
            MEM_SERVICE_WIRE_OP_QUERY_TRAINING_ARTIFACT);
     for (uint32_t operation = MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT;
-         operation <= MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION; ++operation) {
+         operation <= MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER; ++operation) {
         const struct mem_service_wire_operation_schema *schema =
             mem_service_wire_schema_for_operation((enum mem_service_wire_operation)operation);
         if (schema != NULL) printf("operation=%s:%u\n", schema->name, operation);
@@ -5625,7 +5626,8 @@ static int run_release_fixture_check(void)
         MEM_SERVICE_WIRE_OP_RESTORE_SNAPSHOT_PAGE != 9U ||
         MEM_SERVICE_WIRE_OP_AUDIT_LOG != 10U ||
         MEM_SERVICE_WIRE_OP_PUT_OBJECT != 16U ||
-        MEM_SERVICE_WIRE_OP_QUERY_TRAINING_ARTIFACT != 97U) {
+        MEM_SERVICE_WIRE_OP_QUERY_TRAINING_ARTIFACT != 97U ||
+        MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER != 127U) {
         fprintf(stderr, "mem_service release-fixtures: operation id mismatch\n");
         failures -= 1;
     }
@@ -9579,6 +9581,34 @@ static int run_recover_allocation(int argc, char **argv)
                                       MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
                                       "recover-allocation",
                                       payload);
+}
+
+static int run_fence_allocation_holder(int argc, char **argv)
+{
+    char payload[640] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--generation", "generation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--fenced-incarnation",
+                                      "fenced_incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--idempotency-key",
+                                      "idempotency_key") != 0) {
+        return 2;
+    }
+    return run_client_payload_command(
+        argc,
+        argv,
+        MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER,
+        "fence-allocation-holder",
+        payload);
 }
 
 /*
@@ -14188,6 +14218,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "recover-allocation") == 0) {
         return run_recover_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "fence-allocation-holder") == 0) {
+        return run_fence_allocation_holder(argc, argv);
     }
     if (strcmp(argv[1], "poll-allocation") == 0) {
         return run_poll_allocation(argc, argv);

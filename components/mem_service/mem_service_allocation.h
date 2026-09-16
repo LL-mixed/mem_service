@@ -409,8 +409,25 @@ enum mem_service_managed_result mem_service_managed_reclaim(
     bool confirmed,
     struct mem_service_managed_view *view_out);
 
+/* Record a physical fencing receipt from the currently active replacement
+ * provider for one exact old holder-provider identity. The allocation must
+ * already be quarantined. All holder sessions bound to
+ * (holder_node_id, fenced_incarnation), plus only their mappings for this
+ * allocation generation, are removed atomically. A request naming no current
+ * holder fails; wire idempotency owns successful replay.
+ */
+enum mem_service_managed_result mem_service_managed_fence_holder(
+    struct mem_service_managed_table *table,
+    const char *key,
+    uint64_t generation,
+    const char *holder_node_id,
+    uint64_t fenced_incarnation,
+    uint32_t *fenced_holders_out,
+    uint32_t *fenced_mappings_out,
+    struct mem_service_managed_view *view_out);
+
 /* Recovery reclaim is restricted to an already quarantined identity after
- * the daemon has verified every remaining holder provider was replaced.
+ * every old holder has supplied the physical fencing receipt above.
  * A surviving home keeps its backing and enters RETIRING for ordinary worker
  * cleanup. A replaced home may retire immediately only when the replacement
  * provider confirms the old backing is gone. */

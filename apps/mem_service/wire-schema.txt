@@ -1,8 +1,8 @@
 mem_service_wire_schema_manifest_version=1
 wire_schema_version=1
 wire_payload_format=text-kv
-operation_count=39
-field_count=233
+operation_count=40
+field_count=239
 oneof_count=1
 oneof_field_count=2
 operation=health:1 schema_version=1 payload_format=text-kv fields=0 oneofs=0
@@ -280,3 +280,10 @@ field=reclaim_allocation.incarnation type=u64 required=1
 field=reclaim_allocation.confirmed type=u64 required=1
 field=reclaim_allocation.recovery type=u64 required=0
 field=reclaim_allocation.fenced_incarnation type=u64 required=0
+operation=fence_allocation_holder:127 schema_version=1 payload_format=text-kv fields=6 oneofs=0
+field=fence_allocation_holder.key type=string required=1
+field=fence_allocation_holder.generation type=u64 required=1
+field=fence_allocation_holder.node_id type=string required=1
+field=fence_allocation_holder.incarnation type=u64 required=1
+field=fence_allocation_holder.fenced_incarnation type=u64 required=1
+field=fence_allocation_holder.idempotency_key type=string required=1

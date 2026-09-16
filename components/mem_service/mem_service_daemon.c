@@ -4324,7 +4324,7 @@ static int mem_service_load_durable_store(struct mem_service *svc,
         for (i = 0; i < MEM_SERVICE_MAX_IDEMPOTENCY_RECORDS; ++i) {
             const struct mem_service_idempotency_record *r = &svc->idempotency_records[i];
             if (r->in_use && r->operation >= MEM_SERVICE_WIRE_OP_ALLOCATE_OBJECT &&
-                r->operation <= MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION)
+                r->operation <= MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER)
                 svc->managed_recovery_required = true;
         }
     }
@@ -11639,7 +11639,8 @@ static void mem_service_prune_idempotency_for_record_key(struct mem_service *svc
             idem->operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
             idem->operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT ||
             idem->operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION ||
-            idem->operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION) {
+            idem->operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION ||
+            idem->operation == MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER) {
             continue;
         }
         response_key[0] = '\0';
@@ -13395,7 +13396,6 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
     if (recovery != 0) {
         struct mem_service_provider_directory_poll poll;
         bool home_replaced;
-        uint32_t holder;
 
         result = mem_service_managed_inspect(&svc->managed, key, &view);
         if (result != MEM_SERVICE_MANAGED_RESULT_OK)
@@ -13428,28 +13428,12 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
                      "status=internal\nreason=recovery_providers_not_ready\n");
             return MEM_SERVICE_WIRE_STATUS_INTERNAL;
         }
-        for (holder = 0; holder < view.holder_count; ++holder) {
-            uint64_t active_incarnation = 0;
-            const struct mem_service_managed_holder *binding =
-                &view.holders[holder];
-
-            if (!binding->node_id[0] || !binding->provider_incarnation) {
-                snprintf(response, response_len,
-                         "status=internal\nreason=holder_identity_unknown\n");
-                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
-            }
-            if (!mem_service_provider_directory_lookup_active(
-                    &svc->provider_directory, binding->node_id,
-                    mem_service_monotonic_ms(), &active_incarnation)) {
-                snprintf(response, response_len,
-                         "status=internal\nreason=holder_provider_not_ready\n");
-                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
-            }
-            if (active_incarnation == binding->provider_incarnation) {
-                snprintf(response, response_len,
-                         "status=internal\nreason=holder_fence_required\n");
-                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
-            }
+        if (view.holder_count != 0) {
+            snprintf(response, response_len,
+                     "status=internal\nreason=holder_fence_receipt_required\n"
+                     "remaining_holders=%u\n",
+                     view.holder_count);
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
         }
         result = mem_service_managed_recover(&svc->managed, key, generation,
                                              confirmed != 0, &view);
@@ -13468,6 +13452,82 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
     if (result == MEM_SERVICE_MANAGED_RESULT_OK)
         mem_service_maybe_complete_managed_recovery(svc);
     return mem_service_managed_finish(result, &view, key, response, response_len);
+}
+
+static enum mem_service_wire_status mem_service_fence_allocation_holder(
+    struct mem_service *svc,
+    const char *payload,
+    char *response,
+    size_t response_len)
+{
+    char key[MEM_SERVICE_MANAGED_KEY_LEN];
+    char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN];
+    uint64_t incarnation;
+    uint64_t generation;
+    uint64_t fenced_incarnation;
+    uint32_t fenced_holders = 0;
+    uint32_t fenced_mappings = 0;
+    struct mem_service_managed_view view;
+    enum mem_service_managed_result result;
+    enum mem_service_wire_status status;
+    size_t used;
+
+    if (!mem_service_managed_payload_valid(
+            payload,
+            MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER,
+            response,
+            response_len)) {
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
+    (void)mem_service_payload_get_string(payload,
+                                         "node_id",
+                                         node_id,
+                                         sizeof(node_id));
+    incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
+    generation = mem_service_payload_get_u64(payload, "generation", 0);
+    fenced_incarnation =
+        mem_service_payload_get_u64(payload, "fenced_incarnation", 0);
+    if (!generation || !fenced_incarnation || incarnation == fenced_incarnation) {
+        snprintf(response, response_len,
+                 "status=invalid_session\nreason=invalid_fence_identity\n");
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    status = mem_service_provider_caller_check(svc,
+                                               node_id,
+                                               incarnation,
+                                               response,
+                                               response_len);
+    if (status != MEM_SERVICE_WIRE_STATUS_OK) return status;
+    if (!svc->managed_recovery_required || !svc->managed_recovery_known) {
+        snprintf(response, response_len,
+                 "status=internal\nreason=recovery_scope_unknown\n");
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    result = mem_service_managed_fence_holder(&svc->managed,
+                                              key,
+                                              generation,
+                                              node_id,
+                                              fenced_incarnation,
+                                              &fenced_holders,
+                                              &fenced_mappings,
+                                              &view);
+    status = mem_service_managed_finish(result,
+                                        &view,
+                                        key,
+                                        response,
+                                        response_len);
+    if (status != MEM_SERVICE_WIRE_STATUS_OK) return status;
+    used = strlen(response);
+    if (used < response_len) {
+        (void)snprintf(response + used,
+                       response_len - used,
+                       "fenced_holder_count=%u\n"
+                       "fenced_mapping_count=%u\n",
+                       fenced_holders,
+                       fenced_mappings);
+    }
+    return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
 static enum mem_service_wire_status mem_service_dispatch_operation(
@@ -13610,6 +13670,11 @@ static enum mem_service_wire_status mem_service_dispatch_operation(
         return mem_service_mapping_transition(svc, payload, response, response_len);
     case MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION:
         return mem_service_reference_transition(svc, payload, response, response_len);
+    case MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER:
+        return mem_service_fence_allocation_holder(svc,
+                                                   payload,
+                                                   response,
+                                                   response_len);
     default:
         return MEM_SERVICE_WIRE_STATUS_UNSUPPORTED;
     }
@@ -13938,7 +14003,8 @@ static bool mem_service_can_use_cleanup_reservation(
     uint64_t action = 0;
 
     if (operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
-        operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT)
+        operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT ||
+        operation == MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER)
         return true;
     if (operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION &&
         mem_service_payload_get_u64_checked(payload, "action", &action)) {
@@ -13965,7 +14031,8 @@ static bool mem_service_history_managed_operation(uint32_t operation)
         operation == MEM_SERVICE_WIRE_OP_RELEASE_OBJECT ||
         operation == MEM_SERVICE_WIRE_OP_RETIRE_OBJECT ||
         operation == MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION ||
-        operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION;
+        operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION ||
+        operation == MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER;
 }
 
 static int mem_service_history_make_room(struct mem_service *svc,
@@ -14488,7 +14555,8 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
         if (!svc->managed_store_failed &&
             (audit_appended || quarantine_before != svc->managed.quarantine_events ||
              operation == MEM_SERVICE_WIRE_OP_PUBLISH_ALLOCATION ||
-             operation == MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION) &&
+             operation == MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION ||
+             operation == MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER) &&
             mem_service_save_store(svc, store_path) != 0) {
             svc->managed_store_failed = true;
             svc->managed_recovery_required = true;
@@ -14617,6 +14685,7 @@ static bool mem_service_operation_mutates(enum mem_service_wire_operation operat
     case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
     case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
     case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER:
         return true;
     default:
         return false;
@@ -14744,6 +14813,7 @@ static uint64_t mem_service_estimate_new_record_count(
     case MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT:
     case MEM_SERVICE_WIRE_OP_RELEASE_OBJECT:
     case MEM_SERVICE_WIRE_OP_RETIRE_OBJECT:
+    case MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER:
         /* Managed allocations live in their own table with its own
          * capacity gate; they do not consume legacy records. */
         return 0U;
@@ -16010,7 +16080,8 @@ struct mem_service_connection_context {
 /*
  * Operations exposed on network endpoints in this stage: health/readiness
  * queries plus the managed object allocation control set (allocate,
- * acquire, release, retire, inspect-allocation, allocation-stats). Legacy
+ * acquire, release, retire, inspect-allocation, allocation-stats and exact
+ * holder fencing receipts). Legacy
  * inline/path put, materialize, snapshot/restore and other local file or
  * admin operations stay available on unix endpoints and are rejected with
  * UNSUPPORTED on network endpoints. Provider directory control operations
@@ -16040,6 +16111,7 @@ static bool mem_service_network_operation_allowed(
     case MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION:
     case MEM_SERVICE_WIRE_OP_POLL_ALLOCATION:
     case MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION:
+    case MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER:
         return true;
     default:
         return false;

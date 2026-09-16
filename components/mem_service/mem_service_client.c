@@ -2191,6 +2191,47 @@ int mem_service_client_recover_allocation(
                                               status_out);
 }
 
+int mem_service_client_fence_allocation_holder(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *holder_node_id,
+    uint64_t current_incarnation,
+    uint64_t generation,
+    uint64_t fenced_incarnation,
+    const char *idempotency_key,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    char payload[640] = "";
+
+    if (!current_incarnation || !generation || !fenced_incarnation ||
+        current_incarnation == fenced_incarnation ||
+        mem_service_client_append_required_string(payload, sizeof(payload),
+                                                  "key", key) != 0 ||
+        mem_service_client_append_required_string(payload, sizeof(payload),
+                                                  "node_id",
+                                                  holder_node_id) != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "incarnation",
+                                            current_incarnation) != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "generation", generation) != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "fenced_incarnation",
+                                            fenced_incarnation) != 0 ||
+        mem_service_client_append_required_string(payload, sizeof(payload),
+                                                  "idempotency_key",
+                                                  idempotency_key) != 0) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_send_allocation(
+        client,
+        MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER,
+        payload,
+        allocation_out,
+        status_out);
+}
+
 /*
  * Client-side object mapping. No control RPC is issued here: the caller
  * supplies the allocation view from a successful acquire/inspect and a

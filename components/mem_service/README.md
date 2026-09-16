@@ -38,11 +38,23 @@ transaction 不清除，不调用 backing release。
 `fenced_incarnation` 字段；安装 SDK 提供
 `mem_service_client_recover_allocation()`，诊断 CLI 提供
 `recover-allocation`。调用方必须是当前活动 home provider，原 home 身份必须与
-隔离对象完全匹配，全部 required provider 必须 ready；每个剩余 holder 的节点
-必须以不同 incarnation 重新加入，旧版未绑定 holder 或不完整 checkpoint 拒绝
-解除隔离。原 home 仍存活时，恢复只清除已完成 fencing 的 holder/mapping 并把
-对象推进到 RETIRING，由原 worker 完成正常 backing 回收；home 已替换时，只有
-replacement provider 明确确认旧 backing 已不存在，服务才直接推进到 RETIRED。
+隔离对象完全匹配，全部 required provider 必须 ready。provider incarnation 变化
+只建立 replacement 身份，不能证明旧 holder 已经物理排空。
+
+每个 replacement holder provider 完成或证明本地 route、VMA、cache、TLB 与设备
+访问均已撤销后，必须调用独立 operation `0x7f fence-allocation-holder`；安装 SDK
+入口为 `mem_service_client_fence_allocation_holder()`，诊断 CLI 使用同名命令。
+请求同时携带当前 active incarnation、被撤销的旧 incarnation、精确 allocation
+generation 和幂等键。服务只删除该旧 provider 身份拥有的 holder sessions 及这些
+session 在同一 allocation generation 上的 mapping，其他节点义务保持原样；成功
+回执与变更在同一 managed snapshot 中持久化。缺少旧 holder、旧 provider 仍为
+当前 active 身份、未知恢复范围或非 QUARANTINED 对象均失败关闭。
+
+`recover-allocation` 要求 holder 与 mapping 义务已经归零，禁止凭 replacement
+registration 自动清除。原 home 仍存活时，对象推进到 RETIRING，由原 worker 完成
+正常 backing 回收；home 已替换时，只有 replacement provider 明确确认旧 backing
+已不存在，服务才直接推进到 RETIRED。旧版未绑定 holder 或不完整 checkpoint 拒绝
+解除隔离。
 所有已知恢复义务终结后才清除全局 recovery gate。该控制面接口不自行撤销 CPU
 访问、不枚举 kernel 资源，也不构成 backing 消失证明；provider worker 必须在
 调用前完成物理对账和 fencing；OBMM 仅接通下述 lost-home 恢复子集。

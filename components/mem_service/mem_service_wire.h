@@ -65,6 +65,10 @@ enum mem_service_wire_operation {
     MEM_SERVICE_WIRE_OP_POLL_ALLOCATION = 0x7c,
     MEM_SERVICE_WIRE_OP_MAPPING_TRANSITION = 0x7d,
     MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION = 0x7e,
+    /* Physical fencing receipt for an exact old holder-provider identity.
+     * The replacement provider may send this only after its local route,
+     * mappings, cache and device accesses have been drained or proven absent. */
+    MEM_SERVICE_WIRE_OP_FENCE_ALLOCATION_HOLDER = 0x7f,
 };
 
 enum mem_service_wire_reference_action {
