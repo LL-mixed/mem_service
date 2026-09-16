@@ -52,6 +52,9 @@
 #define MEM_SERVICE_OBMM_KIND_QWEN3_ENGRAM_SELECTED 10U
 #define MEM_SERVICE_OBMM_KIND_QWEN3_ENGRAM_STATE 11U
 #define MEM_SERVICE_OBMM_KIND_SERVING_REQUEST 12U
+/* Exact terminal logits plus token-text tables produced by a model range.
+ * This is distinct from the compact 64-byte sampled-token handoff (kind 6). */
+#define MEM_SERVICE_OBMM_KIND_MODEL_TERMINAL_RESULT 13U
 
 /*
  * Qwen3 aliases preserve the original ABI names. New shared code must use the
