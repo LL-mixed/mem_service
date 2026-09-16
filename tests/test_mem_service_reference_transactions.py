@@ -261,7 +261,12 @@ class ReferenceTransactionTests(unittest.TestCase):
                 "probe_readonly key=obj-1",
                 "unmap key=obj-1",
                 "release key=obj-1 idempotency_key=reader-release-b expected_generation=1",
-            ], session_id="reader", header_extra="provider=session-loopback")
+            ], session_id="reader", header_extra=(
+                "provider=session-loopback\n"
+                f"holder_node_id={fixtures.HOME_NODE}\n"
+                "holder_provider_incarnation="
+                f"{fixtures.HOME_INCARNATION}"
+            ))
         result = self.fixture._run_session(config)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("action=map_reference key=obj-1 status=ok", result.stdout)

@@ -12,6 +12,10 @@ managed store V2 增加 holder 的精确节点/incarnation 归属和 V2 绑定�
 其中未绑定 holder 按保守规则处理；原 wire snapshot 导出/覆盖不能替代该恢复域。
 安装 SDK 增加 node-aware opt-in acquire 及 reference map/unmap API，DS4 现有
 transfer 热路径不变。
+恢复感知部署若通过 `object-session` 执行这些操作，配置头必须成对提供
+`holder_node_id` 与 `holder_provider_incarnation`，且 identity 与 provider
+directory 当前登记值一致；省略时继续使用无绑定兼容路径。DS4 当前 serving
+接入不生成该诊断配置。
 
 managed daemon 的运行期 provider 失联隔离按已绑定 holder 的精确节点/incarnation
 生效；旧版未绑定 holder 继续在任一 provider 失联时保守隔离。重新注册不能恢复

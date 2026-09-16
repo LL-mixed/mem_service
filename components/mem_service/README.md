@@ -68,6 +68,13 @@ holder 节点身份；daemon 只接受目录中当前活动的精确 provider in
 归属写入 checkpoint。CLI 使用既有 operation 的可选 wire 字段，安装 SDK 增加
 node-aware opt-in 入口；core 与 SDK 源码消费者需重新链接。
 
+`object-session` 通过成对的配置头 `holder_node_id=<id>` 和
+`holder_provider_incarnation=<u64>` 启用同一契约。两项必须同时存在，incarnation
+必须非零；`acquire`、`acquire_reference`、`map_reference` 及其 unmap/失败清理均
+使用同一身份。该身份来自服务 provider directory，不能使用 OBMM peer canary 的
+数值 `provider_generation` 代替。省略这对配置继续保留旧版无绑定行为，恢复协调器
+会对包含无绑定 holder 的 checkpoint 保守拒绝。
+
 ## 退役 descriptor 的同进程诊断契约
 
 `object-session` 的 `capture_mapping key=<old>` 只保存当前完整 allocation

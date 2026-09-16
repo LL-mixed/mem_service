@@ -660,6 +660,24 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                                      "op=inspect key=k expect_status=banana\n",
                 "bad-request-timeout": f"session_id=x\nconnect={self._connect}\n"
                                        "request_timeout_ms=0\nop=stats\n",
+                "holder-node-only": f"session_id=x\nconnect={self._connect}\n"
+                                    f"holder_node_id={HOME_NODE}\nop=stats\n",
+                "holder-incarnation-only":
+                    f"session_id=x\nconnect={self._connect}\n"
+                    f"holder_provider_incarnation={HOME_INCARNATION}\nop=stats\n",
+                "duplicate-holder-node":
+                    f"session_id=x\nconnect={self._connect}\n"
+                    f"holder_node_id={HOME_NODE}\nholder_node_id={HOME_NODE}\n"
+                    f"holder_provider_incarnation={HOME_INCARNATION}\nop=stats\n",
+                "duplicate-holder-incarnation":
+                    f"session_id=x\nconnect={self._connect}\n"
+                    f"holder_node_id={HOME_NODE}\n"
+                    f"holder_provider_incarnation={HOME_INCARNATION}\n"
+                    f"holder_provider_incarnation={HOME_INCARNATION}\nop=stats\n",
+                "zero-holder-incarnation":
+                    f"session_id=x\nconnect={self._connect}\n"
+                    f"holder_node_id={HOME_NODE}\n"
+                    "holder_provider_incarnation=0\nop=stats\n",
             }
             for name, text in cases.items():
                 with self.subTest(case=name):
@@ -672,6 +690,122 @@ class MemServiceObjectSessionTests(unittest.TestCase):
                                   f"{name}: {result.stderr}")
         finally:
             self._stop_server(daemon)
+
+    def test_holder_identity_survives_restart_and_enables_recovery_poll(self):
+        store = self.root / "object-session-holder.store"
+        daemon = self._start_home_daemon(extra_config=f"store={store}")
+        victim = None
+        try:
+            self._register_home()
+            setup = self._write_session(
+                "holder-setup.conf",
+                self._connect,
+                [
+                    "allocate key=held idempotency_key=held-allocate "
+                    "size_bytes=4096 capabilities=map",
+                    f"publish key=held node_id={HOME_NODE} "
+                    f"incarnation={HOME_INCARNATION} generation=1 "
+                    "descriptor_hex=deadbeef address=4096 address_len=4096",
+                ],
+                session_id="holder-setup",
+            )
+            setup_result = self._run_session(setup)
+            self.assertEqual(setup_result.returncode, 0,
+                             setup_result.stderr + setup_result.stdout)
+
+            victim_config = self._write_session(
+                "holder-victim.conf",
+                self._connect,
+                [
+                    "acquire key=held idempotency_key=held-acquire "
+                    "expected_generation=1",
+                    "wait_state key=held state=retired timeout_ms=30000 "
+                    "poll_ms=100",
+                ],
+                session_id="holder-victim",
+                header_extra=(
+                    f"holder_node_id={HOME_NODE}\n"
+                    f"holder_provider_incarnation={HOME_INCARNATION}"
+                ),
+            )
+            victim = subprocess.Popen(
+                [str(self.binary), "object-session", "--config",
+                 str(victim_config)],
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.time() + 10.0
+            view: dict[str, str] = {}
+            while time.time() < deadline:
+                if victim.poll() is not None:
+                    stdout, stderr = victim.communicate(timeout=1)
+                    self.fail(
+                        f"holder session exited early rc={victim.returncode}\n"
+                        f"stdout={stdout}\nstderr={stderr}"
+                    )
+                inspected = self._run_client(
+                    "inspect-allocation", "--key", "held",
+                    "--connect", self._connect,
+                )
+                self.assertEqual(inspected.returncode, 0,
+                                 inspected.stderr + inspected.stdout)
+                view = _parse_kv(inspected.stdout)
+                if view.get("live_refs") == "1":
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("object-session holder was never registered")
+
+            self.assertEqual(view["holder.0.node_id"], HOME_NODE)
+            self.assertEqual(view["holder.0.provider_incarnation"],
+                             str(HOME_INCARNATION))
+            victim.kill()
+            victim.communicate(timeout=5)
+            victim = None
+
+            self._stop_server(daemon)
+            daemon = None
+            daemon = self._start_home_daemon(extra_config=f"store={store}")
+            restarted = self._run_client(
+                "inspect-allocation", "--key", "held",
+                "--connect", self._connect,
+            )
+            self.assertEqual(restarted.returncode, 0,
+                             restarted.stderr + restarted.stdout)
+            restarted_view = _parse_kv(restarted.stdout)
+            self.assertEqual(restarted_view["state"], "quarantined")
+            self.assertEqual(restarted_view["holder.0.node_id"], HOME_NODE)
+            self.assertEqual(
+                restarted_view["holder.0.provider_incarnation"],
+                str(HOME_INCARNATION),
+            )
+
+            replacement = HOME_INCARNATION + 1
+            self._register_home(incarnation=replacement)
+            recovery = self._run_client(
+                "poll-recovery",
+                "--node-id", HOME_NODE,
+                "--incarnation", str(replacement),
+                "--fenced-incarnation", str(HOME_INCARNATION),
+                "--after-generation", "0",
+                "--connect", self._connect,
+            )
+            self.assertEqual(recovery.returncode, 0,
+                             recovery.stderr + recovery.stdout)
+            recovery_view = _parse_kv(recovery.stdout)
+            self.assertEqual(recovery_view["key"], "held")
+            self.assertEqual(recovery_view["state"], "quarantined")
+            self.assertNotIn("recovery_scope_unknown", recovery.stdout)
+            self.assertEqual(store.read_text().splitlines()[0],
+                             "mem_service_store_managed_v2")
+        finally:
+            if victim is not None:
+                victim.kill()
+                victim.communicate(timeout=5)
+            if daemon is not None:
+                self._stop_server(daemon)
 
     # Usage errors: missing --config or a nonexistent path exits 2.
     def test_usage_errors(self):

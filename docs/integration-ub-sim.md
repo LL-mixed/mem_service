@@ -63,6 +63,13 @@ generation，并须提前在服务目录登记。命令要求 guest/kernel insta
 replacement 配置启动 worker。该路径适用于 guest/kernel 已重建导致旧 backing
 确定消失的场景；同 kernel 恢复和远端 holder 的物理排空仍保持 fail-closed。
 
+需要重启恢复归属的 guest 必须在每个 `object-session` 配置头写入
+`holder_node_id=guest-node-<node>` 与
+`holder_provider_incarnation=<directory-incarnation>`。两项共同约束 acquire、
+reference acquire/map/unmap 和失败清理；值必须与 provider directory 当前登记身份
+完全一致。OBMM 配置的 `provider_generation` 是 peer canary 代际，不能用作服务
+holder incarnation。
+
 V2 writer 的 `object-session` 顺序为 acquire、`begin_reference key=<allocation>
 generation=<g> version=<old-version> idempotency_key=<id>`、map/write、
 `publish_reference key=<logical> offset=<n> len=<n> kind=<n> owner=<n> producer=<n>

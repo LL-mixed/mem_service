@@ -9702,6 +9702,9 @@ struct mem_service_object_session_config {
     char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
     char connect[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
     uint64_t request_timeout_ms;
+    char holder_node_id[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
+    uint64_t holder_provider_incarnation;
+    unsigned holder_identity_fields;
     bool provider_configured;
     char provider_kind[MEM_SERVICE_OBJECT_SESSION_PROVIDER_KIND_LEN];
     char provider_device[MEM_SERVICE_OBJECT_SESSION_FIELD_VALUE_LEN];
@@ -9750,6 +9753,8 @@ struct mem_service_object_session_holder {
 };
 
 struct mem_service_object_session_state {
+    char holder_node_id[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
+    uint64_t holder_provider_incarnation;
     bool has_view;
     struct mem_service_client_allocation view;
     struct mem_service_object_session_holder
@@ -11145,6 +11150,33 @@ static int mem_service_object_session_load_config(
                 return 2;
             }
             have_request_timeout = true;
+        } else if (strncmp(start, "holder_node_id=", 15) == 0) {
+            if ((config->holder_identity_fields & 1U) != 0U ||
+                !mem_service_object_session_copy_field(
+                    config->holder_node_id,
+                    sizeof(config->holder_node_id),
+                    start + 15)) {
+                mem_service_object_session_config_error(line_no,
+                                                        "bad holder_node_id",
+                                                        NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->holder_identity_fields |= 1U;
+        } else if (strncmp(start, "holder_provider_incarnation=", 28) == 0) {
+            if ((config->holder_identity_fields & 2U) != 0U ||
+                !mem_service_object_session_parse_u64(
+                    start + 28,
+                    &config->holder_provider_incarnation) ||
+                config->holder_provider_incarnation == 0U) {
+                mem_service_object_session_config_error(
+                    line_no,
+                    "bad holder_provider_incarnation",
+                    NULL);
+                (void)fclose(fp);
+                return 2;
+            }
+            config->holder_identity_fields |= 2U;
         } else if (strncmp(start, "provider=", 9) == 0) {
             if (config->provider_configured ||
                 strlen(start + 9) >=
@@ -11262,6 +11294,14 @@ static int mem_service_object_session_load_config(
     }
     if (config->op_count == 0) {
         mem_service_object_session_config_error(0, "no op lines", NULL);
+        return 2;
+    }
+    if (config->holder_identity_fields != 0U &&
+        config->holder_identity_fields != 3U) {
+        mem_service_object_session_config_error(
+            0,
+            "holder_node_id and holder_provider_incarnation are required together",
+            NULL);
         return 2;
     }
     if (mem_service_object_session_validate_provider(config) != 0) {
@@ -11498,11 +11538,30 @@ static int mem_service_object_session_provider_open(
 static int mem_service_object_session_unmap(
     struct mem_service_object_session_state *state, enum mem_service_wire_status *status)
 {
-    return state->mapped_reference ?
-        mem_service_client_unmap_managed_reference(state->client, &state->channel,
-            &state->mapping, &state->reference_lifecycle, status) :
-        mem_service_client_unmap_managed_allocation(state->client, &state->channel,
-            &state->mapping, &state->mapping_lifecycle, status);
+    if (!state->mapped_reference) {
+        return mem_service_client_unmap_managed_allocation(
+            state->client,
+            &state->channel,
+            &state->mapping,
+            &state->mapping_lifecycle,
+            status);
+    }
+    if (state->holder_node_id[0] != '\0') {
+        return mem_service_client_unmap_managed_reference_at_node(
+            state->client,
+            &state->channel,
+            &state->mapping,
+            &state->reference_lifecycle,
+            state->holder_node_id,
+            state->holder_provider_incarnation,
+            status);
+    }
+    return mem_service_client_unmap_managed_reference(
+        state->client,
+        &state->channel,
+        &state->mapping,
+        &state->reference_lifecycle,
+        status);
 }
 
 static int mem_service_object_session_provider_close(
@@ -11981,7 +12040,19 @@ static int mem_service_object_session_run_op(
         snprintf(request.key, sizeof(request.key), "%s", request.reference.allocation_key);
         snprintf(request.session_id, sizeof(request.session_id), "%s", session_id);
         snprintf(request.idempotency_key, sizeof(request.idempotency_key), "%s", op->idempotency_key);
-        rc = mem_service_client_reference_transition(client, &request, &result, &status);
+        rc = config->holder_identity_fields == 3U ?
+            mem_service_client_reference_transition_at_node(
+                client,
+                &request,
+                config->holder_node_id,
+                config->holder_provider_incarnation,
+                &result,
+                &status) :
+            mem_service_client_reference_transition(
+                client,
+                &request,
+                &result,
+                &status);
         if (!rc) {
             state->reference = result.reference;
             state->has_reference = true;
@@ -11990,14 +12061,27 @@ static int mem_service_object_session_run_op(
         break;
     }
     case MEM_SERVICE_OBJECT_SESSION_ACTION_ACQUIRE:
-        rc = mem_service_client_acquire_object(client,
-                                               op->key,
-                                               op->idempotency_key,
-                                               session_id,
-                                               op->has_expected_generation,
-                                               op->expected_generation,
-                                               &view,
-                                               &status);
+        rc = config->holder_identity_fields == 3U ?
+            mem_service_client_acquire_object_at_node(
+                client,
+                op->key,
+                op->idempotency_key,
+                session_id,
+                config->holder_node_id,
+                config->holder_provider_incarnation,
+                op->has_expected_generation,
+                op->expected_generation,
+                &view,
+                &status) :
+            mem_service_client_acquire_object(
+                client,
+                op->key,
+                op->idempotency_key,
+                session_id,
+                op->has_expected_generation,
+                op->expected_generation,
+                &view,
+                &status);
         break;
     case MEM_SERVICE_OBJECT_SESSION_ACTION_RELEASE:
         /* The SDK contract requires unmap before release: a live mapping
@@ -12199,7 +12283,14 @@ static int mem_service_object_session_run_op(
             state->mapped_content_version = reference_map ?
                 state->reference.object.object_version : supplied.version;
         }
-        rc = reference_map ?
+        rc = reference_map && config->holder_identity_fields == 3U ?
+            mem_service_client_map_managed_reference_at_node(
+                client, &state->channel, &state->reference,
+                config->session_id, operation_id,
+                config->holder_node_id,
+                config->holder_provider_incarnation,
+                &state->mapping, &state->reference_lifecycle, &status) :
+            reference_map ?
             mem_service_client_map_managed_reference(client, &state->channel, &state->reference,
                 config->session_id, operation_id, &state->mapping, &state->reference_lifecycle, &status) :
             mem_service_client_map_managed_allocation(client, &state->channel,
@@ -12764,6 +12855,14 @@ static int run_object_session(int argc, char **argv)
         return 2;
     }
     memset(&state, 0, sizeof(state));
+    if (config.holder_identity_fields == 3U) {
+        snprintf(state.holder_node_id,
+                 sizeof(state.holder_node_id),
+                 "%s",
+                 config.holder_node_id);
+        state.holder_provider_incarnation =
+            config.holder_provider_incarnation;
+    }
     mem_service_wire_client_options_init(&options);
     options.timeout_ms = config.request_timeout_ms;
     mem_service_client_init_with_options(&client, config.connect, &options);
