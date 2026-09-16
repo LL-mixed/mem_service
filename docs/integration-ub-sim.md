@@ -270,6 +270,14 @@ publish/reclaim 确认；查询不提供独占领取保证。此新增接口尚�
 已自动执行这些任务。服务 wire 版本保持 1，新增 operation 为 `0x7c`；旧服务会
 拒绝未知操作，消费者不得静默退回手工 descriptor 发布流程。
 
+多 home 部署通过 `allocate-object --home-node <node_id>` 或
+`mem_service_client_allocate_object_at_home()` 为每个新对象指定中立 home 节点；
+省略时继续使用 daemon 的 `allocation_home_provider` 默认值。服务只接纳 provider
+目录中仍处于 active 的节点，并把当前 incarnation 固定到 allocation；同一对象
+不能在重放时切换 home。每个 home 仍须运行自己的 `serve-allocations` worker，
+部署还必须给各 home 提供不重叠的实际地址分配权威。仅有 per-request placement
+不能证明跨 home GSVA 区间不会冲突。
+
 `mem_service` 已从 ub_sim 的 `guest-linux/aarch64` 子树抽取为独立仓库，
 本仓库是唯一权威来源。ub_sim 不再保存组件副本，而是按如下契约直接编译
 本仓库的源码：

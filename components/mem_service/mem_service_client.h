@@ -527,6 +527,17 @@ int mem_service_client_allocate_object(
     const struct mem_service_client_allocate *request,
     struct mem_service_client_allocation *allocation_out,
     enum mem_service_wire_status *status_out);
+
+/* Allocate on one explicit, provider-neutral home node.  This preserves the
+ * v1 request struct ABI; callers that do not need placement keep using
+ * mem_service_client_allocate_object().  The daemon validates that the node
+ * has an active provider-directory registration before recording the intent. */
+int mem_service_client_allocate_object_at_home(
+    const struct mem_service_client *client,
+    const struct mem_service_client_allocate *request,
+    const char *home_node,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
 int mem_service_client_acquire_object(
     const struct mem_service_client *client,
     const char *key,

@@ -35,7 +35,7 @@ field=network_peer type=string repeatable format=<node_id>@<ipv4> description=tr
 field=network_io_timeout_ms type=u64 description=per-connection header+body+response I/O deadline for trusted-guest-network clients; only valid with auth_mode=trusted-guest-network
 field=required_provider type=string repeatable format=<node_id> description=provider node whose fresh directory registration is required before managed data operations leave the fail-closed state; node IDs must be unique
 field=provider_lease_ms type=u64 description=provider directory registration lease; entries without a refresh inside the lease expire and data-plane readiness is revoked
-field=allocation_home_provider type=string format=<node_id> description=single home provider node (address-allocation owner) that managed allocate binds to; the node must hold an active directory registration and publishes the reserved descriptor before the allocation becomes active
+field=allocation_home_provider type=string format=<node_id> description=default home provider node for managed allocate when the request omits home_node; an explicit home_node must also hold an active directory registration and publishes the reserved descriptor before the allocation becomes active
 field=metrics_mode type=enum values=text-kv description=current metrics export mode
 field=metrics_listen type=string description=optional HTTP metrics endpoint, must be tcp:127.0.0.1:<port>
 field=adapter_enablement type=enum values=core,qwen3 description=enabled adapter surface

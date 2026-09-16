@@ -282,6 +282,18 @@ resource reuse. This API carries metadata only and does not prove backing or
 data-plane readiness. It uses the existing trusted-control-endpoint security
 boundary; a self-reported node identity is not authentication.
 
+`allocate-object` accepts an optional provider-neutral `home_node`. When it is
+present, the daemon binds a new allocation to that node's current active
+provider-directory incarnation. When it is absent, `allocation_home_provider`
+remains the default. The typed SDK exposes this without changing the v1 request
+struct ABI through `mem_service_client_allocate_object_at_home()`; the existing
+`mem_service_client_allocate_object()` keeps the default placement behavior.
+Unknown, expired, or unready homes fail closed before an allocation intent is
+created. Replays cannot move an existing key to another home. Each selected
+home still requires its own allocation worker and independent physical-resource
+ownership; placement metadata alone does not coordinate overlapping address
+ranges across homes.
+
 `mem_service` owns the guest-side memory/object metadata service used by LLM
 inference guest harnesses and is being promoted into a standalone Memory
 Service process.

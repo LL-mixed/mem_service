@@ -12019,6 +12019,7 @@ static enum mem_service_wire_status mem_service_allocate_object(
     char key[MEM_SERVICE_MANAGED_KEY_LEN];
     char idempotency_key[MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN];
     char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+    char requested_home_node[MEM_SERVICE_MANAGED_NODE_ID_LEN + 1U];
     struct mem_service_managed_request request;
     struct mem_service_managed_view view;
     enum mem_service_managed_result result;
@@ -12046,12 +12047,27 @@ static enum mem_service_wire_status mem_service_allocate_object(
                                        sizeof(session_id))) {
         request.session_id = session_id;
     }
+    bool has_requested_home = mem_service_payload_get_string(
+        payload,
+        "home_node",
+        requested_home_node,
+        sizeof(requested_home_node));
+    if (has_requested_home &&
+        strlen(requested_home_node) >= MEM_SERVICE_MANAGED_NODE_ID_LEN) {
+        snprintf(response,
+                 response_len,
+                 "status=invalid_session\nreason=invalid_request\n"
+                 "operation=allocate_object\nfield=home_node\n");
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
     request.size_bytes = mem_service_payload_get_u64(payload, "size_bytes", 0);
     request.alignment_bytes =
         mem_service_payload_get_u64(payload, "alignment_bytes", 0);
     request.capabilities = mem_service_payload_get_u64(payload, "capabilities", 0);
-    if (!svc->managed.backing_registered &&
-        svc->allocation_home_node_id[0] != '\0') {
+    const char *selected_home = has_requested_home
+                                    ? requested_home_node
+                                    : svc->allocation_home_node_id;
+    if (!svc->managed.backing_registered && selected_home[0] != '\0') {
         /*
          * Provider-backed path: bind the allocation to the configured
          * home provider's active registration. An idempotent replay of
@@ -12066,10 +12082,19 @@ static enum mem_service_wire_status mem_service_allocate_object(
             existing.state != MEM_SERVICE_MANAGED_STATE_RETIRED &&
             strcmp(existing.key, key) == 0;
 
+        if (replay && has_requested_home &&
+            strcmp(existing.home_node_id, selected_home) != 0) {
+            return mem_service_managed_finish(
+                MEM_SERVICE_MANAGED_RESULT_KEY_CONFLICT,
+                NULL,
+                key,
+                response,
+                response_len);
+        }
         if (!replay) {
             if (!mem_service_provider_directory_lookup_active(
                     &svc->provider_directory,
-                    svc->allocation_home_node_id,
+                    selected_home,
                     mem_service_monotonic_ms(),
                     &home_incarnation)) {
                 return mem_service_managed_finish(
@@ -12079,7 +12104,7 @@ static enum mem_service_wire_status mem_service_allocate_object(
                     response,
                     response_len);
             }
-            request.home_node_id = svc->allocation_home_node_id;
+            request.home_node_id = selected_home;
             request.home_incarnation = home_incarnation;
         }
     }

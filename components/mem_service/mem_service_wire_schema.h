@@ -204,6 +204,7 @@ static const struct mem_service_wire_payload_field
         {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
         {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
         {"session_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+        {"home_node", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
         {"size_bytes", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
         {"alignment_bytes", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
         {"capabilities", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},

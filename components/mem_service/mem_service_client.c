@@ -1670,9 +1670,10 @@ static int mem_service_client_send_holder_op(
                                               status_out);
 }
 
-int mem_service_client_allocate_object(
+static int mem_service_client_allocate_object_internal(
     const struct mem_service_client *client,
     const struct mem_service_client_allocate *request,
+    const char *home_node,
     struct mem_service_client_allocation *allocation_out,
     enum mem_service_wire_status *status_out)
 {
@@ -1692,6 +1693,10 @@ int mem_service_client_allocate_object(
                                                   sizeof(payload),
                                                   "session_id",
                                                   request->session_id) != 0 ||
+        mem_service_client_append_optional_string(payload,
+                                                  sizeof(payload),
+                                                  "home_node",
+                                                  home_node) != 0 ||
         mem_service_wire_payload_append_u64(payload,
                                             sizeof(payload),
                                             "size_bytes",
@@ -1712,6 +1717,38 @@ int mem_service_client_allocate_object(
                                               payload,
                                               allocation_out,
                                               status_out);
+}
+
+int mem_service_client_allocate_object(
+    const struct mem_service_client *client,
+    const struct mem_service_client_allocate *request,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    return mem_service_client_allocate_object_internal(client,
+                                                       request,
+                                                       NULL,
+                                                       allocation_out,
+                                                       status_out);
+}
+
+int mem_service_client_allocate_object_at_home(
+    const struct mem_service_client *client,
+    const struct mem_service_client_allocate *request,
+    const char *home_node,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    if (home_node == NULL || home_node[0] == '\0' ||
+        strlen(home_node) >= MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN ||
+        strchr(home_node, '\n') != NULL || strchr(home_node, '\r') != NULL) {
+        return mem_service_client_invalid(status_out);
+    }
+    return mem_service_client_allocate_object_internal(client,
+                                                       request,
+                                                       home_node,
+                                                       allocation_out,
+                                                       status_out);
 }
 
 int mem_service_client_acquire_object(
@@ -2260,6 +2297,8 @@ int mem_service_client_prepare_managed_reference(
     struct mem_service_visibility_completion completion;
     struct lingqu_object_ref_wire_v2 reference = {0};
     const uint64_t flags = MEM_SERVICE_CLIENT_MAP_READ | MEM_SERVICE_CLIENT_MAP_WRITE;
+    size_t current_key_len;
+    size_t current_home_len;
     int rc;
 
     if (!client || !channel || !channel->provider || !allocation || !mapping || !lifecycle || !view ||
@@ -2285,6 +2324,12 @@ int mem_service_client_prepare_managed_reference(
         return mem_service_client_invalid(status_out);
     rc = mem_service_client_inspect_allocation(client, allocation->key, &current, status_out);
     if (rc) return rc;
+    current_key_len = lingqu_object_ref_v2_token_length(current.key,
+                                                        sizeof(current.key));
+    current_home_len = lingqu_object_ref_v2_token_length(current.home_node,
+                                                         sizeof(current.home_node));
+    if (!current_key_len || !current_home_len)
+        return mem_service_client_invalid(status_out);
     if (!mem_service_client_allocation_binding_matches(allocation, &current) ||
         allocation->version != current.version) goto stale;
     rc = mem_service_client_mapping_transition(client, mapping->key,
@@ -2300,7 +2345,8 @@ int mem_service_client_prepare_managed_reference(
     reference.object.owner_entity = view->owner_entity;
     reference.object.producer_entity = view->producer_entity;
     reference.object.object_version = current.version;
-    reference.object.key_hash = lingqu_object_ref_key_hash(current.key, strlen(current.key));
+    reference.object.key_hash = lingqu_object_ref_key_hash(current.key,
+                                                           current_key_len);
     reference.object.payload_offset = view->offset;
     reference.object.payload_bytes = view->len;
     reference.wire_bytes = LINGQU_OBJECT_REF_V2_BYTES;
@@ -2308,8 +2354,8 @@ int mem_service_client_prepare_managed_reference(
     reference.allocation_generation = current.generation;
     reference.provider_incarnation = current.provider_incarnation;
     reference.allocation_bytes = current.size_bytes;
-    snprintf(reference.allocation_key, sizeof(reference.allocation_key), "%s", current.key);
-    snprintf(reference.home_node, sizeof(reference.home_node), "%s", current.home_node);
+    memcpy(reference.allocation_key, current.key, current_key_len + 1U);
+    memcpy(reference.home_node, current.home_node, current_home_len + 1U);
     if (lingqu_object_ref_v2_validate(&reference)) return mem_service_client_invalid(status_out);
     reference.object.payload_checksum = mem_service_provider_checksum64(
         (const uint8_t *)mapping->base + view->offset, view->len);

@@ -14,6 +14,8 @@ CLI_SOURCE = ROOT / "apps" / "mem_service" / "mem_service.c"
 
 HOME_NODE = "node-a"
 HOME_INCARNATION = 7
+SECOND_HOME_NODE = "node-b"
+SECOND_HOME_INCARNATION = 11
 
 
 def _tmp_parent() -> Path:
@@ -259,10 +261,11 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
     def _connect(self) -> str:
         return f"unix:{self.socket}"
 
-    def _register_home(self, incarnation: int = HOME_INCARNATION) -> subprocess.CompletedProcess:
+    def _register_home(self, incarnation: int = HOME_INCARNATION,
+                       node: str = HOME_NODE) -> subprocess.CompletedProcess:
         return self._run_client(
             "provider-register",
-            "--node-id", HOME_NODE,
+            "--node-id", node,
             "--incarnation", str(incarnation),
             "--readiness-generation", "1",
             "--capabilities", "1",
@@ -341,6 +344,93 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             "--incarnation", str(incarnation),
             "--after-generation", str(after), "--connect", self._connect,
         )
+
+    def test_allocate_can_select_each_registered_home(self):
+        config = self._write_config(
+            "multi-home.conf",
+            self._unix_config(
+                f"required_provider={HOME_NODE}\n"
+                f"required_provider={SECOND_HOME_NODE}\n"
+                "provider_lease_ms=30000\n"
+                f"allocation_home_provider={HOME_NODE}"
+            ),
+        )
+        proc = self._start_daemon(config)
+        try:
+            first = self._register_home()
+            second = self._register_home(
+                SECOND_HOME_INCARNATION, node=SECOND_HOME_NODE)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+
+            selected = self._run_client(
+                "allocate-object",
+                "--key", "placed-on-b",
+                "--idempotency-key", "placed-on-b-allocate",
+                "--session-id", "session-b",
+                "--home-node", SECOND_HOME_NODE,
+                "--size-bytes", "4096",
+                "--capabilities", "1",
+                "--connect", self._connect,
+            )
+            self.assertEqual(selected.returncode, 0, selected.stdout + selected.stderr)
+            selected_view = _parse_kv(selected.stdout)
+            self.assertEqual(selected_view["home_node"], SECOND_HOME_NODE)
+            self.assertEqual(
+                selected_view["provider_incarnation"],
+                str(SECOND_HOME_INCARNATION),
+            )
+            polled = self._poll(
+                node=SECOND_HOME_NODE,
+                incarnation=SECOND_HOME_INCARNATION,
+            )
+            self.assertEqual(_parse_kv(polled.stdout)["key"], "placed-on-b")
+            self.assertIn("status=not_found", self._poll(node=HOME_NODE).stdout)
+
+            defaulted = self._allocate("placed-on-a", "placed-on-a-allocate")
+            self.assertEqual(defaulted.returncode, 0, defaulted.stdout + defaulted.stderr)
+            self.assertEqual(_parse_kv(defaulted.stdout)["home_node"], HOME_NODE)
+
+            unavailable = self._run_client(
+                "allocate-object",
+                "--key", "placed-on-missing",
+                "--idempotency-key", "placed-on-missing-allocate",
+                "--home-node", "node-missing",
+                "--size-bytes", "4096",
+                "--capabilities", "1",
+                "--connect", self._connect,
+            )
+            self.assertNotEqual(unavailable.returncode, 0, unavailable.stdout)
+            self.assertIn("reason=provider_unavailable", unavailable.stdout)
+
+            oversized = self._run_client(
+                "allocate-object",
+                "--key", "oversized-home",
+                "--idempotency-key", "oversized-home-allocate",
+                "--home-node", "n" * 64,
+                "--size-bytes", "4096",
+                "--capabilities", "1",
+                "--connect", self._connect,
+            )
+            self.assertNotEqual(oversized.returncode, 0, oversized.stdout)
+            self.assertIn("status=invalid_session", oversized.stdout)
+            self.assertIn("field=home_node", oversized.stdout)
+
+            conflicting = self._run_client(
+                "allocate-object",
+                "--key", "placed-on-b",
+                "--idempotency-key", "placed-on-b-conflicting-home",
+                "--home-node", HOME_NODE,
+                "--size-bytes", "4096",
+                "--capabilities", "1",
+                "--connect", self._connect,
+            )
+            self.assertNotEqual(conflicting.returncode, 0, conflicting.stdout)
+            self.assertIn("reason=key_conflict", conflicting.stdout)
+            self.assertEqual(
+                self._inspect("placed-on-b")["home_node"], SECOND_HOME_NODE)
+        finally:
+            self._stop_server(proc)
 
     def test_provider_loss_preserves_resources_and_blocks_reactivation(self):
         for loss in ("home-deregister", "home-replace", "peer-deregister"):
