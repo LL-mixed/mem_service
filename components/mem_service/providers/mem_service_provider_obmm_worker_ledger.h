@@ -17,7 +17,14 @@ struct worker_config {
     uint64_t allocation_granularity_bytes;
     bool fast_allocation;
     unsigned char kernel_instance[16];
+    uint64_t binding_version;
+    uint64_t connect_length;
+    uint64_t connect_hash[2];
+    uint64_t state_length;
+    uint64_t state_hash[2];
 };
+
+#define WORKER_LEDGER_CONFIG_BINDING_VERSION 1U
 
 struct worker_reservation {
     bool occupied;
@@ -61,6 +68,53 @@ static uint64_t ledger_checksum(const unsigned char *bytes, size_t length)
     return value;
 }
 
+static uint64_t ledger_binding_hash(const char *value, uint64_t domain)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    unsigned i;
+
+    for (i = 0; i < 8; ++i) {
+        hash ^= (unsigned char)(domain >> (8U * i));
+        hash *= UINT64_C(1099511628211);
+    }
+    do {
+        hash ^= (unsigned char)*value;
+        hash *= UINT64_C(1099511628211);
+    } while (*value++ != '\0');
+    return hash;
+}
+
+static void worker_config_set_binding(struct worker_config *config)
+{
+    config->binding_version = WORKER_LEDGER_CONFIG_BINDING_VERSION;
+    config->connect_length = strlen(config->connect);
+    config->connect_hash[0] = ledger_binding_hash(
+        config->connect, UINT64_C(0x636f6e6e65637431));
+    config->connect_hash[1] = ledger_binding_hash(
+        config->connect, UINT64_C(0x636f6e6e65637432));
+    config->state_length = strlen(config->state);
+    config->state_hash[0] = ledger_binding_hash(
+        config->state, UINT64_C(0x7374617465706174));
+    config->state_hash[1] = ledger_binding_hash(
+        config->state, UINT64_C(0x7374617465706132));
+}
+
+static bool worker_config_binding_matches(
+    const struct worker_config *stored,
+    const struct worker_config *current)
+{
+    return stored && current &&
+           stored->binding_version == WORKER_LEDGER_CONFIG_BINDING_VERSION &&
+           current->binding_version == WORKER_LEDGER_CONFIG_BINDING_VERSION &&
+           stored->connect_length == current->connect_length &&
+           stored->connect_hash[0] == current->connect_hash[0] &&
+           stored->connect_hash[1] == current->connect_hash[1] &&
+           stored->state_length == current->state_length &&
+           stored->state_hash[0] == current->state_hash[0] &&
+           stored->state_hash[1] == current->state_hash[1] &&
+           stored->fast_allocation == current->fast_allocation;
+}
+
 static int ledger_string(unsigned char *bytes, char *value, size_t length, bool encode)
 {
     size_t used;
@@ -78,7 +132,8 @@ static int ledger_string(unsigned char *bytes, char *value, size_t length, bool 
 }
 
 static int ledger_fields(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
-                         struct worker_ledger_entry *entry, bool encode)
+                         struct worker_ledger_entry *entry, bool encode,
+                         unsigned format_version)
 {
     size_t offset = 24, i;
     struct worker_reservation *r = &entry->reservation;
@@ -133,30 +188,74 @@ static int ledger_fields(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
     offset += 16;
     for (i = 0; i < 16 && !entry->config.kernel_instance[i]; i++) {}
     if (i == 16) return -1;
+    if (format_version >= 3) {
+        FIELD(entry->config.connect_length);
+        FIELD(entry->config.connect_hash[0]);
+        FIELD(entry->config.connect_hash[1]);
+        FIELD(entry->config.state_length);
+        FIELD(entry->config.state_hash[0]);
+        FIELD(entry->config.state_hash[1]);
+        FIELD(entry->config.fast_allocation);
+        if (!entry->config.connect_length ||
+            entry->config.connect_length >= sizeof(entry->config.connect) ||
+            !entry->config.state_length ||
+            entry->config.state_length >= sizeof(entry->config.state)) {
+            return -1;
+        }
+    }
 #undef FIELD
 #undef STRING
     return offset <= WORKER_LEDGER_FRAME_BYTES - 8 ? 0 : -1;
 }
 
-static int ledger_encode(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
-                         struct worker_ledger_entry *entry)
+static int ledger_encode_version(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
+                                 struct worker_ledger_entry *entry,
+                                 unsigned format_version)
 {
+    const char *magic;
+
+    if (format_version != 2 && format_version != 3) return -1;
+    magic = format_version == 3 ? "obmm-worker-ledger-v3" :
+                                  "obmm-worker-ledger-v2";
     memset(frame, 0, WORKER_LEDGER_FRAME_BYTES);
-    memcpy(frame, "obmm-worker-ledger-v2", sizeof("obmm-worker-ledger-v2") - 1);
-    if (ledger_fields(frame, entry, true)) return -1;
+    memcpy(frame, magic, strlen(magic));
+    if (ledger_fields(frame, entry, true, format_version)) return -1;
     ledger_u64(frame + WORKER_LEDGER_FRAME_BYTES - 8,
                ledger_checksum(frame, WORKER_LEDGER_FRAME_BYTES - 8), true);
     return 0;
+}
+
+static int ledger_encode(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
+                         struct worker_ledger_entry *entry)
+{
+    return ledger_encode_version(
+        frame, entry,
+        entry->config.binding_version == WORKER_LEDGER_CONFIG_BINDING_VERSION ?
+            3U : 2U);
 }
 
 static int ledger_decode(unsigned char frame[WORKER_LEDGER_FRAME_BYTES],
                          struct worker_ledger_entry *entry)
 {
     unsigned char canonical[WORKER_LEDGER_FRAME_BYTES];
+    unsigned format_version;
+
     memset(entry, 0, sizeof(*entry));
+    if (!memcmp(frame, "obmm-worker-ledger-v3",
+                sizeof("obmm-worker-ledger-v3") - 1)) {
+        format_version = 3;
+        entry->config.binding_version =
+            WORKER_LEDGER_CONFIG_BINDING_VERSION;
+    } else if (!memcmp(frame, "obmm-worker-ledger-v2",
+                       sizeof("obmm-worker-ledger-v2") - 1)) {
+        format_version = 2;
+    } else {
+        return -1;
+    }
     if (ledger_u64(frame + WORKER_LEDGER_FRAME_BYTES - 8, 0, false) !=
         ledger_checksum(frame, WORKER_LEDGER_FRAME_BYTES - 8) ||
-        ledger_fields(frame, entry, false) || ledger_encode(canonical, entry) ||
+        ledger_fields(frame, entry, false, format_version) ||
+        ledger_encode_version(canonical, entry, format_version) ||
         memcmp(frame, canonical, sizeof(canonical))) return -1;
     return 0;
 }

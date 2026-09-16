@@ -78,10 +78,12 @@ or service readiness.
 
 ### Worker 持久资源记录
 
-日志 v2 在首次资源操作前通过平台枚举接口取得 16-byte kernel_instance，
-并在所有帧中保存同一值。零身份、跨帧身份变化及旧 v1 格式均拒绝；旧日志
-保留供原版本离线检查，不能凭当前内核补写出生身份。平台不支持枚举或返回
-无效结果时，worker 在创建日志和刷新 provider 前停止。
+日志 v3 在首次资源操作前通过平台枚举接口取得 16-byte kernel_instance，
+并在所有帧中保存同一值。v3 还在定长帧保留区保存 endpoint 与 state path 的长度、
+双摘要及分配模式，供控制面隔离核对启动配置。零身份、跨帧身份变化及旧 v1 格式
+均拒绝；v2 缺少配置绑定，仍可由 inspect/resume/recovery 读取，但
+`quarantine-allocation-state` 必须失败关闭。旧日志不能凭当前配置或内核补写出生
+身份。平台不支持枚举或返回无效结果时，worker 在创建日志和刷新 provider 前停止。
 `reconcile-allocation-state --config <path>` 只读关联完整日志与一致内核库存，
 按对象 generation 保留最后记录及最后已知资源身份，逐项比较完整 segment
 与当前 export 绑定。缺失、不同内核实例、忙碌或身份冲突均拒绝；库存中未被

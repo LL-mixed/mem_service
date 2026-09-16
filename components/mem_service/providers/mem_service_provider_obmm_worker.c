@@ -82,7 +82,10 @@ static int read_config(const char *path, struct worker_config *config)
     if (!ferror(file) && (seen & 63U) == 63U && config->state[0] == '/' &&
         !(config->allocation_granularity_bytes & (config->allocation_granularity_bytes - 1)) &&
         sysconf(_SC_PAGESIZE) > 0 &&
-        config->allocation_granularity_bytes >= (uint64_t)sysconf(_SC_PAGESIZE)) result = 0;
+        config->allocation_granularity_bytes >= (uint64_t)sysconf(_SC_PAGESIZE)) {
+        worker_config_set_binding(config);
+        result = 0;
+    }
 done:
     fclose(file);
     return result;
@@ -169,7 +172,9 @@ static int ledger_read_entry(int fd, uint64_t sequence,
         strcmp(entry->config.node, config->node) ||
         entry->config.incarnation != config->incarnation ||
         entry->config.readiness_generation != config->readiness_generation ||
-        entry->config.allocation_granularity_bytes != config->allocation_granularity_bytes)
+        entry->config.allocation_granularity_bytes != config->allocation_granularity_bytes ||
+        (entry->config.binding_version &&
+         !worker_config_binding_matches(&entry->config, config)))
         return -1;
     for (i = 0; i < sizeof(phases) / sizeof(phases[0]); i++)
         if (!strcmp(entry->phase, phases[i])) break;
@@ -277,9 +282,8 @@ int mem_service_provider_obmm_quarantine_allocation_state(const char *config_pat
 
     reason = "ledger-start-invalid";
     if (ledger_read_entry(fd, 1, &config, &entry) ||
-        strcmp(entry.config.connect, config.connect) ||
-        strcmp(entry.config.state, config.state) ||
-        entry.config.fast_allocation != config.fast_allocation) goto done;
+        entry.config.binding_version !=
+            WORKER_LEDGER_CONFIG_BINDING_VERSION) goto done;
 
     count = (uint64_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
     if (count > limit) {
@@ -287,9 +291,8 @@ int mem_service_provider_obmm_quarantine_allocation_state(const char *config_pat
     } else {
         for (sequence = 2; sequence <= count; ++sequence) {
             if (ledger_read_entry(fd, sequence, &config, &entry) ||
-                strcmp(entry.config.connect, config.connect) ||
-                strcmp(entry.config.state, config.state) ||
-                entry.config.fast_allocation != config.fast_allocation) {
+                entry.config.binding_version !=
+                    WORKER_LEDGER_CONFIG_BINDING_VERSION) {
                 integrity = "invalid";
                 break;
             }
