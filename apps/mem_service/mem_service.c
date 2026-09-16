@@ -36,10 +36,10 @@
 #endif
 
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_VERSION 1U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 17613U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xb0964fb0U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_LEN 17731U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_EXPECTED_CHECKSUM 0xb89205baU
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_OPERATION_COUNT 39U
-#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 229U
+#define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_FIELD_COUNT 231U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_COUNT 1U
 #define MEM_SERVICE_WIRE_SCHEMA_MANIFEST_ONEOF_FIELD_COUNT 2U
 #define MEM_SERVICE_CONFIG_SCHEMA_VERSION 1U
@@ -62,7 +62,7 @@
 #define MEM_SERVICE_PACKAGE_MANIFEST_VERSION 1U
 #define MEM_SERVICE_RELEASE_VERSION "0.1.0"
 #define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_LEN 9814U
-#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x717b7ebbU
+#define MEM_SERVICE_PACKAGE_MANIFEST_EXPECTED_CHECKSUM 0x229e08f5U
 #define MEM_SERVICE_PACKAGE_MANIFEST_INSTALLED_FILE_COUNT 57U
 #define MEM_SERVICE_PACKAGE_MANIFEST_GATE_COUNT 34U
 #define MEM_SERVICE_PACKAGE_TARBALL_NAME "linqu_mem_service-installed-layout-v1.tar"
@@ -151,6 +151,7 @@ static void usage(const char *argv0)
     printf(" [provider-deregister --node-id <id> --incarnation <u64>] [provider-directory-status]");
     printf(" [publish-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --descriptor-hex <hex> --address <u64> --address-len <u64>]");
     printf(" [reclaim-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --confirmed <0|1>]");
+    printf(" [recover-allocation --key <key> --node-id <id> --incarnation <u64> --generation <u64> --fenced-incarnation <u64> --backing-gone <0|1>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
     printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
     printf(" [reference-transition --action <begin|stage|seal|resolve|acquire|map-begin> --key <key> [--session-id <id> --idempotency-key <id>] [--generation <u64> --version <u64>] [--reference-hex <512hex>] [--access <1|2|3>] [--holder-node-id <id> --holder-provider-incarnation <u64>]]");
@@ -9526,6 +9527,34 @@ static int run_reclaim_allocation(int argc, char **argv)
                                       payload);
 }
 
+static int run_recover_allocation(int argc, char **argv)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--key", "key") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--generation", "generation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--fenced-incarnation",
+                                      "fenced_incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--backing-gone", "confirmed") != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "recovery", 1U) != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_RECLAIM_ALLOCATION,
+                                      "recover-allocation",
+                                      payload);
+}
+
 /*
  * object-session --config <path> (M1.2, plan §3.7). Runs a deterministic
  * managed-allocation operation sequence through the client SDK and keeps
@@ -14031,6 +14060,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "reclaim-allocation") == 0) {
         return run_reclaim_allocation(argc, argv);
+    }
+    if (strcmp(argv[1], "recover-allocation") == 0) {
+        return run_recover_allocation(argc, argv);
     }
     if (strcmp(argv[1], "poll-allocation") == 0) {
         return run_poll_allocation(argc, argv);

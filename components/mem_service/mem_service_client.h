@@ -642,6 +642,22 @@ int mem_service_client_reclaim_allocation(
     struct mem_service_client_allocation *allocation_out,
     enum mem_service_wire_status *status_out);
 
+/* Recovery reclaim is issued by the currently active home provider after
+ * all remaining holder providers have rejoined with fresh incarnations.
+ * current_incarnation identifies the caller; fenced_incarnation must match
+ * the allocation's original home. backing_gone is valid only when the home
+ * incarnation changed. */
+int mem_service_client_recover_allocation(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *node_id,
+    uint64_t current_incarnation,
+    uint64_t generation,
+    uint64_t fenced_incarnation,
+    bool backing_gone,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+
 /*
  * Provider directory client (0x76 segment). A per-node provider process
  * registers its (node_id, incarnation) readiness after its bootstrap

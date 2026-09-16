@@ -36,6 +36,17 @@ holder 所引用分配；旧版未绑定 holder 继续在任一 provider 失联�
 readiness 拦住，但仍检查原代际与事务。该 core 源码变更不修改 wire 或结构布局，
 须重新链接；完整持久化对账与实际 guest 故障恢复仍须独立验证。
 
+服务恢复协调使用 `recover-allocation --key <key> --node-id <home>
+--incarnation <current> --generation <g> --fenced-incarnation <old>
+--backing-gone <0|1>`，安装 SDK 对应
+`mem_service_client_recover_allocation()`。服务要求当前 home 活动、原 home 身份
+完全匹配、全部 required provider ready，并逐个核对 holder 节点已以新
+incarnation 加入。原 home 未替换时只进入 RETIRING，仍由 worker 执行正常
+unexport/segment retire/reclaim；原 home 已替换时要求 replacement 明确确认旧
+backing 不存在，随后才直接退役。旧 holder 身份、V1/损坏或写入不确定的恢复域
+继续锁住准入。该接口只落实服务状态机；ub_sim 的 OBMM worker 仍须提供 kernel
+库存、旧实例失效及映射/计算排空证明后才能调用，当前不能据此宣布生产恢复完成。
+
 V2 writer 的 `object-session` 顺序为 acquire、`begin_reference key=<allocation>
 generation=<g> version=<old-version> idempotency_key=<id>`、map/write、
 `publish_reference key=<logical> offset=<n> len=<n> kind=<n> owner=<n> producer=<n>

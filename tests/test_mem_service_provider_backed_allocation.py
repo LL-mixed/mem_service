@@ -311,6 +311,20 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             "--connect", self._connect,
         )
 
+    def _recover(self, key: str, generation: int, current_incarnation: int,
+                 fenced_incarnation: int, backing_gone: int,
+                 node_id: str = HOME_NODE) -> subprocess.CompletedProcess:
+        return self._run_client(
+            "recover-allocation",
+            "--key", key,
+            "--node-id", node_id,
+            "--incarnation", str(current_incarnation),
+            "--generation", str(generation),
+            "--fenced-incarnation", str(fenced_incarnation),
+            "--backing-gone", str(backing_gone),
+            "--connect", self._connect,
+        )
+
     def _inspect(self, key: str) -> dict[str, str]:
         result = self._run_client(
             "inspect-allocation", "--key", key, "--connect", self._connect
@@ -618,6 +632,116 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
                     self.assertEqual(self._stats()["quarantined_bytes"], "4096")
                 finally:
                     self._stop_server(proc)
+
+    def test_recovery_rejects_live_holder_then_drains_after_rejoin(self):
+        config = self._write_config(
+            "recovery.conf",
+            self._unix_config(
+                f"required_provider={HOME_NODE}\n"
+                f"required_provider={SECOND_HOME_NODE}\n"
+                "provider_lease_ms=30000\n"
+                f"allocation_home_provider={HOME_NODE}"
+            ),
+        )
+        proc = self._start_daemon(config)
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            self.assertEqual(self._register_home(
+                SECOND_HOME_INCARNATION, SECOND_HOME_NODE).returncode, 0)
+            generation = self._allocate_bound("recover-held", "recover-allocate")
+            self.assertEqual(self._publish("recover-held", generation).returncode, 0)
+            acquired = self._run_client(
+                "acquire-object", "--key", "recover-held",
+                "--session-id", "recover-session",
+                "--idempotency-key", "recover-acquire",
+                "--expected-generation", str(generation),
+                "--holder-node-id", SECOND_HOME_NODE,
+                "--holder-provider-incarnation", str(SECOND_HOME_INCARNATION),
+                "--connect", self._connect,
+            )
+            self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
+            begun = self._run_client(
+                "mapping-transition", "--key", "recover-held",
+                "--session-id", "recover-session",
+                "--generation", str(generation), "--mapping-id", "0",
+                "--action", "begin", "--idempotency-key", "recover-map-begin",
+                "--connect", self._connect,
+            )
+            self.assertEqual(begun.returncode, 0, begun.stdout + begun.stderr)
+            mapping_id = _parse_kv(begun.stdout)["mapping_id"]
+            confirmed = self._run_client(
+                "mapping-transition", "--key", "recover-held",
+                "--session-id", "recover-session",
+                "--generation", str(generation), "--mapping-id", mapping_id,
+                "--action", "confirm", "--idempotency-key", "recover-map-confirm",
+                "--connect", self._connect,
+            )
+            self.assertEqual(confirmed.returncode, 0,
+                             confirmed.stdout + confirmed.stderr)
+
+            lost = self._run_client(
+                "provider-deregister", "--node-id", SECOND_HOME_NODE,
+                "--incarnation", str(SECOND_HOME_INCARNATION),
+                "--connect", self._connect,
+            )
+            self.assertEqual(lost.returncode, 0, lost.stdout + lost.stderr)
+            self.assertEqual(self._inspect("recover-held")["state"], "quarantined")
+            self.assertEqual(self._register_home(
+                SECOND_HOME_INCARNATION, SECOND_HOME_NODE).returncode, 0)
+            denied = self._recover("recover-held", generation,
+                                   HOME_INCARNATION, HOME_INCARNATION, 0)
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("reason=holder_fence_required", denied.stdout)
+            self.assertEqual(self._stats()["import_mappings"], "1")
+
+            self.assertEqual(self._register_home(
+                SECOND_HOME_INCARNATION + 1, SECOND_HOME_NODE).returncode, 0)
+            prepared = self._recover("recover-held", generation,
+                                     HOME_INCARNATION, HOME_INCARNATION, 0)
+            self.assertEqual(prepared.returncode, 0,
+                             prepared.stdout + prepared.stderr)
+            self.assertEqual(_parse_kv(prepared.stdout)["state"], "retiring")
+            stats = self._stats()
+            self.assertEqual(stats["live_refs"], "0")
+            self.assertEqual(stats["import_mappings"], "0")
+            self.assertEqual(stats["managed_recovery_required"], "1")
+            reclaimed = self._reclaim("recover-held", generation, 1)
+            self.assertEqual(reclaimed.returncode, 0,
+                             reclaimed.stdout + reclaimed.stderr)
+            self.assertEqual(_parse_kv(reclaimed.stdout)["state"], "retired")
+            self.assertEqual(self._stats()["managed_recovery_required"], "0")
+            fresh = self._allocate("recover-fresh", "recover-fresh-allocate")
+            self.assertEqual(fresh.returncode, 0, fresh.stdout + fresh.stderr)
+        finally:
+            self._stop_server(proc)
+
+    def test_replaced_home_can_retire_confirmed_lost_backing(self):
+        store = self.root / "recover-home.store"
+        proc = self._start_home_daemon(f"store={store}")
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            generation = self._allocate_bound("recover-home", "recover-home-allocate")
+            self.assertEqual(self._publish("recover-home", generation).returncode, 0)
+            self._stop_server(proc)
+            proc = self._start_home_daemon(f"store={store}")
+            self.assertEqual(self._inspect("recover-home")["state"], "quarantined")
+            replacement = HOME_INCARNATION + 1
+            self.assertEqual(self._register_home(replacement).returncode, 0)
+            wrong = self._recover("recover-home", generation, replacement,
+                                  HOME_INCARNATION, 0)
+            self.assertNotEqual(wrong.returncode, 0)
+            self.assertIn("reason=invalid_backing_proof", wrong.stdout)
+            recovered = self._recover("recover-home", generation, replacement,
+                                      HOME_INCARNATION, 1)
+            self.assertEqual(recovered.returncode, 0,
+                             recovered.stdout + recovered.stderr)
+            view = _parse_kv(recovered.stdout)
+            self.assertEqual(view["state"], "retired")
+            self.assertEqual(view["provider_backed"], "0")
+            self.assertEqual(view["address_len"], "0")
+            self.assertEqual(self._stats()["managed_recovery_required"], "0")
+        finally:
+            self._stop_server(proc)
 
     def test_expired_registration_cannot_revive_pending_allocation(self):
         config = self._write_config("expiry.conf", self._unix_config(

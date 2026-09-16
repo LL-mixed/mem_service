@@ -402,6 +402,26 @@ enum mem_service_managed_result mem_service_managed_reclaim(
     uint64_t generation,
     bool confirmed,
     struct mem_service_managed_view *view_out);
+
+/* Recovery reclaim is restricted to an already quarantined identity after
+ * the daemon has verified every remaining holder provider was replaced.
+ * A surviving home keeps its backing and enters RETIRING for ordinary worker
+ * cleanup. A replaced home may retire immediately only when the replacement
+ * provider confirms the old backing is gone. */
+enum mem_service_managed_result mem_service_managed_recover(
+    struct mem_service_managed_table *table,
+    const char *key,
+    uint64_t generation,
+    bool backing_gone,
+    struct mem_service_managed_view *view_out);
+
+/* These predicates distinguish a reconstructable, bounded recovery scope
+ * from legacy/unknown durable state and report whether physical cleanup is
+ * still pending. */
+bool mem_service_managed_recovery_scope_known(
+    const struct mem_service_managed_table *table);
+bool mem_service_managed_recovery_pending(
+    const struct mem_service_managed_table *table);
 void mem_service_managed_stats_snapshot(
     const struct mem_service_managed_table *table,
     struct mem_service_managed_stats *stats_out);

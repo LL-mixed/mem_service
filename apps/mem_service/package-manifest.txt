@@ -115,7 +115,7 @@ file_class=deploy count=3
 file_class=systemd_units count=2
 file_class=release_scripts count=10
 contract=release-manifest path=share/lingqu/mem_service/release-manifest.txt
-contract=wire-schema path=share/lingqu/mem_service/wire-schema.txt checksum=0xb0964fb0
+contract=wire-schema path=share/lingqu/mem_service/wire-schema.txt checksum=0xb89205ba
 contract=admin-output-schema path=share/lingqu/mem_service/admin-output-schema.txt checksum=0xd4f33080
 contract=upgrade-rollback-policy path=share/lingqu/mem_service/upgrade-rollback-policy.txt checksum=0xfd2b541d
 contract=api-abi-policy path=share/lingqu/mem_service/api-abi-policy.txt checksum=0x5e460a87

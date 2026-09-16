@@ -91,6 +91,12 @@ checkpoint；仅确认持久化后回收缓存，未配置 store 时保持有界
 wire/安装 SDK、磁盘帧格式、DS4 transfer 和请求超时均不变。
 历史 store 重启后显式报告 `managed_recovery_required=1`，新 managed 数据
 工作等待 AM3 对账，data plane readiness 保持 0；metadata 查询继续可用。
+服务端现提供 typed recovery reclaim：仅在当前 home、全部 required provider
+ready、所有 holder 节点以新 incarnation 加入且恢复域完整可知时推进隔离对象。
+原 home 存活时进入 RETIRING 等待正常物理回收；home 已替换时要求 provider
+确认旧 backing 不存在。全部义务终结后服务才重新开放 managed 准入。DS4 不调用
+该管理接口，也不能把控制回执当作 RoCE payload 或映射 fencing 证据；部署侧
+provider 恢复协调器负责提供这些证明。
 
 OBMM 平台诊断新增 `mem_service_provider_obmm_endpoint_probe_conflict()`，用于
 当前映射的固定地址冲突验收。它复用已持有的设备句柄，不改变 import、路由或

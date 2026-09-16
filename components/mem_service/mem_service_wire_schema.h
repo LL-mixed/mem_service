@@ -279,6 +279,8 @@ static const struct mem_service_wire_payload_field
         {"node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
         {"incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
         {"confirmed", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, true},
+        {"recovery", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
+        {"fenced_incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
 };
 
 static const struct mem_service_wire_payload_field

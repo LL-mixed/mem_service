@@ -205,6 +205,9 @@ struct mem_service {
     struct mem_service_replay_history *replay_history;
     bool replay_history_enabled;
     bool managed_recovery_required;
+    /* True only when the recovery gate was caused by fully identified
+     * managed allocations whose cleanup can be proven item by item. */
+    bool managed_recovery_known;
     /* An uncertain checkpoint write forbids further state changes until restart. */
     bool managed_store_failed;
     uint64_t replay_history_count;

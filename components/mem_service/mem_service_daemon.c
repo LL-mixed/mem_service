@@ -4172,6 +4172,9 @@ static int mem_service_load_store(struct mem_service *svc,
             fclose(file);
             return -1;
         }
+        svc->managed_recovery_known = managed_store_version == 2U &&
+            svc->managed_recovery_required &&
+            mem_service_managed_recovery_scope_known(&svc->managed);
         if (history_enabled) {
             if (mem_service_read_history_checkpoint(file, "replay_history_count",
                     &svc->replay_history_count) != 0 ||
@@ -10550,7 +10553,20 @@ static void mem_service_note_provider_loss(
         &svc->managed, node_id, incarnation);
 
     if (changed != 0) {
+        if (!svc->managed_recovery_required) {
+            svc->managed_recovery_known = true;
+        }
         svc->managed_recovery_required = true;
+    }
+}
+
+static void mem_service_maybe_complete_managed_recovery(
+    struct mem_service *svc)
+{
+    if (svc->managed_recovery_required && svc->managed_recovery_known &&
+        !mem_service_managed_recovery_pending(&svc->managed)) {
+        svc->managed_recovery_required = false;
+        svc->managed_recovery_known = false;
     }
 }
 
@@ -13310,6 +13326,8 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
     uint64_t incarnation;
     uint64_t generation;
     uint64_t confirmed;
+    uint64_t recovery;
+    uint64_t fenced_incarnation;
     struct mem_service_managed_view view;
     enum mem_service_managed_result result;
     enum mem_service_wire_status caller_status;
@@ -13328,6 +13346,9 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
     incarnation = mem_service_payload_get_u64(payload, "incarnation", 0);
     generation = mem_service_payload_get_u64(payload, "generation", 0);
     confirmed = mem_service_payload_get_u64(payload, "confirmed", 0);
+    recovery = mem_service_payload_get_u64(payload, "recovery", 0);
+    fenced_incarnation =
+        mem_service_payload_get_u64(payload, "fenced_incarnation", 0);
     caller_status = mem_service_provider_caller_check(svc,
                                                       node_id,
                                                       incarnation,
@@ -13336,6 +13357,72 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
     if (caller_status != MEM_SERVICE_WIRE_STATUS_OK) {
         return caller_status;
     }
+    if (recovery != 0) {
+        struct mem_service_provider_directory_poll poll;
+        bool home_replaced;
+        uint32_t holder;
+
+        result = mem_service_managed_inspect(&svc->managed, key, &view);
+        if (result != MEM_SERVICE_MANAGED_RESULT_OK)
+            return mem_service_managed_finish(result, &view, key,
+                                              response, response_len);
+        if (recovery != 1 || fenced_incarnation == 0 || confirmed > 1 ||
+            strcmp(view.home_node_id, node_id) != 0 ||
+            view.provider_incarnation != fenced_incarnation) {
+            snprintf(response, response_len,
+                     "status=invalid_session\nreason=invalid_recovery_identity\n");
+            return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+        }
+        home_replaced = incarnation != fenced_incarnation;
+        if ((confirmed != 0) != home_replaced) {
+            snprintf(response, response_len,
+                     "status=invalid_session\nreason=invalid_backing_proof\n");
+            return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+        }
+        if (view.state != MEM_SERVICE_MANAGED_STATE_RETIRED &&
+            (!svc->managed_recovery_required ||
+             !svc->managed_recovery_known)) {
+            snprintf(response, response_len,
+                     "status=internal\nreason=recovery_scope_unknown\n");
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        }
+        poll = mem_service_managed_directory_poll(
+            svc, mem_service_monotonic_ms());
+        if (poll.required_count == 0 || !poll.ready) {
+            snprintf(response, response_len,
+                     "status=internal\nreason=recovery_providers_not_ready\n");
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        }
+        for (holder = 0; holder < view.holder_count; ++holder) {
+            uint64_t active_incarnation = 0;
+            const struct mem_service_managed_holder *binding =
+                &view.holders[holder];
+
+            if (!binding->node_id[0] || !binding->provider_incarnation) {
+                snprintf(response, response_len,
+                         "status=internal\nreason=holder_identity_unknown\n");
+                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+            }
+            if (!mem_service_provider_directory_lookup_active(
+                    &svc->provider_directory, binding->node_id,
+                    mem_service_monotonic_ms(), &active_incarnation)) {
+                snprintf(response, response_len,
+                         "status=internal\nreason=holder_provider_not_ready\n");
+                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+            }
+            if (active_incarnation == binding->provider_incarnation) {
+                snprintf(response, response_len,
+                         "status=internal\nreason=holder_fence_required\n");
+                return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+            }
+        }
+        result = mem_service_managed_recover(&svc->managed, key, generation,
+                                             confirmed != 0, &view);
+        if (result == MEM_SERVICE_MANAGED_RESULT_OK)
+            mem_service_maybe_complete_managed_recovery(svc);
+        return mem_service_managed_finish(result, &view, key,
+                                          response, response_len);
+    }
     result = mem_service_managed_reclaim(&svc->managed,
                                          key,
                                          node_id,
@@ -13343,6 +13430,8 @@ static enum mem_service_wire_status mem_service_reclaim_allocation(
                                          generation,
                                          confirmed != 0,
                                          &view);
+    if (result == MEM_SERVICE_MANAGED_RESULT_OK)
+        mem_service_maybe_complete_managed_recovery(svc);
     return mem_service_managed_finish(result, &view, key, response, response_len);
 }
 
@@ -14368,6 +14457,7 @@ static enum mem_service_wire_status mem_service_handle_operation_with_limits(
             mem_service_save_store(svc, store_path) != 0) {
             svc->managed_store_failed = true;
             svc->managed_recovery_required = true;
+            svc->managed_recovery_known = false;
             svc->durable_ready = false;
             status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
             snprintf(response, response_len,

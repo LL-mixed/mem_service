@@ -34,10 +34,23 @@ transaction 不清除，不调用 backing release。
 工作在幂等重放前拒绝；只读查询及已有 mapping 清理、release/retire 继续使用
 原代际和事务检查。隔离状态不能通过普通 reclaim 确认或重放重新激活。
 
+显式恢复使用现有 reclaim operation 的可选 `recovery` 与
+`fenced_incarnation` 字段；安装 SDK 提供
+`mem_service_client_recover_allocation()`，诊断 CLI 提供
+`recover-allocation`。调用方必须是当前活动 home provider，原 home 身份必须与
+隔离对象完全匹配，全部 required provider 必须 ready；每个剩余 holder 的节点
+必须以不同 incarnation 重新加入，旧版未绑定 holder 或不完整 checkpoint 拒绝
+解除隔离。原 home 仍存活时，恢复只清除已完成 fencing 的 holder/mapping 并把
+对象推进到 RETIRING，由原 worker 完成正常 backing 回收；home 已替换时，只有
+replacement provider 明确确认旧 backing 已不存在，服务才直接推进到 RETIRED。
+所有已知恢复义务终结后才清除全局 recovery gate。该控制面接口不自行撤销 CPU
+访问、不枚举 kernel 资源，也不构成 backing 消失证明；provider worker 必须在
+调用前完成物理对账和 fencing，当前 OBMM worker 恢复执行器仍待接通。
+
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍
-计入对应资源数。此阶段为运行期准入与记账，不能撤销既有 CPU 页权限，也未补齐
-fencing 或解除隔离接口。`acquire-object` 及 reference acquire/map-begin 可显式传入
+计入对应资源数。此阶段为运行期准入与记账，不能撤销既有 CPU 页权限。
+`acquire-object` 及 reference acquire/map-begin 可显式传入
 holder 节点身份；daemon 只接受目录中当前活动的精确 provider incarnation，并将
 归属写入 checkpoint。CLI 使用既有 operation 的可选 wire 字段，安装 SDK 增加
 node-aware opt-in 入口；core 与 SDK 源码消费者需重新链接。

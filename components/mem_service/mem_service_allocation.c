@@ -903,6 +903,122 @@ enum mem_service_managed_result mem_service_managed_reclaim(
     return MEM_SERVICE_MANAGED_RESULT_OK;
 }
 
+enum mem_service_managed_result mem_service_managed_recover(
+    struct mem_service_managed_table *table,
+    const char *key,
+    uint64_t generation,
+    bool backing_gone,
+    struct mem_service_managed_view *view_out)
+{
+    struct mem_service_managed_allocation *entry;
+    size_t i;
+
+    if (table == NULL || generation == 0 ||
+        !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN)) {
+        if (table != NULL) table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    entry = mem_service_managed_find(table, key);
+    if (entry == NULL) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    }
+    if (entry->generation != generation) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STALE_GENERATION;
+    }
+    if (entry->state == MEM_SERVICE_MANAGED_STATE_RETIRED ||
+        (!backing_gone && entry->state == MEM_SERVICE_MANAGED_STATE_RETIRING &&
+         entry->holder_count == 0)) {
+        table->reclaim_ok_count += 1U;
+        mem_service_managed_fill_view(entry, view_out);
+        return MEM_SERVICE_MANAGED_RESULT_OK;
+    }
+    if (entry->state != MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
+        table->reclaim_rejected_count += 1U;
+        return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
+    }
+
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        struct mem_service_managed_mapping *mapping = &table->mappings[i];
+
+        if (mapping->state != MEM_SERVICE_MANAGED_MAPPING_NONE &&
+            mapping->generation == entry->generation &&
+            strcmp(mapping->key, entry->key) == 0) {
+            memset(mapping, 0, sizeof(*mapping));
+        }
+    }
+    memset(entry->holders, 0, sizeof(entry->holders));
+    entry->holder_count = 0;
+    entry->content_writing = false;
+    if (backing_gone) {
+        entry->descriptor_len = 0;
+        memset(entry->descriptor, 0, sizeof(entry->descriptor));
+        entry->address = 0;
+        entry->address_len = 0;
+        entry->provider_backed = false;
+        entry->state = MEM_SERVICE_MANAGED_STATE_RETIRED;
+    } else {
+        entry->state = MEM_SERVICE_MANAGED_STATE_RETIRING;
+    }
+    table->reclaim_ok_count += 1U;
+    mem_service_managed_fill_view(entry, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
+bool mem_service_managed_recovery_scope_known(
+    const struct mem_service_managed_table *table)
+{
+    bool obligation = false;
+    size_t i;
+
+    if (table == NULL) return false;
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        const struct mem_service_managed_allocation *entry = &table->entries[i];
+        uint32_t holder;
+
+        if (!entry->in_use || entry->state == MEM_SERVICE_MANAGED_STATE_RETIRED)
+            continue;
+        if (entry->state == MEM_SERVICE_MANAGED_STATE_ACTIVE) continue;
+        obligation = true;
+        if (!entry->home_node_id[0] || !entry->provider_incarnation) return false;
+        for (holder = 0; holder < entry->holder_count; ++holder)
+            if (!entry->holders[holder].node_id[0] ||
+                !entry->holders[holder].provider_incarnation)
+                return false;
+    }
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_MAPPINGS; ++i) {
+        const struct mem_service_managed_mapping *mapping = &table->mappings[i];
+        const struct mem_service_managed_allocation *entry;
+        int holder;
+
+        if (mapping->state == MEM_SERVICE_MANAGED_MAPPING_NONE) continue;
+        entry = mem_service_managed_find_const(table, mapping->key);
+        if (entry == NULL || entry->generation != mapping->generation) return false;
+        holder = mem_service_managed_find_holder(entry, mapping->session_id);
+        if (holder < 0 || !entry->holders[holder].node_id[0] ||
+            !entry->holders[holder].provider_incarnation)
+            return false;
+    }
+    return obligation;
+}
+
+bool mem_service_managed_recovery_pending(
+    const struct mem_service_managed_table *table)
+{
+    size_t i;
+
+    if (table == NULL) return true;
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        const struct mem_service_managed_allocation *entry = &table->entries[i];
+
+        if (entry->in_use && entry->state != MEM_SERVICE_MANAGED_STATE_ACTIVE &&
+            entry->state != MEM_SERVICE_MANAGED_STATE_RETIRED)
+            return true;
+    }
+    return false;
+}
+
 enum mem_service_managed_result mem_service_managed_poll(
     const struct mem_service_managed_table *table,
     const char *node_id,

@@ -88,6 +88,14 @@ or service readiness.
 日志认领的 segment 单独计数，禁止擅自回收。该阶段不修改 service/kernel，
 不恢复 worker、不提供 fencing 证明，成功匹配仍保持 reconciliation_required。
 
+服务控制面已提供 `mem_service_client_recover_allocation()`，但
+`reconcile-allocation-state` 当前仍禁止调用它。后续恢复执行器必须先证明旧
+kernel instance 已失效或原 home reservation 仍可按正常路径回收，同时证明所有
+holder 节点已换代并完成映射/计算排空。原 home 存活时只能请求 QUARANTINED 到
+RETIRING，再走既有 unexport、segment retire 和 reclaim；home 已替换时只有完整
+库存证明旧 backing 不存在，才可设置 `backing_gone` 直接退役。日志匹配成功本身
+不满足这些条件，不能解除 recovery gate。
+
 `serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
 每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
 segment 身份、实际 export 回执和已构造的 opaque descriptor；不序列化指针。
