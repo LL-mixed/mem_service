@@ -250,6 +250,71 @@ static int ledger_order(const void *left, const void *right)
     return a->sequence < b->sequence ? -1 : a->sequence != b->sequence;
 }
 
+struct worker_recovery_object {
+    char key[MEM_SERVICE_CLIENT_ALLOCATION_KEY_LEN];
+    char phase[32];
+    uint64_t generation;
+    bool recovered;
+};
+
+static int worker_u64_order(const void *left, const void *right)
+{
+    uint64_t a = *(const uint64_t *)left;
+    uint64_t b = *(const uint64_t *)right;
+
+    return a < b ? -1 : a != b;
+}
+
+static int worker_recovery_archive_path(const struct worker_config *config,
+                                        const struct worker_config *replacement,
+                                        char *path,
+                                        size_t path_len)
+{
+    int length;
+
+    if (!config || !replacement || !path || !path_len) return -1;
+    length = snprintf(path, path_len,
+                      "%s.recovered-%" PRIu64 "-by-%" PRIu64,
+                      config->state, config->incarnation,
+                      replacement->incarnation);
+    return length < 0 || (size_t)length >= path_len ? -1 : 0;
+}
+
+static int worker_sync_state_parent(const char *path)
+{
+    char parent[1200];
+    char *slash;
+    int directory;
+
+    if (!path || strlen(path) >= sizeof(parent)) return -1;
+    strcpy(parent, path);
+    slash = strrchr(parent, '/');
+    if (!slash || !slash[1]) return -1;
+    if (slash == parent) slash[1] = '\0';
+    else *slash = '\0';
+    directory = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return -1;
+    if (fsync(directory)) {
+        close(directory);
+        return -1;
+    }
+    return close(directory);
+}
+
+static bool worker_replacement_config_valid(
+    const struct worker_config *old_config,
+    const struct worker_config *replacement)
+{
+    return old_config && replacement &&
+           !strcmp(old_config->connect, replacement->connect) &&
+           !strcmp(old_config->node, replacement->node) &&
+           !strcmp(old_config->state, replacement->state) &&
+           old_config->allocation_granularity_bytes ==
+               replacement->allocation_granularity_bytes &&
+           old_config->fast_allocation == replacement->fast_allocation &&
+           old_config->incarnation != replacement->incarnation;
+}
+
 /* Matching is evidence only: it never authorizes release, publish or reuse. */
 static const char *reconcile_resource(const struct worker_ledger_entry *last,
     const struct worker_reservation *saved, const struct obmm_cmd_gsva_enumerate_v1 *actual)
@@ -383,6 +448,232 @@ done:
     free(entries); free(inventory); free(claimed); free(matches);
     if (result) fprintf(stderr, "obmm-worker-reconcile: status=failed reason=%s "
                         "fencing_verified=0 reconciliation_required=1\n", reason);
+    return result;
+}
+
+int mem_service_provider_obmm_recover_allocation_state(
+    const char *config_path,
+    const char *replacement_config_path)
+{
+    enum { limit = 65536 };
+    struct worker_config old_config, replacement;
+    struct worker_ledger_entry *entries = NULL;
+    struct worker_recovery_object *objects = NULL;
+    uint64_t *old_segments = NULL;
+    struct mem_service_client client;
+    struct mem_service_client_provider_directory directory;
+    struct mem_service_client_allocation work, recovered;
+    struct obmm_cmd_gsva_enumerate_v1 cursor = {
+        .version = OBMM_GSVA_ABI_VERSION,
+    };
+    struct stat before, after, path_stat;
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    enum mem_service_wire_status status;
+    unsigned char current_kernel_instance[16] = {0};
+    char archive[1200];
+    const char *ledger_path;
+    const char *reason = "invalid-config";
+    size_t count, object_count = 0, segment_count = 0;
+    size_t inventory_count = 0, recovered_count = 0, i, j;
+    uint64_t after_generation = 0, revision = 0;
+    int fd = -1, device = -1, result = 1;
+    bool state_exists, archive_exists, already_archived;
+    bool current_kernel_seen = false;
+
+    if (read_config(config_path, &old_config) ||
+        read_config(replacement_config_path, &replacement)) return 2;
+    if (!worker_replacement_config_valid(&old_config, &replacement) ||
+        worker_recovery_archive_path(&old_config, &replacement,
+                                     archive, sizeof(archive))) return 2;
+    state_exists = lstat(old_config.state, &path_stat) == 0;
+    if (!state_exists && errno != ENOENT) goto done;
+    archive_exists = lstat(archive, &path_stat) == 0;
+    if (!archive_exists && errno != ENOENT) goto done;
+    reason = "ledger-location-conflict";
+    if (state_exists == archive_exists) goto done;
+    already_archived = archive_exists;
+    ledger_path = already_archived ? archive : old_config.state;
+    fd = open(ledger_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    reason = "journal-invalid";
+    if (fd < 0 || fcntl(fd, F_SETLK, &lock) || fstat(fd, &before) ||
+        !S_ISREG(before.st_mode) || before.st_size <= 0 ||
+        before.st_size % WORKER_LEDGER_FRAME_BYTES ||
+        before.st_size / WORKER_LEDGER_FRAME_BYTES > limit) goto done;
+    count = (size_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
+    entries = calloc(count, sizeof(*entries));
+    objects = calloc(count, sizeof(*objects));
+    old_segments = calloc(count, sizeof(*old_segments));
+    if (!entries || !objects || !old_segments) goto done;
+    for (i = 0; i < count; ++i)
+        if (ledger_read_entry(fd, i + 1, &old_config, &entries[i])) goto done;
+    qsort(entries, count, sizeof(*entries), ledger_order);
+    if (strcmp(entries[0].phase, "worker-start") || entries[0].work.generation)
+        goto done;
+    for (i = 1; i < count;) {
+        size_t begin = i;
+
+        if (!entries[begin].work.key[0] || !entries[begin].work.generation)
+            goto done;
+        while (i < count &&
+               entries[i].work.generation == entries[begin].work.generation) {
+            if (strcmp(entries[i].work.key, entries[begin].work.key) ||
+                entries[i].work.size_bytes != entries[begin].work.size_bytes ||
+                entries[i].work.alignment_bytes !=
+                    entries[begin].work.alignment_bytes ||
+                entries[i].work.capabilities != entries[begin].work.capabilities)
+                goto done;
+            if (entries[i].reservation.segment.segment_id)
+                old_segments[segment_count++] =
+                    entries[i].reservation.segment.segment_id;
+            ++i;
+        }
+        strcpy(objects[object_count].key, entries[begin].work.key);
+        strcpy(objects[object_count].phase, entries[i - 1].phase);
+        objects[object_count].generation = entries[begin].work.generation;
+        ++object_count;
+    }
+    qsort(old_segments, segment_count, sizeof(*old_segments), worker_u64_order);
+
+    reason = "inventory-unavailable";
+    device = open("/dev/obmm", O_RDONLY | O_CLOEXEC);
+    if (device < 0) goto done;
+    for (;;) {
+        if (gva_manager_enumerate_segments(device, &cursor)) goto done;
+        reason = "kernel-instance-unchanged";
+        if (!memcmp(old_config.kernel_instance, cursor.kernel_instance, 16))
+            goto done;
+        reason = "inventory-inconsistent";
+        if (!current_kernel_seen) {
+            memcpy(current_kernel_instance, cursor.kernel_instance, 16);
+            current_kernel_seen = true;
+        } else if (memcmp(current_kernel_instance,
+                          cursor.kernel_instance, 16)) {
+            goto done;
+        }
+        if (cursor.flags == OBMM_GSVA_ENUM_END) {
+            revision = cursor.revision;
+            break;
+        }
+        if (cursor.flags != OBMM_GSVA_ENUM_ENTRY || inventory_count++ == limit)
+            goto done;
+        reason = "old-segment-identity-reused";
+        if (bsearch(&cursor.desc.segment_id, old_segments, segment_count,
+                    sizeof(*old_segments), worker_u64_order)) goto done;
+    }
+    reason = "snapshot-changed";
+    if (gva_manager_enumerate_segments(device, &cursor) ||
+        cursor.flags != OBMM_GSVA_ENUM_END || cursor.revision != revision ||
+        memcmp(current_kernel_instance, cursor.kernel_instance, 16)) goto done;
+
+    mem_service_client_init(&client, replacement.connect);
+    reason = "replacement-provider-not-ready";
+    if (mem_service_client_provider_refresh(
+            &client, replacement.node, replacement.incarnation,
+            replacement.readiness_generation, &directory, &status) ||
+        status != MEM_SERVICE_WIRE_STATUS_OK || !directory.directory_ready)
+        goto done;
+    for (;;) {
+        int poll_result = mem_service_client_poll_recovery_allocation(
+            &client, replacement.node, replacement.incarnation,
+            old_config.incarnation, after_generation, &work, &status);
+
+        if (poll_result >= 0 && status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND)
+            break;
+        reason = "recovery-poll-failed";
+        if (poll_result || status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(work.state, "quarantined") ||
+            strcmp(work.home_node, old_config.node) ||
+            work.provider_incarnation != old_config.incarnation ||
+            work.generation <= after_generation) goto done;
+        for (j = 0; j < object_count; ++j) {
+            if (objects[j].generation != work.generation) continue;
+            if (strcmp(objects[j].key, work.key)) {
+                reason = "ledger-generation-conflict";
+                goto done;
+            }
+            objects[j].recovered = true;
+            break;
+        }
+        reason = "recovery-reclaim-failed";
+        if (mem_service_client_recover_allocation(
+                &client, work.key, replacement.node,
+                replacement.incarnation, work.generation,
+                old_config.incarnation, true, &recovered, &status) ||
+            status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(recovered.key, work.key) ||
+            recovered.generation != work.generation ||
+            strcmp(recovered.state, "retired") ||
+            strcmp(recovered.home_node, old_config.node) ||
+            recovered.provider_incarnation != old_config.incarnation ||
+            recovered.provider_backed || recovered.holder_count ||
+            recovered.live_refs || recovered.descriptor_len ||
+            recovered.address || recovered.address_len) goto done;
+        after_generation = work.generation;
+        ++recovered_count;
+    }
+    for (i = 0; i < object_count; ++i) {
+        bool superseded = false;
+
+        if (objects[i].recovered) continue;
+        for (j = 0; j < object_count; ++j) {
+            if (!strcmp(objects[i].key, objects[j].key) &&
+                objects[j].generation > objects[i].generation) {
+                superseded = true;
+                break;
+            }
+        }
+        if (superseded &&
+            (!strcmp(objects[i].phase, "reclaimed") ||
+             !strcmp(objects[i].phase, "cancel-confirmed"))) {
+            continue;
+        }
+        reason = "ledger-object-not-retired";
+        if (mem_service_client_inspect_allocation(
+                &client, objects[i].key, &work, &status) ||
+            status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(work.key, objects[i].key) ||
+            work.generation != objects[i].generation ||
+            strcmp(work.state, "retired") ||
+            strcmp(work.home_node, old_config.node) ||
+            work.provider_incarnation != old_config.incarnation ||
+            work.provider_backed || work.holder_count || work.live_refs ||
+            work.descriptor_len || work.address || work.address_len) goto done;
+    }
+    reason = "journal-changed";
+    if (fstat(fd, &after) || before.st_dev != after.st_dev ||
+        before.st_ino != after.st_ino || before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) goto done;
+    if (!already_archived) {
+        reason = "archive-conflict";
+        if (lstat(archive, &path_stat) == 0 || errno != ENOENT ||
+            lstat(old_config.state, &path_stat) ||
+            path_stat.st_dev != before.st_dev || path_stat.st_ino != before.st_ino)
+            goto done;
+        reason = "archive-failed";
+        if (rename(old_config.state, archive) ||
+            worker_sync_state_parent(old_config.state)) goto done;
+    }
+    printf("obmm-worker-recovery: status=complete old_incarnation=%" PRIu64
+           " current_incarnation=%" PRIu64 " ledger_objects=%zu"
+           " recovered_objects=%zu kernel_records=%zu revision=%" PRIu64
+           " archive=%s\n",
+           old_config.incarnation, replacement.incarnation, object_count,
+           recovered_count, inventory_count, revision, archive);
+    if (!ferror(stdout)) result = 0;
+done:
+    if (device >= 0) close(device);
+    if (fd >= 0) close(fd);
+    free(entries);
+    free(objects);
+    free(old_segments);
+    if (result)
+        fprintf(stderr,
+                "obmm-worker-recovery: status=failed reason=%s "
+                "reconciliation_required=1\n",
+                reason);
     return result;
 }
 

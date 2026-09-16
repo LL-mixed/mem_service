@@ -13201,8 +13201,13 @@ static enum mem_service_wire_status mem_service_poll_allocation(
     if (recovery != 0) {
         struct mem_service_provider_directory_poll poll;
 
-        if (recovery != 1 || fenced_incarnation == 0 ||
-            !svc->managed_recovery_required || !svc->managed_recovery_known) {
+        if (recovery != 1 || fenced_incarnation == 0) {
+            snprintf(response, response_len,
+                     "status=invalid_session\nreason=invalid_request\n");
+            return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+        }
+        if (svc->managed_recovery_required &&
+            !svc->managed_recovery_known) {
             snprintf(response, response_len,
                      "status=internal\nreason=recovery_scope_unknown\n");
             return MEM_SERVICE_WIRE_STATUS_INTERNAL;

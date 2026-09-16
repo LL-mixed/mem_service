@@ -764,6 +764,9 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             self.assertEqual(view["provider_backed"], "0")
             self.assertEqual(view["address_len"], "0")
             self.assertEqual(self._stats()["managed_recovery_required"], "0")
+            drained = self._poll_recovery(replacement, HOME_INCARNATION)
+            self.assertNotEqual(drained.returncode, 0)
+            self.assertIn("status=not_found", drained.stdout)
         finally:
             self._stop_server(proc)
 

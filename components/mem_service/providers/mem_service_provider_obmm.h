@@ -131,6 +131,9 @@ int mem_service_provider_obmm_run_protocol_fixture(void);
 int mem_service_provider_obmm_serve_allocations(const char *config_path);
 int mem_service_provider_obmm_inspect_allocation_state(const char *config_path);
 int mem_service_provider_obmm_reconcile_allocation_state(const char *config_path);
+int mem_service_provider_obmm_recover_allocation_state(
+    const char *config_path,
+    const char *replacement_config_path);
 #endif
 
 #endif

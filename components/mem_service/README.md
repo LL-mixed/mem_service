@@ -45,7 +45,7 @@ transaction 不清除，不调用 backing release。
 replacement provider 明确确认旧 backing 已不存在，服务才直接推进到 RETIRED。
 所有已知恢复义务终结后才清除全局 recovery gate。该控制面接口不自行撤销 CPU
 访问、不枚举 kernel 资源，也不构成 backing 消失证明；provider worker 必须在
-调用前完成物理对账和 fencing，当前 OBMM worker 恢复执行器仍待接通。
+调用前完成物理对账和 fencing；OBMM 仅接通下述 lost-home 恢复子集。
 
 恢复执行器使用 `mem_service_client_poll_recovery_allocation()` 或诊断 CLI
 `poll-recovery`，按原 home `(node_id, fenced_incarnation)` 和 generation 顺序读取
@@ -53,6 +53,12 @@ QUARANTINED 义务。调用方身份仍为当前活动 home incarnation；服务
 的 recovery scope 和全部 required provider ready。普通 `poll-allocation` 继续只
 返回当前 incarnation 的 ALLOCATING/RETIRING 工作。恢复 poll 为只读快照，不领取
 任务，也不证明 ledger、kernel inventory 或 backing 状态。
+
+OBMM provider 的 `recover-allocation-state` 已接入 lost-home 执行：仅接受新
+incarnation 和不同 kernel instance，在稳定库存中拒绝旧 segment 身份复用，
+扫描上述 recovery poll 并逐项完成直接退役，最后原子归档旧 ledger。相同 kernel
+续作、holder 节点的物理映射/计算排空及强制撤销仍保持拒绝；这些缺口关闭前，
+该入口只证明“旧 home kernel 已消失”的恢复子集。
 
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍

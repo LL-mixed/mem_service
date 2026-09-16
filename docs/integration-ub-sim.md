@@ -53,6 +53,16 @@ QUARANTINED 对象。这样可以覆盖旧 ledger 已记录的资源，也可以
 领取的服务意图。该读取不修改状态、不分配资源、不构成 fencing 证明；每个结果
 仍须与完整旧 ledger 和当前 kernel inventory 对账后逐项执行 recovery reclaim。
 
+OBMM lost-home 执行入口为 `linqu_mem_service_provider_obmm
+recover-allocation-state --config <old> --replacement-config <new>`。replacement
+配置沿用同一 endpoint/node/state file/粒度，使用新的 incarnation 与 readiness
+generation，并须提前在服务目录登记。命令要求 guest/kernel instance 已变化、
+新库存未复用旧 segment ID、旧 ledger 无活动 writer；它完整扫描 recovery poll，
+确认所有 ledger 当前对象退役后，将旧 ledger 归档为
+`.recovered-<old>-by-<new>`。失败保留原文件并继续阻止 worker 启动；成功后使用
+replacement 配置启动 worker。该路径适用于 guest/kernel 已重建导致旧 backing
+确定消失的场景；同 kernel 恢复和远端 holder 的物理排空仍保持 fail-closed。
+
 V2 writer 的 `object-session` 顺序为 acquire、`begin_reference key=<allocation>
 generation=<g> version=<old-version> idempotency_key=<id>`、map/write、
 `publish_reference key=<logical> offset=<n> len=<n> kind=<n> owner=<n> producer=<n>

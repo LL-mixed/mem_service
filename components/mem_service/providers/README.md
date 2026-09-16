@@ -88,13 +88,21 @@ or service readiness.
 日志认领的 segment 单独计数，禁止擅自回收。该阶段不修改 service/kernel，
 不恢复 worker、不提供 fencing 证明，成功匹配仍保持 reconciliation_required。
 
-服务控制面已提供 `mem_service_client_recover_allocation()`，但
-`reconcile-allocation-state` 当前仍禁止调用它。后续恢复执行器必须先证明旧
-kernel instance 已失效或原 home reservation 仍可按正常路径回收，同时证明所有
-holder 节点已换代并完成映射/计算排空。原 home 存活时只能请求 QUARANTINED 到
-RETIRING，再走既有 unexport、segment retire 和 reclaim；home 已替换时只有完整
-库存证明旧 backing 不存在，才可设置 `backing_gone` 直接退役。日志匹配成功本身
-不满足这些条件，不能解除 recovery gate。
+`recover-allocation-state --config <old> --replacement-config <new>` 实现
+lost-home 的保守恢复。两份配置必须保持 endpoint、node、state file、粒度及分配
+模式一致，replacement 必须使用新 incarnation。命令独占并完整校验旧 ledger，
+要求当前 kernel instance 与出生身份不同，读取稳定的完整库存，并拒绝新库存复用
+任一旧 segment ID。replacement provider 必须已经登记且整个 required provider
+目录 ready；随后命令通过 recovery poll 枚举旧 incarnation 的全部 QUARANTINED
+义务，逐项调用 `mem_service_client_recover_allocation()`，并确认 ledger 中每个
+当前对象均已退役。全部成功后，旧 ledger 原子重命名为
+`.recovered-<old>-by-<new>` 并同步目录；中途失败保留原 ledger，成功后的重试从
+归档重新验证服务终态。只有归档完成后才能使用 replacement 配置启动新 worker。
+
+该命令只覆盖 home guest/kernel 已替换、旧 backing 随旧 kernel 消失的恢复。
+相同 kernel instance、旧 segment 身份复用、活动 ledger writer、不完整服务恢复域
+或 holder fencing 未完成均拒绝。`reconcile-allocation-state` 继续保持只读；原 home
+仍存活时的 reservation 续作、跨节点映射/计算排空证明和强制撤销仍须单独实现。
 
 `serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
 每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
@@ -107,7 +115,8 @@ segment 身份、实际 export 回执和已构造的 opaque descriptor；不序�
 node/incarnation 和粒度，逐条展示资源身份；损坏、截断、并发写入及格式不匹配
 返回失败。该命令不登记 provider、不打开设备、不恢复指针或解除隔离；
 `physical_state=unknown` 明确表示日志校验尚未完成 kernel/provider 对账。
-worker 继续拒绝使用已有 state_file 启动，直到独立恢复协议证明可安全处理资源。
+worker 继续拒绝使用已有 state_file 启动。lost-home 恢复成功会归档旧 state file，
+之后只能用具有新 incarnation 的 replacement 配置创建新的 ledger。
 
 ### 固定地址子区间
 

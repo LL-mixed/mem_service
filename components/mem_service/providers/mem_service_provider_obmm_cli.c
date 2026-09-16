@@ -14,6 +14,8 @@ static void mem_service_obmm_cli_usage(const char *program)
     fprintf(stderr, "       %s serve-allocations --config <path>\n", program);
     fprintf(stderr, "       %s inspect-allocation-state --config <path>\n", program);
     fprintf(stderr, "       %s reconcile-allocation-state --config <path>\n", program);
+    fprintf(stderr, "       %s recover-allocation-state --config <old-path> "
+                    "--replacement-config <new-path>\n", program);
 #endif
 }
 
@@ -65,6 +67,11 @@ int main(int argc, char **argv)
         return mem_service_provider_obmm_run_protocol_fixture();
     }
 #ifdef MEM_SERVICE_OBMM_MANAGED_WORKER
+    if (strcmp(argv[1], "recover-allocation-state") == 0 && argc == 6 &&
+        strcmp(argv[2], "--config") == 0 &&
+        strcmp(argv[4], "--replacement-config") == 0) {
+        return mem_service_provider_obmm_recover_allocation_state(argv[3], argv[5]);
+    }
     if (strcmp(argv[1], "reconcile-allocation-state") == 0 && argc == 4 &&
         strcmp(argv[2], "--config") == 0) {
         return mem_service_provider_obmm_reconcile_allocation_state(argv[3]);
