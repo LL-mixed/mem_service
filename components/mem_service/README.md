@@ -66,16 +66,29 @@ QUARANTINED 义务。调用方身份仍为当前活动 home incarnation；服务
 返回当前 incarnation 的 ALLOCATING/RETIRING 工作。恢复 poll 为只读快照，不领取
 任务，也不证明 ledger、kernel inventory 或 backing 状态。
 
+holder replacement 使用
+`mem_service_client_poll_holder_recovery_allocation()` 或诊断 CLI
+`poll-holder-recovery`。该请求复用 `POLL_ALLOCATION` 的现有字段并设置
+`recovery=2`；服务只返回仍包含精确
+`(node_id, fenced_incarnation)` holder 的 QUARANTINED allocation。当前调用者必须
+是同一节点的 active replacement incarnation，完整 provider directory 必须 ready。
+该接口只提供待撤销 descriptor，不产生 fencing receipt。
+
 OBMM provider 的 `recover-allocation-state` 已接入 lost-home 执行：仅接受新
 incarnation 和不同 kernel instance，在稳定库存中拒绝旧 segment 身份复用，
-扫描上述 recovery poll 并逐项完成直接退役，最后原子归档旧 ledger。
+扫描上述 recovery poll。若对象仍携带旧 HOME holder，该命令使用“旧 kernel
+instance 已替换且稳定库存不存在旧 segment”的本地物理消失证明先提交确定性
+holder fencing receipt，再逐项完成直接退役，最后原子归档旧 ledger。其他节点的
+remote holder 必须先由各 holder 节点执行 `fence-holder-state`。
 `resume-allocations` 在相同 kernel instance 和稳定库存中逐项关联 ledger、segment、
 export 与同代服务对象。完整 `published` reservation 直接恢复 slot；已有 segment
 身份的 reserve/export/release/retire 与无 backing 取消阶段按库存中的确切物理状态
 续作，每个外部操作后先同步新 ledger 阶段。裸 `reserve-intent` 没有可绑定的
-segment 身份，日志半写也没有完整帧证明，两者继续隔离。holder 节点的物理映射/
-计算排空及强制撤销仍保持拒绝；这些缺口关闭前，lost-home 入口只证明“旧 home
-kernel 已消失”的恢复子集，同-kernel 入口只证明 ledger 可确定归属的 worker 续作。
+segment 身份，日志半写也没有完整帧证明，两者继续隔离。holder 节点通过
+`fence-holder-state` 逐项消费 holder recovery poll，只有本机 QEMU 完成精确
+key/token 的 route、VMA、cache、TLB 与设备访问排空后才提交 receipt。lost-home
+入口仍只证明“旧 home kernel 已消失”的恢复子集，同-kernel 入口只证明 ledger
+可确定归属的 worker 续作。
 
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍

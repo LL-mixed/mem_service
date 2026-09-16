@@ -425,6 +425,149 @@ static bool worker_replacement_config_valid(
            old_config->incarnation != replacement->incarnation;
 }
 
+static bool worker_allocation_has_holder(
+    const struct mem_service_client_allocation *work,
+    const char *node_id,
+    uint64_t incarnation)
+{
+    uint32_t holder;
+
+    if (!work || !node_id || !incarnation) return false;
+    for (holder = 0; holder < work->holder_count; ++holder) {
+        if (work->holders[holder].provider_incarnation == incarnation &&
+            work->holders[holder].generation == work->generation &&
+            !strcmp(work->holders[holder].node_id, node_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int mem_service_provider_obmm_fence_holder_state(
+    const char *config_path,
+    const char *replacement_config_path)
+{
+    struct worker_config old_config, replacement;
+    struct mem_service_client client;
+    struct mem_service_client_provider_directory directory;
+    struct mem_service_client_allocation work, fenced;
+    struct mem_service_provider_descriptor descriptor;
+    enum mem_service_wire_status status;
+    uint64_t after_generation = 0;
+    size_t fenced_allocations = 0;
+    const char *reason = "invalid-config";
+    int device = -1;
+    int result = 1;
+    int last_gsva_error = GSVA_ERR_BAD_VERSION;
+    int last_errno = 0;
+    bool physical_completed = false;
+    bool receipt_attempted = false;
+
+    if (read_config(config_path, &old_config) ||
+        read_config(replacement_config_path, &replacement)) return 2;
+    if (!worker_replacement_config_valid(&old_config, &replacement)) return 2;
+
+    mem_service_client_init(&client, replacement.connect);
+    reason = "replacement-provider-not-ready";
+    if (mem_service_client_provider_refresh(
+            &client, replacement.node, replacement.incarnation,
+            replacement.readiness_generation, &directory, &status) ||
+        status != MEM_SERVICE_WIRE_STATUS_OK || !directory.directory_ready) {
+        goto done;
+    }
+    reason = "obmm-device-unavailable";
+    device = open("/dev/obmm", O_RDWR | O_CLOEXEC);
+    if (device < 0) goto done;
+
+    for (;;) {
+        char idempotency_key[MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN];
+        bool old_holder_remains;
+        int gsva_error = GSVA_ERR_BAD_VERSION;
+        int poll_result = mem_service_client_poll_holder_recovery_allocation(
+            &client, replacement.node, replacement.incarnation,
+            old_config.incarnation, after_generation, &work, &status);
+
+        physical_completed = false;
+        receipt_attempted = false;
+        last_gsva_error = GSVA_ERR_BAD_VERSION;
+        last_errno = 0;
+
+        if (poll_result >= 0 && status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND)
+            break;
+        reason = "holder-recovery-poll-failed";
+        if (poll_result || status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(work.state, "quarantined") || !work.generation ||
+            work.generation <= after_generation || !work.provider_backed ||
+            !work.descriptor_len ||
+            work.descriptor_len > sizeof(descriptor.bytes) ||
+            !worker_allocation_has_holder(
+                &work, old_config.node, old_config.incarnation)) {
+            goto done;
+        }
+        memset(&descriptor, 0, sizeof(descriptor));
+        descriptor.len = work.descriptor_len;
+        memcpy(descriptor.bytes, work.descriptor, work.descriptor_len);
+        reason = "physical-holder-revoke-failed";
+        errno = 0;
+        if (mem_service_provider_obmm_force_revoke_local(
+                device, &descriptor, &gsva_error)) {
+            last_gsva_error = gsva_error;
+            last_errno = errno;
+            goto done;
+        }
+        physical_completed = true;
+        if (snprintf(idempotency_key, sizeof(idempotency_key),
+                     "obmm-holder-fence-%016" PRIx64 "-%016" PRIx64,
+                     old_config.incarnation, work.generation) < 0 ||
+            strlen(idempotency_key) >= sizeof(idempotency_key)) {
+            reason = "idempotency-key-invalid";
+            goto done;
+        }
+        reason = "holder-fence-receipt-failed";
+        receipt_attempted = true;
+        if (mem_service_client_fence_allocation_holder(
+                &client, work.key, replacement.node,
+                replacement.incarnation, work.generation,
+                old_config.incarnation, idempotency_key,
+                &fenced, &status) || status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(fenced.key, work.key) ||
+            fenced.generation != work.generation ||
+            strcmp(fenced.state, "quarantined")) {
+            goto done;
+        }
+        old_holder_remains = worker_allocation_has_holder(
+            &fenced, old_config.node, old_config.incarnation);
+        if (old_holder_remains) {
+            reason = "holder-fence-receipt-incomplete";
+            goto done;
+        }
+        printf("obmm-holder-fence: status=fenced key=%s generation=%" PRIu64
+               " old_incarnation=%" PRIu64 " current_incarnation=%" PRIu64
+               "\n",
+               work.key, work.generation, old_config.incarnation,
+               replacement.incarnation);
+        after_generation = work.generation;
+        ++fenced_allocations;
+    }
+    printf("obmm-holder-fence: status=complete node=%s old_incarnation=%" PRIu64
+           " current_incarnation=%" PRIu64 " allocations=%zu\n",
+           replacement.node, old_config.incarnation,
+           replacement.incarnation, fenced_allocations);
+    if (!ferror(stdout)) result = 0;
+done:
+    if (device >= 0) close(device);
+    if (result) {
+        fprintf(stderr,
+                "obmm-holder-fence: status=failed reason=%s "
+                "physical_completed=%u receipt_state=%s "
+                "gsva_error=%d errno=%d\n",
+                reason, physical_completed ? 1U : 0U,
+                receipt_attempted ? "unknown-retry-safe" : "not-submitted",
+                last_gsva_error, last_errno);
+    }
+    return result;
+}
+
 /* Matching is evidence only: it never authorizes release, publish or reuse. */
 static const char *reconcile_resource(const struct worker_ledger_entry *last,
     const struct worker_reservation *saved, const struct obmm_cmd_gsva_enumerate_v1 *actual)
@@ -1141,6 +1284,30 @@ int mem_service_provider_obmm_recover_allocation_state(
             }
             objects[j].recovered = true;
             break;
+        }
+        if (worker_allocation_has_holder(
+                &work, old_config.node, old_config.incarnation)) {
+            char idempotency_key[MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN];
+
+            reason = "home-holder-fence-receipt-failed";
+            if (snprintf(idempotency_key, sizeof(idempotency_key),
+                         "obmm-home-absence-%016" PRIx64 "-%016" PRIx64,
+                         old_config.incarnation, work.generation) < 0 ||
+                strlen(idempotency_key) >= sizeof(idempotency_key) ||
+                mem_service_client_fence_allocation_holder(
+                    &client, work.key, old_config.node,
+                    replacement.incarnation, work.generation,
+                    old_config.incarnation, idempotency_key,
+                    &recovered, &status) ||
+                status != MEM_SERVICE_WIRE_STATUS_OK ||
+                strcmp(recovered.key, work.key) ||
+                recovered.generation != work.generation ||
+                strcmp(recovered.state, "quarantined") ||
+                worker_allocation_has_holder(
+                    &recovered, old_config.node, old_config.incarnation)) {
+                goto done;
+            }
+            work = recovered;
         }
         reason = "recovery-reclaim-failed";
         if (mem_service_client_recover_allocation(

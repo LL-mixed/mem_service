@@ -353,6 +353,19 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             "--connect", self._connect,
         )
 
+    def _poll_holder_recovery(self, current_incarnation: int,
+                              fenced_incarnation: int,
+                              after_generation: int = 0,
+                              node_id: str = SECOND_HOME_NODE) -> subprocess.CompletedProcess:
+        return self._run_client(
+            "poll-holder-recovery",
+            "--node-id", node_id,
+            "--incarnation", str(current_incarnation),
+            "--fenced-incarnation", str(fenced_incarnation),
+            "--after-generation", str(after_generation),
+            "--connect", self._connect,
+        )
+
     def _inspect(self, key: str) -> dict[str, str]:
         result = self._run_client(
             "inspect-allocation", "--key", key, "--connect", self._connect
@@ -727,6 +740,18 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             replacement = SECOND_HOME_INCARNATION + 1
             self.assertEqual(self._register_home(
                 replacement, SECOND_HOME_NODE).returncode, 0)
+            holder_pending = self._poll_holder_recovery(
+                replacement, SECOND_HOME_INCARNATION)
+            self.assertEqual(holder_pending.returncode, 0,
+                             holder_pending.stdout + holder_pending.stderr)
+            holder_view = _parse_kv(holder_pending.stdout)
+            self.assertEqual(holder_view["key"], "recover-held")
+            self.assertEqual(holder_view["generation"], str(generation))
+            self.assertEqual(holder_view["state"], "quarantined")
+            wrong_holder_scope = self._poll_holder_recovery(
+                replacement, SECOND_HOME_INCARNATION + 99)
+            self.assertNotEqual(wrong_holder_scope.returncode, 0)
+            self.assertIn("status=not_found", wrong_holder_scope.stdout)
             still_denied = self._recover("recover-held", generation,
                                          HOME_INCARNATION,
                                          HOME_INCARNATION, 0)
@@ -750,6 +775,10 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             self.assertEqual(fenced_view["fenced_mapping_count"], "1")
             self.assertEqual(fenced_view["live_refs"], "0")
             self.assertEqual(self._stats()["import_mappings"], "0")
+            drained_holder_scope = self._poll_holder_recovery(
+                replacement, SECOND_HOME_INCARNATION)
+            self.assertNotEqual(drained_holder_scope.returncode, 0)
+            self.assertIn("status=not_found", drained_holder_scope.stdout)
 
             self._stop_server(proc)
             proc = self._start_daemon(config)

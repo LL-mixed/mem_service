@@ -164,11 +164,60 @@ int __wrap_ioctl(int fd, unsigned long op, ...)
     va_end(args);
     event_calls++;
     last_event = event->sub_op;
-    assert(event->requester_cna == 8 && event->token_id == 2 && event->token_value == 3);
+    assert(event->requester_cna ==
+           (event->sub_op == OBMM_GSVA_EVENT_LOCAL_REVOKE ? 0 : 8));
+    assert(event->token_id == 2 && event->token_value == 3);
     assert(event->key.segment_id == 9 && event->key.epoch == 5);
     assert(event->key.size == 2097152 && event->key.home_va == 0x700000000000ULL);
     event->error = event_fails ? GSVA_ERR_TOKEN_DENIED : GSVA_OK;
     return ioctl_fails ? -1 : 0;
+}
+
+static void test_force_revoke_receipt_boundary(void)
+{
+    struct mem_service_obmm_descriptor_v1 decoded = {
+        .strict_gsva = true,
+        .export_mem_id = 17,
+        .remote_uba = 0x700000000000ULL,
+        .size = 2097152,
+        .token_id = 97,
+        .export_cna = 7,
+        .segment_id = 9,
+        .epoch = 5,
+        .segment_flags = 7,
+        .owner_node = 0,
+        .node_count = 2,
+        .cache_policy = GSVA_CACHE_POLICY_WRITE_THROUGH,
+        .access_flags = 3,
+        .gsva_token_id = 2,
+        .gsva_token_value = 3,
+    };
+    struct mem_service_provider_descriptor descriptor;
+    int32_t gsva_error = 0;
+    unsigned before;
+
+    assert(!mem_service_obmm_descriptor_encode(&decoded, &descriptor));
+    before = event_calls;
+    assert(!mem_service_provider_obmm_force_revoke_local(
+        42, &descriptor, &gsva_error));
+    assert(gsva_error == GSVA_OK && event_calls == before + 1 &&
+           last_event == OBMM_GSVA_EVENT_LOCAL_REVOKE);
+    event_fails = true;
+    assert(mem_service_provider_obmm_force_revoke_local(
+        42, &descriptor, &gsva_error));
+    assert(gsva_error == GSVA_ERR_TOKEN_DENIED && event_calls == before + 2);
+    event_fails = false;
+    ioctl_fails = true;
+    assert(mem_service_provider_obmm_force_revoke_local(
+        42, &descriptor, &gsva_error));
+    assert(event_calls == before + 3);
+    ioctl_fails = false;
+    descriptor.bytes[95] = 0;
+    before = event_calls;
+    assert(mem_service_provider_obmm_force_revoke_local(
+        42, &descriptor, &gsva_error));
+    assert(event_calls == before);
+    puts("obmm_force_revoke=pass physical_before_receipt=1 exact_identity=1");
 }
 
 static struct mem_service_obmm_context *cleanup_context(
@@ -812,6 +861,7 @@ int main(int argc, char **argv)
     test_unmap_and_endpoint_failure_retention();
     test_failed_export_encoding_retains_resources();
     test_compute_mapping_pins();
+    test_force_revoke_receipt_boundary();
     puts("obmm_cleanup_ownership=pass");
     puts("gsva_import_dual_token=pass gsva_visibility_fail_closed=pass page_guards=pass");
     return 0;

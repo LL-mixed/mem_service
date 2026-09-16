@@ -609,6 +609,17 @@ int mem_service_client_poll_recovery_allocation(
     uint64_t after_generation,
     struct mem_service_client_allocation *allocation_out,
     enum mem_service_wire_status *status_out);
+/* Enumerate quarantined allocations whose local holder is still bound to an
+ * exact old provider incarnation. The caller must be the active replacement
+ * provider for node_id. */
+int mem_service_client_poll_holder_recovery_allocation(
+    const struct mem_service_client *client,
+    const char *node_id,
+    uint64_t current_incarnation,
+    uint64_t fenced_incarnation,
+    uint64_t after_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
 int mem_service_client_inspect_allocation(
     const struct mem_service_client *client,
     const char *key,

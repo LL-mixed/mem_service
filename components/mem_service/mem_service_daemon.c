@@ -13202,7 +13202,9 @@ static enum mem_service_wire_status mem_service_poll_allocation(
     if (recovery != 0) {
         struct mem_service_provider_directory_poll poll;
 
-        if (recovery != 1 || fenced_incarnation == 0) {
+        if ((recovery != 1 && recovery != 2) ||
+            fenced_incarnation == 0 ||
+            (recovery == 2 && incarnation == fenced_incarnation)) {
             snprintf(response, response_len,
                      "status=invalid_session\nreason=invalid_request\n");
             return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
@@ -13220,9 +13222,12 @@ static enum mem_service_wire_status mem_service_poll_allocation(
                      "status=internal\nreason=recovery_providers_not_ready\n");
             return MEM_SERVICE_WIRE_STATUS_INTERNAL;
         }
-        result = mem_service_managed_poll_recovery(
+        result = recovery == 1 ? mem_service_managed_poll_recovery(
             &svc->managed, node_id, fenced_incarnation,
-            after_generation, &view);
+            after_generation, &view) :
+            mem_service_managed_poll_holder_recovery(
+                &svc->managed, node_id, fenced_incarnation,
+                after_generation, &view);
         return mem_service_managed_finish(result, &view, "",
                                           response, response_len);
     }

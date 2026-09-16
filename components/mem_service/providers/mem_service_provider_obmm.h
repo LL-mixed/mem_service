@@ -82,6 +82,14 @@ int mem_service_provider_obmm_encode_gsva(
     const struct obmm_gsva_segment_desc_v1 *segment,
     const struct obmm_cmd_export *exported,
     struct mem_service_provider_descriptor *descriptor_out);
+/* Recovery-only local physical revocation. The descriptor must be an exact
+ * strict GSVA descriptor returned by the control plane. Success proves that
+ * QEMU drained the local route and retained its tombstone; callers may then
+ * submit the matching holder fencing receipt. */
+int mem_service_provider_obmm_force_revoke_local(
+    int obmm_fd,
+    const struct mem_service_provider_descriptor *descriptor,
+    int32_t *gsva_error_out);
 
 int mem_service_provider_obmm_probe_device(const char *device_path,
                                            const char *primary_cna_path,
@@ -134,6 +142,9 @@ int mem_service_provider_obmm_inspect_allocation_state(const char *config_path);
 int mem_service_provider_obmm_quarantine_allocation_state(const char *config_path);
 int mem_service_provider_obmm_reconcile_allocation_state(const char *config_path);
 int mem_service_provider_obmm_recover_allocation_state(
+    const char *config_path,
+    const char *replacement_config_path);
+int mem_service_provider_obmm_fence_holder_state(
     const char *config_path,
     const char *replacement_config_path);
 #endif

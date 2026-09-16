@@ -103,6 +103,24 @@ lost-home 的保守恢复。两份配置必须保持 endpoint、node、state fil
 相同 kernel instance、旧 segment 身份复用、活动 ledger writer、不完整服务恢复域
 或 holder fencing 未完成均拒绝。`reconcile-allocation-state` 继续保持只读。
 
+`fence-holder-state --config <old> --replacement-config <new>` 在 holder 节点执行
+imported remote holder 的物理撤销。两份配置必须绑定相同 endpoint、node、state
+file、粒度和分配模式，
+replacement 使用新 incarnation 且已经登记，完整 required provider directory 必须
+ready。命令通过 holder recovery poll 按 generation 枚举精确旧 incarnation 的
+QUARANTINED holder，逐项解析服务保存的严格 GSVA descriptor，并向本机 `/dev/obmm`
+提交 `LOCAL_REVOKE`。QEMU 完成 route quarantine、在途访问排空、home fence/
+writeback、cache/TLB 失效、CPU window unmap 和 tombstone 后才返回成功。随后命令
+使用确定性幂等键调用 `mem_service_client_fence_allocation_holder()`。物理撤销失败、
+descriptor 不完整、服务回复冲突或 receipt 不完整时立即停止；物理失败路径绝不
+提交 receipt。重试通过 QEMU tombstone 和服务持久 receipt 幂等收敛。
+
+`recover-allocation-state` 对旧 HOME holder 使用不同的物理证明：新 kernel instance
+的两次稳定 inventory 均不存在旧 ledger 记录的 segment，并且拒绝任何旧 segment
+身份复用。在该证明成立后，命令先用确定性幂等键提交旧 HOME holder receipt，再
+请求服务 reclaim。服务仍有任一 remote holder 时 reclaim 会拒绝，必须由对应节点
+先完成上述 `fence-holder-state`。
+
 `resume-allocations --config <path>` 覆盖同一 kernel instance 中稳态 worker 崩溃
 后的 reservation 续作。它独占并完整校验现有 ledger，读取稳定 kernel inventory，
 先对全部对象完成只读预检和库存快照复核，再执行可证明的阶段续作：
@@ -120,8 +138,8 @@ lost-home 的保守恢复。两份配置必须保持 endpoint、node、state fil
 每个外部操作的完成证明先同步为新 ledger 帧；失败后的下一次启动从新阶段继续。
 `reserve-intent` 未记录 segment 身份，无法把任一库存项唯一绑定到该事务，继续
 fail-closed。截断、校验失败或半写帧同样拒绝，禁止删除尾部或推断操作未发生。
-成功后进程持有原 ledger 锁并进入现有 poll/reclaim 循环。远端 holder 的物理映射/
-计算排空证明和强制撤销仍须单独实现。
+成功后进程持有原 ledger 锁并进入现有 poll/reclaim 循环。远端 holder 的排空由
+上述 `fence-holder-state` 独立执行，worker resume 不代替该物理证明。
 
 `quarantine-allocation-state --config <path>` 用于上述无法安全续作的状态。命令
 独占现有 ledger，要求首个 `worker-start` 帧完整且与 endpoint、state file、node、

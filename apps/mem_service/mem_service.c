@@ -155,6 +155,7 @@ static void usage(const char *argv0)
     printf(" [fence-allocation-holder --key <key> --node-id <id> --incarnation <u64> --generation <u64> --fenced-incarnation <u64> --idempotency-key <key>]");
     printf(" [poll-allocation --node-id <id> --incarnation <u64> --after-generation <u64>]");
     printf(" [poll-recovery --node-id <id> --incarnation <u64> --fenced-incarnation <u64> --after-generation <u64>]");
+    printf(" [poll-holder-recovery --node-id <id> --incarnation <u64> --fenced-incarnation <u64> --after-generation <u64>]");
     printf(" [mapping-transition --key <key> --session-id <id> --generation <u64> --mapping-id <u64> --action <begin|confirm|close|finish|cancel|inspect> --idempotency-key <id>]");
     printf(" [reference-transition --action <begin|stage|seal|resolve|acquire|map-begin> --key <key> [--session-id <id> --idempotency-key <id>] [--generation <u64> --version <u64>] [--reference-hex <512hex>] [--access <1|2|3>] [--holder-node-id <id> --holder-provider-incarnation <u64>]]");
     printf(" [object-session --config <path> # deterministic SDK op sequence; config lines: session_id, connect, request_timeout_ms, provider=<session-loopback|obmm> (provider_device/provider_cna_path/provider_instance/provider_import_region_bytes for obmm), op=<allocate|acquire|release|retire|inspect|wait_state|publish|reclaim|stats|map|unmap|write|read|publish_data|wait_visible|probe_readonly|probe_guard|probe_conflict|probe_descriptor> field=value ...]");
@@ -9517,6 +9518,31 @@ static int run_poll_recovery(int argc, char **argv)
                                       payload);
 }
 
+static int run_poll_holder_recovery(int argc, char **argv)
+{
+    char payload[512] = "";
+
+    if (append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--node-id", "node_id") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--incarnation", "incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--fenced-incarnation",
+                                      "fenced_incarnation") != 0 ||
+        append_required_payload_field(payload, sizeof(payload), argc, argv,
+                                      "--after-generation",
+                                      "after_generation") != 0 ||
+        mem_service_wire_payload_append_u64(payload, sizeof(payload),
+                                            "recovery", 2U) != 0) {
+        return 2;
+    }
+    return run_client_payload_command(argc,
+                                      argv,
+                                      MEM_SERVICE_WIRE_OP_POLL_ALLOCATION,
+                                      "poll-holder-recovery",
+                                      payload);
+}
+
 static int run_publish_allocation(int argc, char **argv)
 {
     char payload[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN] = "";
@@ -14227,6 +14253,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "poll-recovery") == 0) {
         return run_poll_recovery(argc, argv);
+    }
+    if (strcmp(argv[1], "poll-holder-recovery") == 0) {
+        return run_poll_holder_recovery(argc, argv);
     }
     if (strcmp(argv[1], "mapping-transition") == 0) {
         return run_mapping_transition(argc, argv);

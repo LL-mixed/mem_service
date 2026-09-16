@@ -262,6 +262,45 @@ static bool mem_service_obmm_descriptor_equal(
              left->gsva_token_value == right->gsva_token_value));
 }
 
+int mem_service_provider_obmm_force_revoke_local(
+    int obmm_fd,
+    const struct mem_service_provider_descriptor *descriptor,
+    int32_t *gsva_error_out)
+{
+#ifdef __linux__
+    struct mem_service_obmm_descriptor_v1 decoded;
+    struct obmm_cmd_gsva_event_v1 event = {0};
+
+    if (gsva_error_out != NULL) *gsva_error_out = GSVA_ERR_BAD_VERSION;
+    if (obmm_fd < 0 || descriptor == NULL || gsva_error_out == NULL ||
+        mem_service_obmm_descriptor_decode(descriptor, &decoded) != 0 ||
+        !decoded.strict_gsva) {
+        return -1;
+    }
+    event.version = OBMM_GSVA_ABI_VERSION;
+    event.sub_op = OBMM_GSVA_EVENT_LOCAL_REVOKE;
+    /* Zero asks the kernel to bind the event to this bus controller's CNA. */
+    event.requester_cna = 0;
+    event.token_id = decoded.gsva_token_id;
+    event.token_value = decoded.gsva_token_value;
+    event.key.version = OBMM_GSVA_ABI_VERSION;
+    event.key.segment_id = decoded.segment_id;
+    event.key.home_va = decoded.remote_uba;
+    event.key.size = decoded.size;
+    event.key.p_tag = decoded.p_tag;
+    event.key.cache_policy = decoded.cache_policy;
+    event.key.epoch = decoded.epoch;
+    if (ioctl(obmm_fd, OBMM_CMD_GSVA_EVENT_V1, &event) != 0) return -1;
+    *gsva_error_out = event.error;
+    return event.error == GSVA_OK ? 0 : -1;
+#else
+    (void)obmm_fd;
+    (void)descriptor;
+    if (gsva_error_out != NULL) *gsva_error_out = -1;
+    return -1;
+#endif
+}
+
 #ifdef __linux__
 static bool mem_service_obmm_parse_u32_file(const char *path,
                                             uint32_t *value_out)
