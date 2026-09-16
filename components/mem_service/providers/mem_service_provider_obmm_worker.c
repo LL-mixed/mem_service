@@ -451,6 +451,199 @@ done:
     return result;
 }
 
+static bool worker_resume_completed_phase(const char *phase)
+{
+    return !strcmp(phase, "reclaimed") ||
+           !strcmp(phase, "cancel-confirmed") ||
+           !strcmp(phase, "unbacked-retired");
+}
+
+static bool worker_resume_service_matches(
+    const struct worker_config *config,
+    const struct worker_ledger_entry *last,
+    const struct worker_reservation *saved,
+    const struct mem_service_client_allocation *actual)
+{
+    return config && last && saved && actual &&
+           (!strcmp(actual->state, "active") ||
+            !strcmp(actual->state, "retiring")) &&
+           !strcmp(actual->key, last->work.key) &&
+           actual->generation == last->work.generation &&
+           actual->size_bytes == last->work.size_bytes &&
+           actual->alignment_bytes == last->work.alignment_bytes &&
+           actual->capabilities == last->work.capabilities &&
+           !strcmp(actual->home_node, config->node) &&
+           actual->provider_incarnation == config->incarnation &&
+           actual->provider_backed && saved->occupied &&
+           !strcmp(saved->key, actual->key) &&
+           saved->generation == actual->generation &&
+           actual->address == saved->segment.home_va &&
+           actual->address_len == saved->segment.size &&
+           actual->descriptor_len == saved->descriptor.len &&
+           actual->descriptor_len &&
+           actual->descriptor_len <= sizeof(actual->descriptor) &&
+           !memcmp(actual->descriptor, saved->descriptor.bytes,
+                   actual->descriptor_len);
+}
+
+/* Resume only fully published reservations whose service and kernel identities
+ * still agree.  Intent-only and partially completed resource operations remain
+ * fail-closed because replaying them cannot prove whether the preceding ioctl
+ * completed.  The returned fd retains the exclusive ledger lock for the
+ * worker's lifetime. */
+static int worker_load_resume_state(
+    struct worker_config *config,
+    const struct mem_service_client *client,
+    int device,
+    struct worker_reservation *reservations,
+    size_t reservation_capacity,
+    int *journal_out)
+{
+    enum { limit = 65536 };
+    struct worker_ledger_entry *entries = NULL;
+    struct obmm_cmd_gsva_enumerate_v1 *inventory = NULL;
+    struct obmm_cmd_gsva_enumerate_v1 cursor = {
+        .version = OBMM_GSVA_ABI_VERSION,
+    };
+    struct stat before, after;
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    unsigned char *claimed = NULL;
+    const char *reason = "journal-invalid";
+    size_t count = 0, records = 0, restored = 0, unclaimed = 0;
+    size_t i, j;
+    int fd = -1, result = 1;
+
+    if (!config || !client || device < 0 || !reservations ||
+        !reservation_capacity || !journal_out) return 1;
+    *journal_out = -1;
+    fd = open(config->state,
+              O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 || fcntl(fd, F_SETLK, &lock) || fstat(fd, &before) ||
+        !S_ISREG(before.st_mode) || before.st_size <= 0 ||
+        before.st_size % WORKER_LEDGER_FRAME_BYTES ||
+        before.st_size / WORKER_LEDGER_FRAME_BYTES > limit) goto done;
+    count = (size_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
+    entries = calloc(count, sizeof(*entries));
+    inventory = calloc(limit, sizeof(*inventory));
+    claimed = calloc(limit, 1);
+    if (!entries || !inventory || !claimed) goto done;
+    for (i = 0; i < count; ++i)
+        if (ledger_read_entry(fd, i + 1, config, &entries[i])) goto done;
+
+    reason = "inventory-unavailable";
+    for (;;) {
+        if (gva_manager_enumerate_segments(device, &cursor)) goto done;
+        reason = "kernel-instance-mismatch";
+        if (memcmp(config->kernel_instance, cursor.kernel_instance, 16))
+            goto done;
+        reason = "inventory-unavailable";
+        if (cursor.flags == OBMM_GSVA_ENUM_END) break;
+        if (records == limit) goto done;
+        inventory[records++] = cursor;
+    }
+
+    qsort(entries, count, sizeof(*entries), ledger_order);
+    reason = "resource-unresolved";
+    for (i = 1; i < count;) {
+        struct worker_reservation saved = {0};
+        struct mem_service_client_allocation actual;
+        enum mem_service_wire_status status;
+        size_t begin = i, found = records;
+        const struct worker_ledger_entry *last;
+        const char *match = NULL;
+
+        while (i < count &&
+               entries[i].work.generation == entries[begin].work.generation) {
+            const struct worker_ledger_entry *entry = &entries[i];
+
+            if (strcmp(entry->work.key, entries[begin].work.key) ||
+                entry->work.size_bytes != entries[begin].work.size_bytes ||
+                entry->work.alignment_bytes !=
+                    entries[begin].work.alignment_bytes ||
+                entry->work.capabilities != entries[begin].work.capabilities)
+                goto done;
+            if (entry->reservation.segment.segment_id) {
+                if (saved.segment.segment_id &&
+                    memcmp(&saved.segment, &entry->reservation.segment,
+                           sizeof(saved.segment))) goto done;
+                saved = entry->reservation;
+            }
+            ++i;
+        }
+        last = &entries[i - 1];
+        if (!saved.segment.segment_id) {
+            if (strcmp(last->phase, "cancel-confirmed")) {
+                reason = "phase-not-resumable";
+                goto done;
+            }
+            continue;
+        }
+        for (j = 0; j < records; ++j) {
+            if (inventory[j].desc.segment_id != saved.segment.segment_id)
+                continue;
+            if (found != records) goto done;
+            found = j;
+        }
+        if (found == records || claimed[found]) goto done;
+        match = reconcile_resource(last, &saved, &inventory[found]);
+        if (!match) goto done;
+        claimed[found] = 1;
+
+        if (worker_resume_completed_phase(last->phase)) {
+            if (strcmp(match, "retired-record")) goto done;
+            continue;
+        }
+        if (strcmp(last->phase, "published") ||
+            strcmp(match, "export-bound")) {
+            reason = "phase-not-resumable";
+            goto done;
+        }
+        if (!saved.occupied) goto done;
+        strcpy(saved.key, last->work.key);
+        saved.generation = last->work.generation;
+        reason = "service-state-mismatch";
+        memset(&actual, 0, sizeof(actual));
+        if (mem_service_client_inspect_allocation(
+                client, last->work.key, &actual, &status) ||
+            status != MEM_SERVICE_WIRE_STATUS_OK ||
+            !worker_resume_service_matches(config, last, &saved, &actual) ||
+            restored == reservation_capacity) goto done;
+        reservations[restored++] = saved;
+    }
+
+    reason = "snapshot-changed";
+    if (gva_manager_enumerate_segments(device, &cursor) ||
+        cursor.flags != OBMM_GSVA_ENUM_END || fstat(fd, &after) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) goto done;
+    for (j = 0; j < records; ++j) if (!claimed[j]) ++unclaimed;
+    printf("obmm-worker-resume: status=ready reservations=%zu "
+           "kernel_records=%zu unclaimed_records=%zu revision=%" PRIu64
+           " kernel_instance=",
+           restored, records, unclaimed, (uint64_t)cursor.revision);
+    for (i = 0; i < 16; ++i) printf("%02x", config->kernel_instance[i]);
+    printf(" scope=ledger-owned-segment-export-records\n");
+    if (ferror(stdout)) goto done;
+    *journal_out = fd;
+    fd = -1;
+    result = 0;
+done:
+    if (fd >= 0) close(fd);
+    free(entries);
+    free(inventory);
+    free(claimed);
+    if (result)
+        fprintf(stderr,
+                "obmm-worker-resume: status=failed reason=%s "
+                "reconciliation_required=1\n",
+                reason);
+    return result;
+}
+
 int mem_service_provider_obmm_recover_allocation_state(
     const char *config_path,
     const char *replacement_config_path)
@@ -931,7 +1124,7 @@ static int rollback_unbacked_work(int device, int journal, const struct worker_c
     return 0;
 }
 
-int mem_service_provider_obmm_serve_allocations(const char *config_path)
+static int worker_serve_allocations(const char *config_path, bool resume)
 {
     struct worker_config config;
     struct mem_service_client client;
@@ -950,7 +1143,7 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
         fprintf(stderr, "obmm-worker invalid config\n");
         return 2;
     }
-    if (access(config.state, F_OK) == 0 || errno != ENOENT) {
+    if (!resume && (access(config.state, F_OK) == 0 || errno != ENOENT)) {
         fprintf(stderr, "obmm-worker reconciliation required state=%s\n", config.state);
         return 1;
     }
@@ -958,15 +1151,22 @@ int mem_service_provider_obmm_serve_allocations(const char *config_path)
     device = open("/dev/obmm", O_RDWR | O_CLOEXEC);
     if (device < 0 || ioctl(device, OBMM_CMD_GSVA_APERTURE_QUERY, &aperture) ||
         !(aperture.flags & OBMM_GSVA_APERTURE_F_ACTIVE)) goto done;
-    if (gva_manager_enumerate_segments(device, &birth)) goto done;
-    memcpy(config.kernel_instance, birth.kernel_instance, 16);
     reservations = calloc(MEM_SERVICE_MANAGED_MAX_ALLOCATIONS, sizeof(*reservations));
     if (!reservations) goto done;
-    journal = create_state(&config);
-    if (journal < 0) goto done;
+    if (resume) {
+        if (worker_load_resume_state(
+                &config, &client, device, reservations,
+                MEM_SERVICE_MANAGED_MAX_ALLOCATIONS, &journal)) goto done;
+    } else {
+        if (gva_manager_enumerate_segments(device, &birth)) goto done;
+        memcpy(config.kernel_instance, birth.kernel_instance, 16);
+        journal = create_state(&config);
+        if (journal < 0) goto done;
+    }
     printf("obmm-worker address_reuse=kernel-confirmed home_policy=single-owner "
            "forced_revoke=unsupported recovery=quarantine\n");
-    printf("obmm-worker starting provider refresh node=%s\n", config.node);
+    printf("obmm-worker starting provider refresh node=%s startup=%s\n",
+           config.node, resume ? "resume" : "new");
     fflush(stdout);
     worker_stop = 0;
     action.sa_handler = stop_worker;
@@ -1048,4 +1248,14 @@ done:
     fprintf(stderr, "obmm-worker stopped result=%d reconciliation_required=%d\n",
             result, journal >= 0);
     return result;
+}
+
+int mem_service_provider_obmm_serve_allocations(const char *config_path)
+{
+    return worker_serve_allocations(config_path, false);
+}
+
+int mem_service_provider_obmm_resume_allocations(const char *config_path)
+{
+    return worker_serve_allocations(config_path, true);
 }

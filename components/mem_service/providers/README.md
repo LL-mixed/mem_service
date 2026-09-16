@@ -101,8 +101,16 @@ lost-home 的保守恢复。两份配置必须保持 endpoint、node、state fil
 
 该命令只覆盖 home guest/kernel 已替换、旧 backing 随旧 kernel 消失的恢复。
 相同 kernel instance、旧 segment 身份复用、活动 ledger writer、不完整服务恢复域
-或 holder fencing 未完成均拒绝。`reconcile-allocation-state` 继续保持只读；原 home
-仍存活时的 reservation 续作、跨节点映射/计算排空证明和强制撤销仍须单独实现。
+或 holder fencing 未完成均拒绝。`reconcile-allocation-state` 继续保持只读。
+
+`resume-allocations --config <path>` 覆盖同一 kernel instance 中稳态 worker 崩溃
+后的 reservation 续作。它独占并完整校验现有 ledger，读取稳定 kernel inventory，
+只恢复最后阶段为 `published`、segment/export/descriptor 精确匹配、且服务仍返回
+同 key/generation/home/incarnation ACTIVE 或 RETIRING 对象的 slot。已完成的
+`reclaimed`、`cancel-confirmed` 和 `unbacked-retired` 记录只核对，不恢复 slot；
+其他意图或部分完成阶段保持 fail-closed。成功后进程持有原 ledger 锁并进入现有
+poll/reclaim 循环，不重新分配、export 或 publish。远端 holder 的物理映射/计算
+排空证明和强制撤销仍须单独实现。
 
 `serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
 每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
@@ -115,8 +123,9 @@ segment 身份、实际 export 回执和已构造的 opaque descriptor；不序�
 node/incarnation 和粒度，逐条展示资源身份；损坏、截断、并发写入及格式不匹配
 返回失败。该命令不登记 provider、不打开设备、不恢复指针或解除隔离；
 `physical_state=unknown` 明确表示日志校验尚未完成 kernel/provider 对账。
-worker 继续拒绝使用已有 state_file 启动。lost-home 恢复成功会归档旧 state file，
-之后只能用具有新 incarnation 的 replacement 配置创建新的 ledger。
+普通 `serve-allocations` 继续拒绝已有 state_file；只有上述显式 resume 命令可以在
+完整三方身份核对后续作。lost-home 恢复成功会归档旧 state file，之后只能用具有
+新 incarnation 的 replacement 配置创建新的 ledger。
 
 ### 固定地址子区间
 
