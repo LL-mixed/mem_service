@@ -72,6 +72,15 @@ ledger。裸 `reserve-intent`、截断或校验失败帧继续隔离，因为它
 归属。成功后沿用原 ledger 和正常 poll/reclaim 循环。该入口不恢复已重启 client 的
 VMA/PTO pin，也不提供远端 holder 排空或强制撤销证明。
 
+无法安全续作时运行 `linqu_mem_service_provider_obmm
+quarantine-allocation-state --config <path>`。它用完整首帧绑定旧 provider 身份并
+取得 ledger 独占锁，随后精确注销该 incarnation，使服务立即隔离其 allocation、
+holder 和 mapping。后续 torn/invalid 帧只作为完整性状态报告；命令不修改 ledger、
+不访问 `/dev/obmm`、不回收 backing。`provider_state=already-absent|replaced` 表示旧
+实例此前已经失效，作为幂等完成处理。输出中的
+`resource_reconciliation_required=1` 必须保留到物理库存、远端排空和 fencing 完成。
+首帧损坏或配置身份不一致时拒绝注销，避免用无法认证的文件影响其他 provider。
+
 需要重启恢复归属的 guest 必须在每个 `object-session` 配置头写入
 `holder_node_id=guest-node-<node>` 与
 `holder_provider_incarnation=<directory-incarnation>`。两项共同约束 acquire、

@@ -14,6 +14,7 @@ static void mem_service_obmm_cli_usage(const char *program)
     fprintf(stderr, "       %s serve-allocations --config <path>\n", program);
     fprintf(stderr, "       %s resume-allocations --config <path>\n", program);
     fprintf(stderr, "       %s inspect-allocation-state --config <path>\n", program);
+    fprintf(stderr, "       %s quarantine-allocation-state --config <path>\n", program);
     fprintf(stderr, "       %s reconcile-allocation-state --config <path>\n", program);
     fprintf(stderr, "       %s recover-allocation-state --config <old-path> "
                     "--replacement-config <new-path>\n", program);
@@ -76,6 +77,10 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "reconcile-allocation-state") == 0 && argc == 4 &&
         strcmp(argv[2], "--config") == 0) {
         return mem_service_provider_obmm_reconcile_allocation_state(argv[3]);
+    }
+    if (strcmp(argv[1], "quarantine-allocation-state") == 0 && argc == 4 &&
+        strcmp(argv[2], "--config") == 0) {
+        return mem_service_provider_obmm_quarantine_allocation_state(argv[3]);
     }
     if (strcmp(argv[1], "inspect-allocation-state") == 0 && argc == 4 &&
         strcmp(argv[2], "--config") == 0) {

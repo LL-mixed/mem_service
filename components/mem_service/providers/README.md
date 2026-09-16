@@ -123,6 +123,18 @@ fail-closed。截断、校验失败或半写帧同样拒绝，禁止删除尾部
 成功后进程持有原 ledger 锁并进入现有 poll/reclaim 循环。远端 holder 的物理映射/
 计算排空证明和强制撤销仍须单独实现。
 
+`quarantine-allocation-state --config <path>` 用于上述无法安全续作的状态。命令
+独占现有 ledger，要求首个 `worker-start` 帧完整且与 endpoint、state file、node、
+incarnation、粒度及分配模式全部一致。后续帧完整时逐项校验；截断或校验失败只
+记录为 `ledger_integrity=torn|invalid`，不据此推断事务结果。命令精确注销首帧
+绑定的 provider incarnation，使服务立即执行 provider-loss 隔离；旧实例已经过期
+或被新 incarnation 替换时按幂等成功处理。它不打开 `/dev/obmm`、不修改 ledger、
+不解释或回收 segment，也不解除任何隔离。输出固定声明
+`scope=provider-control-plane`、`backing_reconciled=0` 和
+`resource_reconciliation_required=1`；物理资源仍须后续 reconciliation、fencing
+或 lost-home recovery 处理。首帧损坏、配置不匹配、活动 writer 或控制面结果不确定
+时拒绝执行。
+
 `serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
 每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
 segment 身份、实际 export 回执和已构造的 opaque descriptor；不序列化指针。

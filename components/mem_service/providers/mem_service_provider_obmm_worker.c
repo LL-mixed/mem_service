@@ -242,6 +242,116 @@ done:
     return result;
 }
 
+/*
+ * Withdraw a crashed worker's exact provider incarnation without interpreting
+ * an ambiguous transaction tail.  The first complete worker-start frame is
+ * the authority for the provider identity; later corruption only changes the
+ * reported ledger integrity.  This command deliberately does not open OBMM or
+ * modify the ledger, so physical backing remains quarantined for a subsequent
+ * reconciliation or lost-home recovery operation.
+ */
+int mem_service_provider_obmm_quarantine_allocation_state(const char *config_path)
+{
+    enum { limit = 65536 };
+    struct worker_config config;
+    struct worker_ledger_entry entry;
+    struct mem_service_client client;
+    struct mem_service_client_provider_directory directory = {0};
+    struct stat before, after, path_state;
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    const char *integrity = "complete";
+    const char *provider_state = NULL;
+    const char *reason = "invalid-config";
+    uint64_t count, sequence;
+    int fd = -1, result = 1;
+
+    if (read_config(config_path, &config)) return 2;
+    reason = "ledger-unavailable";
+    fd = open(config.state, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 || fcntl(fd, F_SETLK, &lock) || fstat(fd, &before) ||
+        lstat(config.state, &path_state) || !S_ISREG(before.st_mode) ||
+        !S_ISREG(path_state.st_mode) || before.st_dev != path_state.st_dev ||
+        before.st_ino != path_state.st_ino ||
+        before.st_size < WORKER_LEDGER_FRAME_BYTES) goto done;
+
+    reason = "ledger-start-invalid";
+    if (ledger_read_entry(fd, 1, &config, &entry) ||
+        strcmp(entry.config.connect, config.connect) ||
+        strcmp(entry.config.state, config.state) ||
+        entry.config.fast_allocation != config.fast_allocation) goto done;
+
+    count = (uint64_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
+    if (count > limit) {
+        integrity = "invalid";
+    } else {
+        for (sequence = 2; sequence <= count; ++sequence) {
+            if (ledger_read_entry(fd, sequence, &config, &entry) ||
+                strcmp(entry.config.connect, config.connect) ||
+                strcmp(entry.config.state, config.state) ||
+                entry.config.fast_allocation != config.fast_allocation) {
+                integrity = "invalid";
+                break;
+            }
+        }
+        if (!strcmp(integrity, "complete") &&
+            before.st_size % WORKER_LEDGER_FRAME_BYTES) integrity = "torn";
+    }
+
+    reason = "ledger-changed";
+    if (fstat(fd, &after) || lstat(config.state, &path_state) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+        before.st_dev != path_state.st_dev ||
+        before.st_ino != path_state.st_ino) goto done;
+
+    mem_service_client_init(&client, config.connect);
+    reason = "provider-withdraw-failed";
+    if (mem_service_client_provider_deregister(
+            &client, config.node, config.incarnation, &directory, &status))
+        goto done;
+    if (status == MEM_SERVICE_WIRE_STATUS_OK) {
+        provider_state = "isolated";
+    } else if (status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND) {
+        provider_state = "already-absent";
+    } else if (status == MEM_SERVICE_WIRE_STATUS_STALE_REF) {
+        provider_state = "replaced";
+    } else {
+        goto done;
+    }
+
+    reason = "ledger-changed-after-isolation";
+    if (fstat(fd, &after) || lstat(config.state, &path_state) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+        before.st_dev != path_state.st_dev ||
+        before.st_ino != path_state.st_ino) goto done;
+
+    printf("obmm-worker-quarantine: status=complete node=%s "
+           "incarnation=%" PRIu64 " provider_state=%s ledger_integrity=%s "
+           "scope=provider-control-plane backing_reconciled=0 "
+           "resource_reconciliation_required=1\n",
+           config.node, config.incarnation, provider_state, integrity);
+    if (!ferror(stdout)) result = 0;
+done:
+    if (fd >= 0) close(fd);
+    if (result)
+        fprintf(stderr,
+                "obmm-worker-quarantine: status=failed reason=%s "
+                "provider_state=%s backing_reconciled=0 "
+                "resource_reconciliation_required=1\n",
+                reason, provider_state != NULL ? provider_state : "unknown");
+    return result;
+}
+
 static int ledger_order(const void *left, const void *right)
 {
     const struct worker_ledger_entry *a = left, *b = right;
