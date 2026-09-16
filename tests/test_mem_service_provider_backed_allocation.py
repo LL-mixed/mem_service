@@ -748,6 +748,14 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             self.assertEqual(holder_view["key"], "recover-held")
             self.assertEqual(holder_view["generation"], str(generation))
             self.assertEqual(holder_view["state"], "quarantined")
+            self.assertEqual(holder_view["holder.0.session_id"],
+                             "recover-session")
+            self.assertEqual(holder_view["holder.0.generation"],
+                             str(generation))
+            self.assertEqual(holder_view["holder.0.node_id"],
+                             SECOND_HOME_NODE)
+            self.assertEqual(holder_view["holder.0.provider_incarnation"],
+                             str(SECOND_HOME_INCARNATION))
             wrong_holder_scope = self._poll_holder_recovery(
                 replacement, SECOND_HOME_INCARNATION + 99)
             self.assertNotEqual(wrong_holder_scope.returncode, 0)

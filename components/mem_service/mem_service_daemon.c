@@ -11975,6 +11975,50 @@ static void mem_service_managed_render_view(
              descriptor_hex);
 }
 
+static void mem_service_managed_append_identity_details(
+    const struct mem_service_managed_view *view,
+    char *response,
+    size_t response_len)
+{
+    size_t used = strlen(response);
+    uint32_t i;
+
+    if (view->owner_session[0] != '\0' && used < response_len) {
+        int written = snprintf(response + used,
+                               response_len - used,
+                               "owner_session=%s\n",
+                               view->owner_session);
+
+        if (written < 0) return;
+        used += (size_t)written;
+    }
+    for (i = 0; i < view->holder_count && used < response_len; ++i) {
+        int written = snprintf(response + used,
+                               response_len - used,
+                               "holder.%u.session_id=%s\n"
+                               "holder.%u.generation=%" PRIu64 "\n",
+                               i,
+                               view->holders[i].session_id,
+                               i,
+                               view->holders[i].generation);
+
+        if (written < 0) return;
+        used += (size_t)written;
+        if (view->holders[i].node_id[0] != '\0' && used < response_len) {
+            written = snprintf(response + used,
+                               response_len - used,
+                               "holder.%u.node_id=%s\n"
+                               "holder.%u.provider_incarnation=%" PRIu64 "\n",
+                               i,
+                               view->holders[i].node_id,
+                               i,
+                               view->holders[i].provider_incarnation);
+            if (written < 0) return;
+            used += (size_t)written;
+        }
+    }
+}
+
 static enum mem_service_wire_status mem_service_managed_finish(
     enum mem_service_managed_result result,
     const struct mem_service_managed_view *view,
@@ -12313,8 +12357,6 @@ static enum mem_service_wire_status mem_service_inspect_allocation(
     char key[MEM_SERVICE_MANAGED_KEY_LEN];
     struct mem_service_managed_view view;
     enum mem_service_managed_result result;
-    size_t used;
-    uint32_t i;
 
     if (!mem_service_managed_payload_valid(payload,
                                            MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION,
@@ -12328,37 +12370,7 @@ static enum mem_service_wire_status mem_service_inspect_allocation(
         return mem_service_managed_finish(result, NULL, key, response, response_len);
     }
     mem_service_managed_render_view(&view, response, response_len);
-    used = strlen(response);
-    if (view.owner_session[0] != '\0') {
-        used += (size_t)snprintf(response + used,
-                                 used < response_len ? response_len - used : 0,
-                                 "owner_session=%s\n",
-                                 view.owner_session);
-    }
-    for (i = 0; i < view.holder_count && used < response_len; ++i) {
-        int written = snprintf(response + used,
-                               response_len - used,
-                               "holder.%u.session_id=%s\n"
-                               "holder.%u.generation=%" PRIu64 "\n",
-                               i,
-                               view.holders[i].session_id,
-                               i,
-                               view.holders[i].generation);
-
-        if (written < 0) {
-            break;
-        }
-        used += (size_t)written;
-        if (view.holders[i].node_id[0] != '\0' && used < response_len) {
-            written = snprintf(response + used, response_len - used,
-                               "holder.%u.node_id=%s\n"
-                               "holder.%u.provider_incarnation=%" PRIu64 "\n",
-                               i, view.holders[i].node_id, i,
-                               view.holders[i].provider_incarnation);
-            if (written < 0) break;
-            used += (size_t)written;
-        }
-    }
+    mem_service_managed_append_identity_details(&view, response, response_len);
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
 
@@ -13228,8 +13240,13 @@ static enum mem_service_wire_status mem_service_poll_allocation(
             mem_service_managed_poll_holder_recovery(
                 &svc->managed, node_id, fenced_incarnation,
                 after_generation, &view);
-        return mem_service_managed_finish(result, &view, "",
-                                          response, response_len);
+        status = mem_service_managed_finish(result, &view, "",
+                                            response, response_len);
+        if (status == MEM_SERVICE_WIRE_STATUS_OK) {
+            mem_service_managed_append_identity_details(
+                &view, response, response_len);
+        }
+        return status;
     }
     if (fenced_incarnation != 0) {
         snprintf(response, response_len,
@@ -13238,7 +13255,13 @@ static enum mem_service_wire_status mem_service_poll_allocation(
     }
     result = mem_service_managed_poll(&svc->managed, node_id, incarnation,
                                       after_generation, &view);
-    return mem_service_managed_finish(result, &view, "", response, response_len);
+    status = mem_service_managed_finish(result, &view, "", response,
+                                        response_len);
+    if (status == MEM_SERVICE_WIRE_STATUS_OK) {
+        mem_service_managed_append_identity_details(
+            &view, response, response_len);
+    }
+    return status;
 }
 
 static int mem_service_managed_hex_value(char c)

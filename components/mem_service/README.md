@@ -72,7 +72,9 @@ holder replacement 使用
 `recovery=2`；服务只返回仍包含精确
 `(node_id, fenced_incarnation)` holder 的 QUARANTINED allocation。当前调用者必须
 是同一节点的 active replacement incarnation，完整 provider directory 必须 ready。
-该接口只提供待撤销 descriptor，不产生 fencing receipt。
+响应同时携带匹配 holder 的 `holder.<n>.session_id`、generation、node_id 和
+provider_incarnation，供 replacement provider 在物理撤销前核对恢复范围。该接口
+只提供待撤销 descriptor，不产生 fencing receipt。
 
 OBMM provider 的 `recover-allocation-state` 已接入 lost-home 执行：仅接受新
 incarnation 和不同 kernel instance，在稳定库存中拒绝旧 segment 身份复用，
