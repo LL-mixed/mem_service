@@ -163,7 +163,7 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
         finally:
             self._stop_server(proc)
         saved = store.read_bytes()
-        self.assertTrue(saved.startswith(b"mem_service_store_managed_v1\n"))
+        self.assertTrue(saved.startswith(b"mem_service_store_managed_v2\n"))
         self.assertTrue(saved.endswith(b"managed_store_complete=1\n"))
         proc = self._start_home_daemon(f"store={store}")
         try:
@@ -431,6 +431,110 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
                 self._inspect("placed-on-b")["home_node"], SECOND_HOME_NODE)
         finally:
             self._stop_server(proc)
+
+    def test_holder_node_identity_scopes_loss_and_survives_restart(self):
+        store = self.root / "holder-identity.store"
+        config = self._write_config(
+            "holder-identity.conf",
+            self._unix_config(
+                f"store={store}\n"
+                f"required_provider={HOME_NODE}\n"
+                f"required_provider={SECOND_HOME_NODE}\n"
+                "provider_lease_ms=30000\n"
+                f"allocation_home_provider={HOME_NODE}"
+            ),
+        )
+        proc = self._start_daemon(config)
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            self.assertEqual(self._register_home(
+                SECOND_HOME_INCARNATION, SECOND_HOME_NODE).returncode, 0)
+            generations = {}
+            for key in ("held-by-a", "held-by-b"):
+                generation = self._allocate_bound(key, f"{key}-allocate")
+                self.assertEqual(self._publish(key, generation).returncode, 0)
+                generations[key] = generation
+
+            stale_holder = self._run_client(
+                "acquire-object", "--key", "held-by-a",
+                "--session-id", "stale-holder-session",
+                "--idempotency-key", "stale-holder-acquire",
+                "--expected-generation", str(generations["held-by-a"]),
+                "--holder-node-id", HOME_NODE,
+                "--holder-provider-incarnation", str(HOME_INCARNATION + 1),
+                "--connect", self._connect,
+            )
+            self.assertNotEqual(stale_holder.returncode, 0)
+            self.assertIn("reason=holder_provider_mismatch", stale_holder.stdout)
+            self.assertEqual(self._inspect("held-by-a")["live_refs"], "0")
+
+            for key, node, incarnation in (
+                ("held-by-a", HOME_NODE, HOME_INCARNATION),
+                ("held-by-b", SECOND_HOME_NODE, SECOND_HOME_INCARNATION),
+            ):
+                acquired = self._run_client(
+                    "acquire-object", "--key", key,
+                    "--session-id", f"{key}-session",
+                    "--idempotency-key", f"{key}-acquire",
+                    "--expected-generation", str(generations[key]),
+                    "--holder-node-id", node,
+                    "--holder-provider-incarnation", str(incarnation),
+                    "--connect", self._connect,
+                )
+                self.assertEqual(acquired.returncode, 0,
+                                 acquired.stdout + acquired.stderr)
+                view = self._inspect(key)
+                self.assertEqual(view["holder.0.node_id"], node)
+                self.assertEqual(view["holder.0.provider_incarnation"],
+                                 str(incarnation))
+
+            lost = self._run_client(
+                "provider-deregister", "--node-id", SECOND_HOME_NODE,
+                "--incarnation", str(SECOND_HOME_INCARNATION),
+                "--connect", self._connect,
+            )
+            self.assertEqual(lost.returncode, 0, lost.stdout + lost.stderr)
+            self.assertEqual(self._inspect("held-by-a")["state"], "active")
+            self.assertEqual(self._inspect("held-by-b")["state"], "quarantined")
+            self.assertEqual(self._stats()["managed_recovery_required"], "1")
+
+            self._stop_server(proc)
+            proc = self._start_daemon(config)
+            for key, node, incarnation in (
+                ("held-by-a", HOME_NODE, HOME_INCARNATION),
+                ("held-by-b", SECOND_HOME_NODE, SECOND_HOME_INCARNATION),
+            ):
+                view = self._inspect(key)
+                self.assertEqual(view["state"], "quarantined")
+                self.assertEqual(view["holder.0.node_id"], node)
+                self.assertEqual(view["holder.0.provider_incarnation"],
+                                 str(incarnation))
+            self.assertEqual(store.read_text().splitlines()[0],
+                             "mem_service_store_managed_v2")
+        finally:
+            self._stop_server(proc)
+
+    def test_v1_checkpoint_without_holder_bindings_remains_loadable(self):
+        store = self.root / "managed-v1.store"
+        proc = self._start_home_daemon(extra_config=f"store={store}")
+        try:
+            self.assertEqual(self._register_home().returncode, 0)
+            self._allocate_bound("legacy-pending", "legacy-pending-allocate")
+            self._stop_server(proc)
+            proc = None
+            data = store.read_bytes()
+            self.assertTrue(data.startswith(b"mem_service_store_managed_v2\n"))
+            store.write_bytes(data.replace(
+                b"mem_service_store_managed_v2\n",
+                b"mem_service_store_managed_v1\n", 1))
+            proc = self._start_home_daemon(extra_config=f"store={store}")
+            view = self._inspect("legacy-pending")
+            self.assertEqual(view["state"], "quarantined")
+            self.assertEqual(view["live_refs"], "0")
+            self.assertEqual(self._stats()["managed_recovery_required"], "1")
+        finally:
+            if proc is not None:
+                self._stop_server(proc)
 
     def test_provider_loss_preserves_resources_and_blocks_reactivation(self):
         for loss in ("home-deregister", "home-replace", "peer-deregister"):

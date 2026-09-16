@@ -2,7 +2,7 @@ mem_service_wire_schema_manifest_version=1
 wire_schema_version=1
 wire_payload_format=text-kv
 operation_count=39
-field_count=225
+field_count=229
 oneof_count=1
 oneof_field_count=2
 operation=health:1 schema_version=1 payload_format=text-kv fields=0 oneofs=0
@@ -208,10 +208,12 @@ field=allocate_object.home_node type=string required=0
 field=allocate_object.size_bytes type=u64 required=1
 field=allocate_object.alignment_bytes type=u64 required=0
 field=allocate_object.capabilities type=u64 required=1
-operation=acquire_object:113 schema_version=1 payload_format=text-kv fields=4 oneofs=0
+operation=acquire_object:113 schema_version=1 payload_format=text-kv fields=6 oneofs=0
 field=acquire_object.key type=string required=1
 field=acquire_object.idempotency_key type=string required=1
 field=acquire_object.session_id type=string required=1
+field=acquire_object.holder_node_id type=string required=0
+field=acquire_object.holder_provider_incarnation type=u64 required=0
 field=acquire_object.expected_generation type=u64 required=0
 operation=release_object:114 schema_version=1 payload_format=text-kv fields=4 oneofs=0
 field=release_object.key type=string required=1
@@ -253,7 +255,7 @@ field=mapping_transition.generation type=u64 required=1
 field=mapping_transition.mapping_id type=u64 required=1
 field=mapping_transition.action type=u64 required=1
 field=mapping_transition.idempotency_key type=string required=1
-operation=reference_transition:126 schema_version=1 payload_format=text-kv fields=8 oneofs=0
+operation=reference_transition:126 schema_version=1 payload_format=text-kv fields=10 oneofs=0
 field=reference_transition.action type=u64 required=1
 field=reference_transition.key type=string required=1
 field=reference_transition.session_id type=string required=0
@@ -262,6 +264,8 @@ field=reference_transition.version type=u64 required=0
 field=reference_transition.reference_hex type=string required=0
 field=reference_transition.access type=u64 required=0
 field=reference_transition.idempotency_key type=string required=0
+field=reference_transition.holder_node_id type=string required=0
+field=reference_transition.holder_provider_incarnation type=u64 required=0
 operation=poll_allocation:124 schema_version=1 payload_format=text-kv fields=3 oneofs=0
 field=poll_allocation.node_id type=string required=1
 field=poll_allocation.incarnation type=u64 required=1

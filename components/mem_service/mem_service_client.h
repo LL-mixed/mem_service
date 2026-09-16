@@ -426,6 +426,8 @@ struct mem_service_client_allocate {
 struct mem_service_client_allocation_holder {
     char session_id[MEM_SERVICE_CLIENT_ALLOCATION_SESSION_ID_LEN];
     uint64_t generation;
+    char node_id[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
+    uint64_t provider_incarnation;
 };
 
 enum mem_service_client_mapping_action {
@@ -486,12 +488,27 @@ int mem_service_client_reference_transition(
     const struct mem_service_reference_request *request,
     struct mem_service_client_reference_result *result_out,
     enum mem_service_wire_status *status_out);
+int mem_service_client_reference_transition_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
+    struct mem_service_client_reference_result *result_out,
+    enum mem_service_wire_status *status_out);
 
 /* MAP_BEGIN returns a pending cleanup obligation, never a process mapping.
  * Both outputs are unchanged on failure. Use a fresh idempotency key. */
 int mem_service_client_reference_map_begin(
     const struct mem_service_client *client,
     const struct mem_service_reference_request *request,
+    struct mem_service_client_reference_result *result_out,
+    struct mem_service_client_mapping_transaction *transaction_out,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_reference_map_begin_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
     struct mem_service_client_reference_result *result_out,
     struct mem_service_client_mapping_transaction *transaction_out,
     enum mem_service_wire_status *status_out);
@@ -543,6 +560,19 @@ int mem_service_client_acquire_object(
     const char *key,
     const char *idempotency_key,
     const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out);
+/* Recovery-capable acquire. The daemon binds this holder to a currently
+ * registered client-provider identity for later node-scoped fencing. */
+int mem_service_client_acquire_object_at_node(
+    const struct mem_service_client *client,
+    const char *key,
+    const char *idempotency_key,
+    const char *session_id,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
     bool has_expected_generation,
     uint64_t expected_generation,
     struct mem_service_client_allocation *allocation_out,

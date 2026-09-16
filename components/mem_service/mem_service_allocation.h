@@ -129,6 +129,10 @@ enum mem_service_managed_result {
 struct mem_service_managed_holder {
     char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
     uint64_t generation;
+    /* Empty for legacy holders. Recovery may fence a holder only when both
+     * provider identity fields are present and have been validated. */
+    char node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN];
+    uint64_t provider_incarnation;
 };
 
 enum mem_service_managed_mapping_state {
@@ -307,8 +311,8 @@ void mem_service_managed_table_unregister_backing(
     struct mem_service_managed_table *table);
 
 /* Quarantine unresolved allocations after a confirmed directory loss event.
- * Besides this home instance, retain all provider allocations with holders:
- * holder sessions currently have no authoritative node binding. No resource,
+ * Match exact home/holder identities. Legacy holders without a node binding
+ * remain conservative and cause quarantine on any provider loss. No resource,
  * reference or mapping is released. Returns newly quarantined entry count.
  * The caller owns serialization and must latch data admission off if nonzero.
  */
@@ -325,6 +329,15 @@ enum mem_service_managed_result mem_service_managed_acquire(
     struct mem_service_managed_table *table,
     const char *key,
     const char *session_id,
+    bool has_expected_generation,
+    uint64_t expected_generation,
+    struct mem_service_managed_view *view_out);
+enum mem_service_managed_result mem_service_managed_acquire_at_node(
+    struct mem_service_managed_table *table,
+    const char *key,
+    const char *session_id,
+    const char *node_id,
+    uint64_t provider_incarnation,
     bool has_expected_generation,
     uint64_t expected_generation,
     struct mem_service_managed_view *view_out);
@@ -429,6 +442,11 @@ enum mem_service_managed_result mem_service_managed_content_seal(
 enum mem_service_managed_result mem_service_managed_acquire_published(
     struct mem_service_managed_table *table, const char *key,
     const char *session_id, uint64_t generation, uint64_t version,
+    struct mem_service_managed_view *view_out);
+enum mem_service_managed_result mem_service_managed_acquire_published_at_node(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, const char *node_id,
+    uint64_t provider_incarnation, uint64_t generation, uint64_t version,
     struct mem_service_managed_view *view_out);
 
 #endif

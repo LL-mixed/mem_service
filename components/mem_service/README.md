@@ -12,8 +12,10 @@ store magic，旧服务拒绝读取；保留原 metadata-only store 兼容路径
 回归沿用真实 daemon/CLI 的 provider-backed allocation 测试；合成 descriptor
 只用于控制状态验证，不能当作物理 backing 恢复证据。
 
-候选实现使用 `mem_service_store_managed_v1` 保存字段级编码的分配表及完整 V2
-record 绑定，附校验和与完整结束标记；未知版本、截断、损坏及多余尾部拒绝。
+当前实现使用 `mem_service_store_managed_v2` 保存字段级编码的分配表、完整 V2
+record 绑定及 holder 的 `(node_id, provider_incarnation)` 归属，附校验和与完整
+结束标记；只含旧 holder 字段的 `mem_service_store_managed_v1` 仍可加载并按未绑定
+holder 保守隔离，未知版本、截断、损坏及多余尾部拒绝。
 资源状态和精确应答在同一原子 snapshot 中确认，该格式不重放旧 reply-only
 journal 覆盖快照。历史归档仍用原 `.replay-history` 及前缀校验。写入不确定
 后禁止继续变更或向 provider 交付新工作；修复文件路径不自动解除该状态。
@@ -24,9 +26,10 @@ journal 覆盖快照。历史归档仍用原 `.replay-history` 及前缀校验�
 ## Provider 失联的运行期隔离
 
 目录租约到期、成功注销或 incarnation 替换必须在旧登记消失前后同一串行化域
-通知 managed 分配状态机。该 home 的未终结分配进入 QUARANTINED；当前 holder
-尚无节点归属，因此其他仍有 holder 的 provider 分配也保留并隔离。身份、地址、
-descriptor、holder 和 mapping transaction 不清除，不调用 backing release。
+通知 managed 分配状态机。该 home 的未终结分配进入 QUARANTINED；已绑定 holder
+仅在其精确 `(node_id, provider_incarnation)` 失联时影响所持分配，旧版未绑定 holder
+继续在任一 provider 失联时保守隔离。身份、地址、descriptor、holder 和 mapping
+transaction 不清除，不调用 backing release。
 服务锁存 managed_recovery_required，重新注册不解除该状态。新 managed 数据
 工作在幂等重放前拒绝；只读查询及已有 mapping 清理、release/retire 继续使用
 原代际和事务检查。隔离状态不能通过普通 reclaim 确认或重放重新激活。
@@ -34,9 +37,10 @@ descriptor、holder 和 mapping transaction 不清除，不调用 backing releas
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍
 计入对应资源数。此阶段为运行期准入与记账，不能撤销既有 CPU 页权限，也未补齐
-跨 daemon 重启的持久分配表、holder 节点归属、fencing 或解除隔离接口。CLI 使用
-既有 provider-register/refresh/deregister、allocation-stats 与 inspect-allocation；
-不新增 wire 操作或改变公开结构布局，core 源码消费者需重新链接。
+fencing 或解除隔离接口。`acquire-object` 及 reference acquire/map-begin 可显式传入
+holder 节点身份；daemon 只接受目录中当前活动的精确 provider incarnation，并将
+归属写入 checkpoint。CLI 使用既有 operation 的可选 wire 字段，安装 SDK 增加
+node-aware opt-in 入口；core 与 SDK 源码消费者需重新链接。
 
 ## 退役 descriptor 的同进程诊断契约
 

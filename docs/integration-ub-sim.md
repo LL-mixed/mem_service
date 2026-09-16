@@ -22,14 +22,16 @@ OBMM worker 的 state_file 改为版本化完整资源记录，每个阶段同�
 不能据此恢复数据准入或删除日志。既有 state_file 仍阻止 worker 直接重启。
 该改动要求重建 managed worker，业务 SDK/wire 与 DS4 transfer 路径不变。
 
-managed store 候选持久化完整 allocation、holder、mapping、代际及 V2 绑定，
-恢复后保留隔离资源并报告 managed_recovery_required。磁盘 magic 独立升级，
-旧服务拒绝读取；原 wire snapshot 导出/覆盖不能替代该恢复域。写入不确定后
-停止状态变更，provider/kernel 对账仍须实际验证。core 消费者必须重新链接，
-安装 client/wire ABI 不变；本段不表示故障恢复矩阵已经验收。
+managed store V2 持久化完整 allocation、holder、holder 的精确节点/incarnation
+归属、mapping、代际及 V2 绑定，恢复后保留隔离资源并报告
+managed_recovery_required。V1 checkpoint 仍可加载，其未绑定 holder 按保守规则
+处理；原 wire snapshot 导出/覆盖不能替代该恢复域。写入不确定后停止状态变更，
+provider/kernel 对账仍须实际验证。core 消费者必须重新链接，安装 SDK 新增可选
+node-aware acquire API；本段不表示故障恢复矩阵已经验收。
 
-运行期 provider 失联会隔离该 home 的未终结分配，以及尚无节点归属的活跃 holder
-所引用的其他 provider 分配；保留所有映射与引用，锁存 managed_recovery_required。
+运行期 provider 失联会隔离该 home 的未终结分配及精确归属于该 incarnation 的
+holder 所引用分配；旧版未绑定 holder 继续在任一 provider 失联时保守隔离。
+保留所有映射与引用，锁存 managed_recovery_required。
 重新注册不解除隔离。查询和已有 mapping 清理仍可执行，release/retire 不再被目录
 readiness 拦住，但仍检查原代际与事务。该 core 源码变更不修改 wire 或结构布局，
 须重新链接；完整持久化对账与实际 guest 故障恢复仍须独立验证。

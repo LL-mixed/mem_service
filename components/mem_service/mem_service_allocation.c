@@ -105,17 +105,26 @@ size_t mem_service_managed_provider_lost(
     }
     for (size_t i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
         struct mem_service_managed_allocation *entry = &table->entries[i];
+        bool affected = false;
 
         if (!entry->in_use || entry->home_node_id[0] == '\0' ||
             entry->state == MEM_SERVICE_MANAGED_STATE_RETIRED ||
             entry->state == MEM_SERVICE_MANAGED_STATE_QUARANTINED) {
             continue;
         }
-        if (entry->holder_count == 0 &&
-            (strcmp(entry->home_node_id, node_id) != 0 ||
-             entry->provider_incarnation != incarnation)) {
-            continue;
+        affected = strcmp(entry->home_node_id, node_id) == 0 &&
+                   entry->provider_incarnation == incarnation;
+        for (uint32_t holder = 0; !affected && holder < entry->holder_count;
+             ++holder) {
+            const struct mem_service_managed_holder *binding =
+                &entry->holders[holder];
+            /* Legacy holders remain conservative because their node scope
+             * cannot be proven. */
+            affected = binding->node_id[0] == '\0' ||
+                (strcmp(binding->node_id, node_id) == 0 &&
+                 binding->provider_incarnation == incarnation);
         }
+        if (!affected) continue;
         entry->state = MEM_SERVICE_MANAGED_STATE_QUARANTINED;
         table->quarantine_events += 1U;
         changed += 1U;
@@ -418,6 +427,8 @@ static enum mem_service_managed_result mem_service_managed_acquire_internal(
     struct mem_service_managed_table *table,
     const char *key,
     const char *session_id,
+    const char *node_id,
+    uint64_t provider_incarnation,
     bool has_expected_generation,
     uint64_t expected_generation,
     struct mem_service_managed_view *view_out,
@@ -425,11 +436,16 @@ static enum mem_service_managed_result mem_service_managed_acquire_internal(
 {
     struct mem_service_managed_allocation *entry;
     struct mem_service_managed_holder *holder;
+    int holder_index;
+    bool node_bound = node_id != NULL && node_id[0] != '\0';
 
     if (table == NULL ||
         !mem_service_managed_string_valid(key, MEM_SERVICE_MANAGED_KEY_LEN) ||
         !mem_service_managed_string_valid(session_id,
-                                          MEM_SERVICE_MANAGED_SESSION_ID_LEN)) {
+                                          MEM_SERVICE_MANAGED_SESSION_ID_LEN) ||
+        node_bound != (provider_incarnation != 0) ||
+        (node_bound && !mem_service_managed_string_valid(
+            node_id, MEM_SERVICE_MANAGED_NODE_ID_LEN))) {
         if (table != NULL) {
             table->acquire_rejected_count += 1U;
         }
@@ -452,7 +468,19 @@ static enum mem_service_managed_result mem_service_managed_acquire_internal(
         table->acquire_rejected_count += 1U;
         return MEM_SERVICE_MANAGED_RESULT_STATE_CONFLICT;
     }
-    if (mem_service_managed_find_holder(entry, session_id) >= 0) {
+    holder_index = mem_service_managed_find_holder(entry, session_id);
+    if (holder_index >= 0) {
+        holder = &entry->holders[holder_index];
+        if (node_bound && holder->node_id[0] != '\0' &&
+            (strcmp(holder->node_id, node_id) != 0 ||
+             holder->provider_incarnation != provider_incarnation)) {
+            table->acquire_rejected_count += 1U;
+            return MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
+        }
+        if (node_bound && holder->node_id[0] == '\0') {
+            snprintf(holder->node_id, sizeof(holder->node_id), "%s", node_id);
+            holder->provider_incarnation = provider_incarnation;
+        }
         /* Re-acquire by an existing holder is naturally idempotent. */
         table->acquire_ok_count += 1U;
         mem_service_managed_fill_view(entry, view_out);
@@ -466,6 +494,10 @@ static enum mem_service_managed_result mem_service_managed_acquire_internal(
     memset(holder, 0, sizeof(*holder));
     snprintf(holder->session_id, sizeof(holder->session_id), "%s", session_id);
     holder->generation = entry->generation;
+    if (node_bound) {
+        snprintf(holder->node_id, sizeof(holder->node_id), "%s", node_id);
+        holder->provider_incarnation = provider_incarnation;
+    }
     entry->holder_count += 1U;
     table->acquire_ok_count += 1U;
     mem_service_managed_fill_view(entry, view_out);
@@ -477,8 +509,19 @@ enum mem_service_managed_result mem_service_managed_acquire(
     const char *session_id, bool has_expected_generation,
     uint64_t expected_generation, struct mem_service_managed_view *view_out)
 {
-    return mem_service_managed_acquire_internal(table, key, session_id,
+    return mem_service_managed_acquire_internal(table, key, session_id, NULL, 0,
         has_expected_generation, expected_generation, view_out, false);
+}
+
+enum mem_service_managed_result mem_service_managed_acquire_at_node(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, const char *node_id, uint64_t provider_incarnation,
+    bool has_expected_generation, uint64_t expected_generation,
+    struct mem_service_managed_view *view_out)
+{
+    return mem_service_managed_acquire_internal(table, key, session_id,
+        node_id, provider_incarnation, has_expected_generation,
+        expected_generation, view_out, false);
 }
 
 static bool mem_service_managed_has_mapping(
@@ -584,8 +627,24 @@ enum mem_service_managed_result mem_service_managed_acquire_published(
         if (table) ++table->acquire_rejected_count;
         return result;
     }
-    return mem_service_managed_acquire_internal(table, key, session_id, true,
-                                                generation, view_out, true);
+    return mem_service_managed_acquire_internal(table, key, session_id, NULL, 0,
+                                                true, generation, view_out, true);
+}
+
+enum mem_service_managed_result mem_service_managed_acquire_published_at_node(
+    struct mem_service_managed_table *table, const char *key,
+    const char *session_id, const char *node_id, uint64_t provider_incarnation,
+    uint64_t generation, uint64_t version,
+    struct mem_service_managed_view *view_out)
+{
+    enum mem_service_managed_result result = mem_service_managed_content_check(
+        table, key, NULL, generation, version, false, NULL);
+    if (result) {
+        if (table) ++table->acquire_rejected_count;
+        return result;
+    }
+    return mem_service_managed_acquire_internal(table, key, session_id,
+        node_id, provider_incarnation, true, generation, view_out, true);
 }
 
 enum mem_service_managed_result mem_service_managed_release(

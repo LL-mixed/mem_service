@@ -7,15 +7,16 @@ OBMM managed worker 新增版本化资源日志及 `inspect-allocation-state` �
 命令，供平台恢复对账使用。该 opt-in provider 命令不改变中立 SDK/wire、
 RoCE/TCP 或 DS4 transfer 路径，也不授予映射或解除隔离。
 
-managed store 候选增加版本化完整资源身份和 V2 绑定持久化，重启后保持隔离、
-等待实际对账，不能直接恢复 payload 访问。旧二进制拒绝新磁盘格式；原 wire
-snapshot 导出/覆盖不能替代该恢复域。本次 core 改动须重新构建服务，不改变
-安装 client record/wire ABI，也不改变 DS4 的 transfer 热路径。
+managed store V2 增加 holder 的精确节点/incarnation 归属和 V2 绑定持久化，重启
+后保持隔离、等待实际对账，不能直接恢复 payload 访问。V1 checkpoint 仍可加载，
+其中未绑定 holder 按保守规则处理；原 wire snapshot 导出/覆盖不能替代该恢复域。
+安装 SDK 增加 node-aware opt-in acquire API，DS4 现有 transfer 热路径不变。
 
-managed daemon 新增运行期 provider 失联隔离，重新注册不能恢复旧分配；
-managed 数据请求可能返回 managed_reconciliation_required，已有映射清理和
-引用释放仍执行原事务检查。core 新增失联状态迁移 API，现有公开结构、wire、
-client/provider SDK 布局及 DS4 transfer 路径保持不变。此项不证明持久化恢复。
+managed daemon 的运行期 provider 失联隔离按已绑定 holder 的精确节点/incarnation
+生效；旧版未绑定 holder 继续在任一 provider 失联时保守隔离。重新注册不能恢复
+旧分配；managed 数据请求可能返回 managed_reconciliation_required，已有映射清理
+和引用释放仍执行原事务检查。wire 仅增加可选字段，DS4 现有 transfer 路径保持
+不变。此项不证明完整持久化恢复。
 
 可选 V2 writer SDK 新增 `mem_service_client_prepare_managed_reference()`，从
 当前完整读写映射准备只读视图引用；仅在 provider publish 确认后返回完整 V2。

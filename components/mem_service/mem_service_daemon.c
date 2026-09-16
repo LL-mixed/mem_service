@@ -36,7 +36,8 @@
 #define MEM_SERVICE_TCP_SPEC_PREFIX "tcp:"
 #define MEM_SERVICE_STORE_MAGIC "mem_service_store_v1"
 #define MEM_SERVICE_HISTORY_STORE_MAGIC "mem_service_store_history_v1"
-#define MEM_SERVICE_MANAGED_STORE_MAGIC "mem_service_store_managed_v1"
+#define MEM_SERVICE_MANAGED_STORE_MAGIC "mem_service_store_managed_v2"
+#define MEM_SERVICE_MANAGED_STORE_MAGIC_V1 "mem_service_store_managed_v1"
 #define MEM_SERVICE_JOURNAL_MAGIC "mem_service_journal_v1"
 #define MEM_SERVICE_STORE_SCHEMA_VERSION 1
 #define MEM_SERVICE_STORE_MAX_KNOWN_SCHEMA_VERSION 1
@@ -3957,7 +3958,8 @@ static int mem_service_managed_store_string(
 
 static int mem_service_managed_store_table(
     struct mem_service_managed_store_io *io,
-    struct mem_service_managed_table *table, bool *recovery)
+    struct mem_service_managed_table *table, bool *recovery,
+    uint32_t managed_store_version)
 {
     size_t i, j, k;
     uint64_t checksum;
@@ -4005,8 +4007,17 @@ static int mem_service_managed_store_table(
         for (j = 0; j < a->holder_count; ++j) {
             MS_STRING(a->holders[j].session_id);
             MS_NUMBER(a->holders[j].generation, UINT64_MAX);
+            if (managed_store_version >= 2U) {
+                MS_STRING(a->holders[j].node_id);
+                MS_NUMBER(a->holders[j].provider_incarnation, UINT64_MAX);
+            } else if (io->reading) {
+                a->holders[j].node_id[0] = '\0';
+                a->holders[j].provider_incarnation = 0;
+            }
             if (!a->holders[j].session_id[0] ||
-                a->holders[j].generation != a->generation) return -1;
+                a->holders[j].generation != a->generation ||
+                (a->holders[j].node_id[0] == '\0') !=
+                    (a->holders[j].provider_incarnation == 0)) return -1;
             for (k = 0; k < j; ++k)
                 if (!strcmp(a->holders[j].session_id, a->holders[k].session_id))
                     return -1;
@@ -4077,7 +4088,8 @@ static bool mem_service_has_managed_checkpoint(const struct mem_service *svc)
 
 static int mem_service_managed_store_checkpoint(
     FILE *file, const struct mem_service_managed_table *input,
-    struct mem_service_managed_table *output, bool *recovery)
+    struct mem_service_managed_table *output, bool *recovery,
+    uint32_t managed_store_version)
 {
     bool reading = output != NULL;
     struct mem_service_managed_table *scratch = calloc(1, sizeof(*scratch));
@@ -4090,7 +4102,8 @@ static int mem_service_managed_store_checkpoint(
     int rc;
     if (scratch == NULL) return -1;
     if (!reading) *scratch = *input;
-    rc = mem_service_managed_store_table(&io, scratch, &required);
+    rc = mem_service_managed_store_table(&io, scratch, &required,
+                                         managed_store_version);
     if (rc == 0 && reading) {
         /* Persisted identities do not prove any live provider or CPU mapping.
          * Keep all obligations; ordinary cleanup cannot revive the payload. */
@@ -4146,13 +4159,16 @@ static int mem_service_load_store(struct mem_service *svc,
         return -1;
     }
     mem_service_trim_line(line);
-    managed_checkpoint = strcmp(line, MEM_SERVICE_MANAGED_STORE_MAGIC) == 0;
+    managed_checkpoint = strcmp(line, MEM_SERVICE_MANAGED_STORE_MAGIC) == 0 ||
+                         strcmp(line, MEM_SERVICE_MANAGED_STORE_MAGIC_V1) == 0;
     if (managed_checkpoint) {
+        uint32_t managed_store_version =
+            strcmp(line, MEM_SERVICE_MANAGED_STORE_MAGIC) == 0 ? 2U : 1U;
         uint64_t history_enabled = 0;
         if (mem_service_read_history_checkpoint(file, "replay_history_enabled",
                 &history_enabled) != 0 || history_enabled > 1 ||
             mem_service_managed_store_checkpoint(file, NULL, &svc->managed,
-                &svc->managed_recovery_required) != 0) {
+                &svc->managed_recovery_required, managed_store_version) != 0) {
             fclose(file);
             return -1;
         }
@@ -4645,7 +4661,7 @@ static int mem_service_save_store(const struct mem_service *svc, const char *sto
                  MEM_SERVICE_MANAGED_STORE_MAGIC,
                  svc->replay_history_enabled ? 1U : 0U) < 0 ||
          mem_service_managed_store_checkpoint(file, &svc->managed, NULL,
-                                              &recovery) != 0)) {
+                                              &recovery, 2U) != 0)) {
         fclose(file);
         unlink(tmp_path);
         return -1;
@@ -12112,6 +12128,46 @@ static enum mem_service_wire_status mem_service_allocate_object(
     return mem_service_managed_finish(result, &view, key, response, response_len);
 }
 
+static enum mem_service_wire_status mem_service_holder_identity_check(
+    struct mem_service *svc, const char *payload,
+    char node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN], uint64_t *incarnation_out,
+    bool *bound_out, char *response, size_t response_len)
+{
+    uint64_t incarnation = 0, active_incarnation = 0;
+    bool has_node, has_incarnation;
+
+    node_id[0] = '\0';
+    *incarnation_out = 0;
+    *bound_out = false;
+    has_node = mem_service_payload_get_string(payload, "holder_node_id",
+                                               node_id,
+                                               MEM_SERVICE_MANAGED_NODE_ID_LEN);
+    has_incarnation = mem_service_payload_get_u64_checked(
+        payload, "holder_provider_incarnation", &incarnation);
+    if (has_node != has_incarnation || (has_node && incarnation == 0)) {
+        snprintf(response, response_len,
+                 "status=invalid_session\nreason=invalid_holder_identity\n");
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    }
+    if (!has_node) return MEM_SERVICE_WIRE_STATUS_OK;
+    if (!mem_service_provider_directory_lookup_active(&svc->provider_directory,
+            node_id, mem_service_monotonic_ms(), &active_incarnation)) {
+        snprintf(response, response_len,
+                 "status=internal\nreason=holder_provider_unavailable\n"
+                 "node_id=%s\n", node_id);
+        return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    }
+    if (active_incarnation != incarnation) {
+        snprintf(response, response_len,
+                 "status=version_conflict\nreason=holder_provider_mismatch\n"
+                 "node_id=%s\n", node_id);
+        return MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT;
+    }
+    *incarnation_out = incarnation;
+    *bound_out = true;
+    return MEM_SERVICE_WIRE_STATUS_OK;
+}
+
 static enum mem_service_wire_status mem_service_acquire_object(
     struct mem_service *svc,
     const char *payload,
@@ -12120,7 +12176,10 @@ static enum mem_service_wire_status mem_service_acquire_object(
 {
     char key[MEM_SERVICE_MANAGED_KEY_LEN];
     char session_id[MEM_SERVICE_MANAGED_SESSION_ID_LEN];
+    char holder_node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN];
+    uint64_t holder_provider_incarnation = 0;
     uint64_t expected_generation = 0;
+    bool holder_bound = false;
     bool has_expected_generation;
     struct mem_service_managed_view view;
     enum mem_service_managed_result result;
@@ -12134,6 +12193,14 @@ static enum mem_service_wire_status mem_service_acquire_object(
     if (!mem_service_managed_data_plane_gate(svc, response, response_len)) {
         return MEM_SERVICE_WIRE_STATUS_INTERNAL;
     }
+    {
+        enum mem_service_wire_status identity_status =
+            mem_service_holder_identity_check(svc, payload, holder_node_id,
+                &holder_provider_incarnation, &holder_bound,
+                response, response_len);
+        if (identity_status != MEM_SERVICE_WIRE_STATUS_OK)
+            return identity_status;
+    }
     (void)mem_service_payload_get_string(payload, "key", key, sizeof(key));
     (void)mem_service_payload_get_string(payload,
                                          "session_id",
@@ -12143,12 +12210,12 @@ static enum mem_service_wire_status mem_service_acquire_object(
         payload,
         "expected_generation",
         &expected_generation);
-    result = mem_service_managed_acquire(&svc->managed,
-                                         key,
-                                         session_id,
-                                         has_expected_generation,
-                                         expected_generation,
-                                         &view);
+    result = holder_bound ? mem_service_managed_acquire_at_node(
+        &svc->managed, key, session_id, holder_node_id,
+        holder_provider_incarnation, has_expected_generation,
+        expected_generation, &view) : mem_service_managed_acquire(
+        &svc->managed, key, session_id, has_expected_generation,
+        expected_generation, &view);
     return mem_service_managed_finish(result, &view, key, response, response_len);
 }
 
@@ -12265,6 +12332,15 @@ static enum mem_service_wire_status mem_service_inspect_allocation(
             break;
         }
         used += (size_t)written;
+        if (view.holders[i].node_id[0] != '\0' && used < response_len) {
+            written = snprintf(response + used, response_len - used,
+                               "holder.%u.node_id=%s\n"
+                               "holder.%u.provider_incarnation=%" PRIu64 "\n",
+                               i, view.holders[i].node_id, i,
+                               view.holders[i].provider_incarnation);
+            if (written < 0) break;
+            used += (size_t)written;
+        }
     }
     return MEM_SERVICE_WIRE_STATUS_OK;
 }
@@ -12311,12 +12387,24 @@ static enum mem_service_wire_status mem_service_reference_admission_gate(
     struct lingqu_object_ref_wire_v2 ref;
     struct mem_service_managed_view view;
     enum mem_service_managed_result result;
+    enum mem_service_wire_status identity_status;
     const char *key;
+    char holder_node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN];
     uint64_t incarnation = 0, generation, version;
+    uint64_t holder_provider_incarnation = 0;
+    bool holder_bound = false;
 
     if (mem_service_reference_parse_request(payload, &request))
         return mem_service_managed_finish(MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST,
                                           NULL, NULL, response, response_len);
+    if (request.action == MEM_SERVICE_REFERENCE_ACQUIRE ||
+        request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN) {
+        identity_status = mem_service_holder_identity_check(svc, payload,
+            holder_node_id, &holder_provider_incarnation, &holder_bound,
+            response, response_len);
+        if (identity_status != MEM_SERVICE_WIRE_STATUS_OK)
+            return identity_status;
+    }
     ref = request.reference;
     if (request.action == MEM_SERVICE_REFERENCE_RESOLVE) {
         result = mem_service_reference_resolve(svc, request.key, &ref);
@@ -12367,6 +12455,18 @@ static enum mem_service_wire_status mem_service_reference_admission_gate(
                     request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN)) {
         result = mem_service_reference_validate(svc, &ref, request.session_id,
                                                 (uint32_t)request.access, &view);
+        if (!result && request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN &&
+            holder_bound) {
+            bool holder_matches = false;
+            for (uint32_t j = 0; j < view.holder_count; ++j)
+                if (!strcmp(view.holders[j].session_id, request.session_id) &&
+                    !strcmp(view.holders[j].node_id, holder_node_id) &&
+                    view.holders[j].provider_incarnation ==
+                        holder_provider_incarnation)
+                    holder_matches = true;
+            if (!holder_matches)
+                result = MEM_SERVICE_MANAGED_RESULT_PROVIDER_MISMATCH;
+        }
         if (!result && request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN) {
             bool held = false;
             for (uint32_t j = 0; j < view.holder_count; ++j)
@@ -12413,13 +12513,24 @@ static enum mem_service_wire_status mem_service_reference_transition(
     enum mem_service_managed_result result = MEM_SERVICE_MANAGED_RESULT_OK;
     enum mem_service_wire_status gate;
     const char *key;
+    char holder_node_id[MEM_SERVICE_MANAGED_NODE_ID_LEN] = "";
     char hex[513];
+    uint64_t holder_provider_incarnation = 0;
+    bool holder_bound = false;
     struct mem_service_managed_mapping mapping = {0};
 
     gate = mem_service_reference_admission_gate(svc, payload, response, response_len);
     if (gate != MEM_SERVICE_WIRE_STATUS_OK) return gate;
     if (mem_service_reference_parse_request(payload, &request))
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
+    if (request.action == MEM_SERVICE_REFERENCE_ACQUIRE ||
+        request.action == MEM_SERVICE_REFERENCE_MAP_BEGIN) {
+        bool has_node = mem_service_payload_get_string(payload, "holder_node_id",
+            holder_node_id, sizeof(holder_node_id));
+        bool has_incarnation = mem_service_payload_get_u64_checked(payload,
+            "holder_provider_incarnation", &holder_provider_incarnation);
+        holder_bound = has_node && has_incarnation;
+    }
     ref = request.reference;
     switch (request.action) {
     case MEM_SERVICE_REFERENCE_BEGIN:
@@ -12437,8 +12548,11 @@ static enum mem_service_wire_status mem_service_reference_transition(
         result = mem_service_reference_resolve(svc, request.key, &ref);
         break;
     case MEM_SERVICE_REFERENCE_ACQUIRE:
-        result = mem_service_reference_acquire(svc, &ref, request.session_id,
-                                               (uint32_t)request.access, &view);
+        result = holder_bound ? mem_service_reference_acquire_at_node(
+            svc, &ref, request.session_id, holder_node_id,
+            holder_provider_incarnation, (uint32_t)request.access, &view) :
+            mem_service_reference_acquire(svc, &ref, request.session_id,
+                                          (uint32_t)request.access, &view);
         break;
     case MEM_SERVICE_REFERENCE_MAP_BEGIN:
         result = mem_service_reference_map_begin(svc, &ref, request.session_id,

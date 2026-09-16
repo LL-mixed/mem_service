@@ -1385,6 +1385,13 @@ static int mem_service_client_parse_allocation(
         snprintf(field, sizeof(field), "holder.%u.generation", i);
         allocation_out->holders[holder_count].generation =
             mem_service_wire_payload_get_u64(&view, field, 0);
+        snprintf(field, sizeof(field), "holder.%u.node_id", i);
+        (void)mem_service_wire_payload_get_string(
+            &view, field, allocation_out->holders[holder_count].node_id,
+            sizeof(allocation_out->holders[holder_count].node_id));
+        snprintf(field, sizeof(field), "holder.%u.provider_incarnation", i);
+        allocation_out->holders[holder_count].provider_incarnation =
+            mem_service_wire_payload_get_u64(&view, field, 0);
         holder_count += 1U;
     }
     allocation_out->holder_count = holder_count;
@@ -1431,6 +1438,8 @@ static int mem_service_reference_response_u64(const char *payload, const char *n
 static int mem_service_client_reference_rpc(
     const struct mem_service_client *client,
     const struct mem_service_reference_request *request,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
     struct mem_service_client_reference_result *result_out,
     struct mem_service_client_mapping_transaction *transaction_out,
     enum mem_service_wire_status *status_out)
@@ -1443,7 +1452,12 @@ static int mem_service_client_reference_rpc(
     struct mem_service_client_mapping_transaction transaction = {0};
     bool has_ref;
     int rc;
-    if (!result_out || mem_service_reference_format_request(request, payload, sizeof(payload)))
+    if (!result_out || mem_service_reference_format_request(request, payload, sizeof(payload)) ||
+        mem_service_client_append_optional_string(payload, sizeof(payload),
+            "holder_node_id", holder_node_id) ||
+        mem_service_client_append_optional_u64(payload, sizeof(payload),
+            "holder_provider_incarnation", holder_node_id != NULL,
+            holder_provider_incarnation))
         return mem_service_client_invalid(status_out);
     rc = mem_service_client_send(client, MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION,
                                  payload, response, sizeof(response), status_out);
@@ -1529,7 +1543,22 @@ int mem_service_client_reference_transition(
 {
     if (!request || request->action == MEM_SERVICE_REFERENCE_MAP_BEGIN)
         return mem_service_client_invalid(status_out);
-    return mem_service_client_reference_rpc(client, request, result_out, NULL, status_out);
+    return mem_service_client_reference_rpc(client, request, NULL, 0,
+                                            result_out, NULL, status_out);
+}
+
+int mem_service_client_reference_transition_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
+    struct mem_service_client_reference_result *result_out,
+    enum mem_service_wire_status *status_out)
+{
+    if (!request || request->action != MEM_SERVICE_REFERENCE_ACQUIRE ||
+        !holder_node_id || !holder_node_id[0] || !holder_provider_incarnation)
+        return mem_service_client_invalid(status_out);
+    return mem_service_client_reference_rpc(client, request, holder_node_id,
+        holder_provider_incarnation, result_out, NULL, status_out);
 }
 
 int mem_service_client_reference_map_begin(
@@ -1544,7 +1573,28 @@ int mem_service_client_reference_map_begin(
         return mem_service_client_invalid(status_out);
     single_attempt = *client;
     single_attempt.wire_options.max_attempts = 1;
-    return mem_service_client_reference_rpc(&single_attempt, request, result_out, transaction_out, status_out);
+    return mem_service_client_reference_rpc(&single_attempt, request, NULL, 0,
+                                            result_out, transaction_out, status_out);
+}
+
+int mem_service_client_reference_map_begin_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_reference_request *request,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
+    struct mem_service_client_reference_result *result_out,
+    struct mem_service_client_mapping_transaction *transaction_out,
+    enum mem_service_wire_status *status_out)
+{
+    struct mem_service_client single_attempt;
+    if (!client || !request || request->action != MEM_SERVICE_REFERENCE_MAP_BEGIN ||
+        !transaction_out || !holder_node_id || !holder_node_id[0] ||
+        !holder_provider_incarnation)
+        return mem_service_client_invalid(status_out);
+    single_attempt = *client;
+    single_attempt.wire_options.max_attempts = 1;
+    return mem_service_client_reference_rpc(&single_attempt, request,
+        holder_node_id, holder_provider_incarnation, result_out,
+        transaction_out, status_out);
 }
 
 int mem_service_client_mapping_transition(
@@ -1636,6 +1686,8 @@ static int mem_service_client_send_holder_op(
     const char *key,
     const char *idempotency_key,
     const char *session_id,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
     bool has_expected_generation,
     uint64_t expected_generation,
     struct mem_service_client_allocation *allocation_out,
@@ -1656,6 +1708,15 @@ static int mem_service_client_send_holder_op(
                                                    sizeof(payload),
                                                    "session_id",
                                                    session_id) != 0) ||
+        mem_service_client_append_optional_string(payload,
+                                                  sizeof(payload),
+                                                  "holder_node_id",
+                                                  holder_node_id) != 0 ||
+        mem_service_client_append_optional_u64(payload,
+                                               sizeof(payload),
+                                               "holder_provider_incarnation",
+                                               holder_node_id != NULL,
+                                               holder_provider_incarnation) != 0 ||
         mem_service_client_append_optional_u64(payload,
                                                sizeof(payload),
                                                "expected_generation",
@@ -1766,10 +1827,28 @@ int mem_service_client_acquire_object(
                                              key,
                                              idempotency_key,
                                              session_id,
+                                             NULL,
+                                             0,
                                              has_expected_generation,
                                              expected_generation,
                                              allocation_out,
                                              status_out);
+}
+
+int mem_service_client_acquire_object_at_node(
+    const struct mem_service_client *client, const char *key,
+    const char *idempotency_key, const char *session_id,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
+    bool has_expected_generation, uint64_t expected_generation,
+    struct mem_service_client_allocation *allocation_out,
+    enum mem_service_wire_status *status_out)
+{
+    if (!holder_node_id || !holder_node_id[0] || !holder_provider_incarnation)
+        return mem_service_client_invalid(status_out);
+    return mem_service_client_send_holder_op(client,
+        MEM_SERVICE_WIRE_OP_ACQUIRE_OBJECT, key, idempotency_key, session_id,
+        holder_node_id, holder_provider_incarnation, has_expected_generation,
+        expected_generation, allocation_out, status_out);
 }
 
 int mem_service_client_release_object(
@@ -1787,6 +1866,8 @@ int mem_service_client_release_object(
                                              key,
                                              idempotency_key,
                                              session_id,
+                                             NULL,
+                                             0,
                                              has_expected_generation,
                                              expected_generation,
                                              allocation_out,
@@ -1807,6 +1888,8 @@ int mem_service_client_retire_object(
                                              key,
                                              idempotency_key,
                                              NULL,
+                                             NULL,
+                                             0,
                                              has_expected_generation,
                                              expected_generation,
                                              allocation_out,

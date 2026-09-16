@@ -215,6 +215,8 @@ static const struct mem_service_wire_payload_field
         {"key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
         {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
         {"session_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, true},
+        {"holder_node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+        {"holder_provider_incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
         {"expected_generation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
 };
 
@@ -305,6 +307,8 @@ static const struct mem_service_wire_payload_field mem_service_wire_reference_fi
     {"reference_hex", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
     {"access", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
     {"idempotency_key", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+    {"holder_node_id", MEM_SERVICE_WIRE_PAYLOAD_FIELD_STRING, false},
+    {"holder_provider_incarnation", MEM_SERVICE_WIRE_PAYLOAD_FIELD_U64, false},
 };
 
 static const struct mem_service_wire_operation_schema

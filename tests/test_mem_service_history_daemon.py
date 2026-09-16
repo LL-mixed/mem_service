@@ -65,7 +65,7 @@ class HistoryDaemonTests(unittest.TestCase):
         self.assertGreaterEqual(int(stats["idempotency_history_records"]), 60, stats)
         self.assertLess(int(stats["idempotency_used"]), 64, stats)
         self.assertEqual(stats["idempotency_history_failed"], "0", stats)
-        self.assertEqual(self.store.read_text().splitlines()[0], "mem_service_store_managed_v1")
+        self.assertEqual(self.store.read_text().splitlines()[0], "mem_service_store_managed_v2")
         self.assertIn("replay_history_enabled=1\n", self.store.read_text())
         return stats
 

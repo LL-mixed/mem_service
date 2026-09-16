@@ -168,6 +168,38 @@ class ReferenceTransactionTests(unittest.TestCase):
         self._holder("release", "reader")
         self.assertEqual(self.fixture._allocation_stats()["import_mappings"], "0")
 
+    def test_reference_holder_identity_requires_current_provider_and_persists(self):
+        self._publish()
+        holder_args = (
+            "--holder-node-id", fixtures.HOME_NODE,
+            "--holder-provider-incarnation", str(fixtures.HOME_INCARNATION),
+        )
+        self._transition(
+            "acquire", session="reader", success=False,
+            extra=("--holder-node-id", fixtures.HOME_NODE,
+                   "--holder-provider-incarnation",
+                   str(fixtures.HOME_INCARNATION + 1)),
+        )
+        self._transition("acquire", session="reader", extra=holder_args)
+        inspected = self.fixture._run_client(
+            "inspect-allocation", "--key", "obj-1", "--connect", self.connect)
+        self.assertEqual(inspected.returncode, 0,
+                         inspected.stdout + inspected.stderr)
+        view = fixtures._parse_kv(inspected.stdout)
+        reader = next(
+            index for index in range(int(view["live_refs"]))
+            if view[f"holder.{index}.session_id"] == "reader"
+        )
+        self.assertEqual(view[f"holder.{reader}.node_id"], fixtures.HOME_NODE)
+        self.assertEqual(
+            view[f"holder.{reader}.provider_incarnation"],
+            str(fixtures.HOME_INCARNATION),
+        )
+        pending = self._transition("map-begin", session="reader",
+                                   extra=holder_args)
+        self._mapping("cancel", pending["mapping_id"], session="reader")
+        self._holder("release", "reader")
+
     def test_reference_mapping_pins_version_and_reserves_cleanup_capacity(self):
         self._publish()
         nonce = self._nonce()
