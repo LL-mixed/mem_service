@@ -1058,6 +1058,38 @@ enum mem_service_managed_result mem_service_managed_poll(
     return MEM_SERVICE_MANAGED_RESULT_OK;
 }
 
+enum mem_service_managed_result mem_service_managed_poll_recovery(
+    const struct mem_service_managed_table *table,
+    const char *node_id,
+    uint64_t fenced_incarnation,
+    uint64_t after_generation,
+    struct mem_service_managed_view *view_out)
+{
+    const struct mem_service_managed_allocation *next = NULL;
+    size_t i;
+
+    if (view_out != NULL) memset(view_out, 0, sizeof(*view_out));
+    if (table == NULL || view_out == NULL || fenced_incarnation == 0 ||
+        !mem_service_managed_string_valid(node_id,
+                                          MEM_SERVICE_MANAGED_NODE_ID_LEN)) {
+        return MEM_SERVICE_MANAGED_RESULT_INVALID_REQUEST;
+    }
+    for (i = 0; i < MEM_SERVICE_MANAGED_MAX_ALLOCATIONS; ++i) {
+        const struct mem_service_managed_allocation *entry = &table->entries[i];
+
+        if (!entry->in_use || entry->generation <= after_generation ||
+            entry->state != MEM_SERVICE_MANAGED_STATE_QUARANTINED ||
+            entry->provider_incarnation != fenced_incarnation ||
+            strcmp(entry->home_node_id, node_id) != 0) {
+            continue;
+        }
+        if (next == NULL || entry->generation < next->generation) next = entry;
+    }
+    if (next == NULL) return MEM_SERVICE_MANAGED_RESULT_NOT_FOUND;
+    mem_service_managed_fill_view(next, view_out);
+    return MEM_SERVICE_MANAGED_RESULT_OK;
+}
+
 enum mem_service_managed_result mem_service_managed_inspect(
     const struct mem_service_managed_table *table,
     const char *key,

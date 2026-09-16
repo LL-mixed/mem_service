@@ -365,6 +365,12 @@ enum mem_service_managed_result mem_service_managed_poll(
     uint64_t incarnation,
     uint64_t after_generation,
     struct mem_service_managed_view *view_out);
+enum mem_service_managed_result mem_service_managed_poll_recovery(
+    const struct mem_service_managed_table *table,
+    const char *node_id,
+    uint64_t fenced_incarnation,
+    uint64_t after_generation,
+    struct mem_service_managed_view *view_out);
 /*
  * Provider-backed reserve confirmation (M1.2): the bound home provider
  * reserved backing plus address and publishes the opaque descriptor and

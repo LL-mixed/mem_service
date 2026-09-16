@@ -47,6 +47,12 @@ backing 不存在，随后才直接退役。旧 holder 身份、V1/损坏或写�
 继续锁住准入。该接口只落实服务状态机；ub_sim 的 OBMM worker 仍须提供 kernel
 库存、旧实例失效及映射/计算排空证明后才能调用，当前不能据此宣布生产恢复完成。
 
+replacement home 可通过 `poll-recovery --node-id <home> --incarnation <current>
+--fenced-incarnation <old> --after-generation <g>` 完整扫描绑定旧 incarnation 的
+QUARANTINED 对象。这样可以覆盖旧 ledger 已记录的资源，也可以覆盖 worker 尚未
+领取的服务意图。该读取不修改状态、不分配资源、不构成 fencing 证明；每个结果
+仍须与完整旧 ledger 和当前 kernel inventory 对账后逐项执行 recovery reclaim。
+
 V2 writer 的 `object-session` 顺序为 acquire、`begin_reference key=<allocation>
 generation=<g> version=<old-version> idempotency_key=<id>`、map/write、
 `publish_reference key=<logical> offset=<n> len=<n> kind=<n> owner=<n> producer=<n>

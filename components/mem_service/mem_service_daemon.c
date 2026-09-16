@@ -13171,7 +13171,7 @@ static enum mem_service_wire_status mem_service_poll_allocation(
     size_t response_len)
 {
     char node_id[MEM_SERVICE_PROVIDER_NODE_ID_LEN + 1];
-    uint64_t incarnation, after_generation;
+    uint64_t incarnation, after_generation, recovery, fenced_incarnation;
     struct mem_service_managed_view view;
     enum mem_service_managed_result result;
     enum mem_service_wire_status status;
@@ -13190,10 +13190,40 @@ static enum mem_service_wire_status mem_service_poll_allocation(
                  "status=invalid_session\nreason=invalid_request\n");
         return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
+    recovery = mem_service_payload_get_u64(payload, "recovery", 0);
+    fenced_incarnation =
+        mem_service_payload_get_u64(payload, "fenced_incarnation", 0);
     status = mem_service_provider_caller_check(svc, node_id, incarnation,
                                               response, response_len);
     if (status != MEM_SERVICE_WIRE_STATUS_OK) {
         return status;
+    }
+    if (recovery != 0) {
+        struct mem_service_provider_directory_poll poll;
+
+        if (recovery != 1 || fenced_incarnation == 0 ||
+            !svc->managed_recovery_required || !svc->managed_recovery_known) {
+            snprintf(response, response_len,
+                     "status=internal\nreason=recovery_scope_unknown\n");
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        }
+        poll = mem_service_managed_directory_poll(
+            svc, mem_service_monotonic_ms());
+        if (poll.required_count == 0 || !poll.ready) {
+            snprintf(response, response_len,
+                     "status=internal\nreason=recovery_providers_not_ready\n");
+            return MEM_SERVICE_WIRE_STATUS_INTERNAL;
+        }
+        result = mem_service_managed_poll_recovery(
+            &svc->managed, node_id, fenced_incarnation,
+            after_generation, &view);
+        return mem_service_managed_finish(result, &view, "",
+                                          response, response_len);
+    }
+    if (fenced_incarnation != 0) {
+        snprintf(response, response_len,
+                 "status=invalid_session\nreason=invalid_request\n");
+        return MEM_SERVICE_WIRE_STATUS_INVALID_SESSION;
     }
     result = mem_service_managed_poll(&svc->managed, node_id, incarnation,
                                       after_generation, &view);

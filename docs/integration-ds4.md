@@ -97,6 +97,10 @@ ready、所有 holder 节点以新 incarnation 加入且恢复域完整可知时
 确认旧 backing 不存在。全部义务终结后服务才重新开放 managed 准入。DS4 不调用
 该管理接口，也不能把控制回执当作 RoCE payload 或映射 fencing 证据；部署侧
 provider 恢复协调器负责提供这些证明。
+恢复协调器可使用安装 SDK 的
+`mem_service_client_poll_recovery_allocation()` 按旧 home incarnation 枚举隔离
+义务；DS4 数据路径不使用该 API。poll 结果只提供控制面身份，不授予 payload
+访问，也不改变 RoCE provider 的 fencing 责任。
 
 OBMM 平台诊断新增 `mem_service_provider_obmm_endpoint_probe_conflict()`，用于
 当前映射的固定地址冲突验收。它复用已持有的设备句柄，不改变 import、路由或

@@ -325,6 +325,19 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             "--connect", self._connect,
         )
 
+    def _poll_recovery(self, current_incarnation: int,
+                       fenced_incarnation: int,
+                       after_generation: int = 0,
+                       node_id: str = HOME_NODE) -> subprocess.CompletedProcess:
+        return self._run_client(
+            "poll-recovery",
+            "--node-id", node_id,
+            "--incarnation", str(current_incarnation),
+            "--fenced-incarnation", str(fenced_incarnation),
+            "--after-generation", str(after_generation),
+            "--connect", self._connect,
+        )
+
     def _inspect(self, key: str) -> dict[str, str]:
         result = self._run_client(
             "inspect-allocation", "--key", key, "--connect", self._connect
@@ -727,6 +740,17 @@ class MemServiceProviderBackedAllocationTests(unittest.TestCase):
             self.assertEqual(self._inspect("recover-home")["state"], "quarantined")
             replacement = HOME_INCARNATION + 1
             self.assertEqual(self._register_home(replacement).returncode, 0)
+            pending = self._poll_recovery(replacement, HOME_INCARNATION)
+            self.assertEqual(pending.returncode, 0,
+                             pending.stdout + pending.stderr)
+            pending_view = _parse_kv(pending.stdout)
+            self.assertEqual(pending_view["key"], "recover-home")
+            self.assertEqual(int(pending_view["generation"]), generation)
+            self.assertEqual(pending_view["state"], "quarantined")
+            exhausted = self._poll_recovery(replacement, HOME_INCARNATION,
+                                            generation)
+            self.assertNotEqual(exhausted.returncode, 0)
+            self.assertIn("status=not_found", exhausted.stdout)
             wrong = self._recover("recover-home", generation, replacement,
                                   HOME_INCARNATION, 0)
             self.assertNotEqual(wrong.returncode, 0)

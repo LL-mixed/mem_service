@@ -47,6 +47,13 @@ replacement provider 明确确认旧 backing 已不存在，服务才直接推�
 访问、不枚举 kernel 资源，也不构成 backing 消失证明；provider worker 必须在
 调用前完成物理对账和 fencing，当前 OBMM worker 恢复执行器仍待接通。
 
+恢复执行器使用 `mem_service_client_poll_recovery_allocation()` 或诊断 CLI
+`poll-recovery`，按原 home `(node_id, fenced_incarnation)` 和 generation 顺序读取
+QUARANTINED 义务。调用方身份仍为当前活动 home incarnation；服务要求完整可知
+的 recovery scope 和全部 required provider ready。普通 `poll-allocation` 继续只
+返回当前 incarnation 的 ALLOCATING/RETIRING 工作。恢复 poll 为只读快照，不领取
+任务，也不证明 ledger、kernel inventory 或 backing 状态。
+
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍
 计入对应资源数。此阶段为运行期准入与记账，不能撤销既有 CPU 页权限。
