@@ -454,8 +454,194 @@ done:
 static bool worker_resume_completed_phase(const char *phase)
 {
     return !strcmp(phase, "reclaimed") ||
-           !strcmp(phase, "cancel-confirmed") ||
-           !strcmp(phase, "unbacked-retired");
+           !strcmp(phase, "cancel-confirmed");
+}
+
+enum worker_resume_action {
+    WORKER_RESUME_INVALID = -1,
+    WORKER_RESUME_DONE = 0,
+    WORKER_RESUME_RESTORE,
+    WORKER_RESUME_EXPORT_AND_PUBLISH,
+    WORKER_RESUME_PUBLISH,
+    WORKER_RESUME_RELEASE,
+    WORKER_RESUME_CANCEL,
+};
+
+struct worker_resume_object {
+    struct worker_ledger_entry last;
+    struct worker_reservation saved;
+    struct obmm_cmd_gsva_enumerate_v1 actual;
+    struct mem_service_client_allocation service;
+    const char *match;
+    enum worker_resume_action action;
+    bool has_resource;
+};
+
+static bool worker_resume_allocation_identity_matches(
+    const struct worker_config *config,
+    const struct worker_ledger_entry *last,
+    const struct mem_service_client_allocation *actual)
+{
+    return config && last && actual &&
+           !strcmp(actual->key, last->work.key) &&
+           actual->generation == last->work.generation &&
+           actual->size_bytes == last->work.size_bytes &&
+           actual->alignment_bytes == last->work.alignment_bytes &&
+           actual->capabilities == last->work.capabilities &&
+           !strcmp(actual->home_node, config->node) &&
+           actual->provider_incarnation == config->incarnation;
+}
+
+static bool worker_resume_unpublished_service_matches(
+    const struct worker_config *config,
+    const struct worker_ledger_entry *last,
+    const struct mem_service_client_allocation *actual)
+{
+    return worker_resume_allocation_identity_matches(config, last, actual) &&
+           (!strcmp(actual->state, "allocating") ||
+            !strcmp(actual->state, "retiring") ||
+            !strcmp(actual->state, "retired")) &&
+           !actual->provider_backed && !actual->address &&
+           !actual->address_len && !actual->descriptor_len &&
+           !actual->holder_count && !actual->live_refs;
+}
+
+static bool worker_resume_rebuild_export(
+    const struct worker_config *config,
+    const struct worker_reservation *saved,
+    const struct obmm_cmd_gsva_enumerate_v1 *actual,
+    struct worker_reservation *rebuilt)
+{
+    uint64_t flags = OBMM_EXPORT_FLAG_ALLOW_MMAP |
+                     OBMM_EXPORT_FLAG_GSVA_FIXED_UBA |
+                     (config->fast_allocation ? OBMM_EXPORT_FLAG_FAST : 0);
+
+    if (!config || !saved || !actual || !rebuilt ||
+        !actual->export_mem_id || !actual->export_token_id ||
+        actual->resource_flags != OBMM_GSVA_RESOURCE_ADDRESS_RESERVED ||
+        memcmp(&saved->segment, &actual->desc, sizeof(saved->segment)) ||
+        (saved->exported.length && saved->exported.length != 1) ||
+        (saved->exported.flags && saved->exported.flags != flags) ||
+        (saved->exported.uba &&
+         saved->exported.uba != saved->segment.home_va) ||
+        (saved->exported.size[0] &&
+         saved->exported.size[0] != saved->segment.size) ||
+        (saved->exported.mem_id &&
+         saved->exported.mem_id != actual->export_mem_id) ||
+        (saved->exported.tokenid &&
+         saved->exported.tokenid != actual->export_token_id)) return false;
+    *rebuilt = *saved;
+    memset(&rebuilt->exported, 0, sizeof(rebuilt->exported));
+    rebuilt->exported.length = 1;
+    rebuilt->exported.flags = flags;
+    rebuilt->exported.uba = rebuilt->segment.home_va;
+    rebuilt->exported.size[0] = rebuilt->segment.size;
+    rebuilt->exported.mem_id = actual->export_mem_id;
+    rebuilt->exported.tokenid = actual->export_token_id;
+    if (mem_service_provider_obmm_encode_gsva(
+            &rebuilt->segment, &rebuilt->exported,
+            &rebuilt->descriptor)) return false;
+    if (saved->descriptor.len &&
+        (saved->descriptor.len != rebuilt->descriptor.len ||
+         memcmp(saved->descriptor.bytes, rebuilt->descriptor.bytes,
+                rebuilt->descriptor.len))) return false;
+    return true;
+}
+
+static const char *worker_resume_resource_match(
+    const struct worker_config *config,
+    const struct worker_reservation *saved,
+    const struct obmm_cmd_gsva_enumerate_v1 *actual,
+    struct worker_reservation *rebuilt)
+{
+    struct obmm_gsva_segment_desc_v1 retired;
+
+    if (!config || !saved || !actual || !rebuilt ||
+        !saved->segment.segment_id ||
+        (actual->resource_flags & OBMM_GSVA_RESOURCE_EXPORT_BUSY)) return NULL;
+    retired = saved->segment;
+    retired.flags = (retired.flags & ~OBMM_GSVA_SEG_F_ACTIVE) |
+                    OBMM_GSVA_SEG_F_RETIRED;
+    if (!memcmp(&retired, &actual->desc, sizeof(retired))) {
+        if (actual->resource_flags || actual->export_mem_id ||
+            actual->export_token_id) return NULL;
+        *rebuilt = *saved;
+        return "retired-record";
+    }
+    if (memcmp(&saved->segment, &actual->desc, sizeof(saved->segment)) ||
+        actual->resource_flags != OBMM_GSVA_RESOURCE_ADDRESS_RESERVED)
+        return NULL;
+    if (!actual->export_mem_id && !actual->export_token_id) {
+        *rebuilt = *saved;
+        return "reserved-no-export";
+    }
+    return worker_resume_rebuild_export(config, saved, actual, rebuilt)
+               ? "export-bound"
+               : NULL;
+}
+
+static enum worker_resume_action worker_resume_action_for(
+    const char *phase, bool has_resource, const char *match)
+{
+    if (worker_resume_completed_phase(phase))
+        return (!has_resource || (match && !strcmp(match, "retired-record")))
+                   ? WORKER_RESUME_DONE
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "published"))
+        return has_resource && match && !strcmp(match, "export-bound")
+                   ? WORKER_RESUME_RESTORE
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "reserved") || !strcmp(phase, "reserve-unknown"))
+        return has_resource && match && !strcmp(match, "reserved-no-export")
+                   ? WORKER_RESUME_EXPORT_AND_PUBLISH
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "export-unknown")) {
+        if (!has_resource || !match) return WORKER_RESUME_INVALID;
+        if (!strcmp(match, "reserved-no-export"))
+            return WORKER_RESUME_EXPORT_AND_PUBLISH;
+        return !strcmp(match, "export-bound") ? WORKER_RESUME_PUBLISH
+                                                : WORKER_RESUME_INVALID;
+    }
+    if (!strcmp(phase, "exported"))
+        return has_resource && match && !strcmp(match, "export-bound")
+                   ? WORKER_RESUME_PUBLISH
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "release-intent"))
+        return has_resource && match &&
+                       (!strcmp(match, "export-bound") ||
+                        !strcmp(match, "reserved-no-export") ||
+                        !strcmp(match, "retired-record"))
+                   ? WORKER_RESUME_RELEASE
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "unexported"))
+        return has_resource && match &&
+                       (!strcmp(match, "reserved-no-export") ||
+                        !strcmp(match, "retired-record"))
+                   ? WORKER_RESUME_RELEASE
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "retired"))
+        return has_resource && match && !strcmp(match, "retired-record")
+                   ? WORKER_RESUME_RELEASE
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "export-no-backing"))
+        return has_resource && match && !strcmp(match, "reserved-no-export")
+                   ? WORKER_RESUME_CANCEL
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "unbacked-retire-intent"))
+        return has_resource && match &&
+                       (!strcmp(match, "reserved-no-export") ||
+                        !strcmp(match, "retired-record"))
+                   ? WORKER_RESUME_CANCEL
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "unbacked-retired"))
+        return has_resource && match && !strcmp(match, "retired-record")
+                   ? WORKER_RESUME_CANCEL
+                   : WORKER_RESUME_INVALID;
+    if (!strcmp(phase, "reserve-empty") ||
+        !strcmp(phase, "capacity-reject-intent") ||
+        !strcmp(phase, "cancel-empty"))
+        return has_resource ? WORKER_RESUME_INVALID : WORKER_RESUME_CANCEL;
+    return WORKER_RESUME_INVALID;
 }
 
 static bool worker_resume_service_matches(
@@ -486,11 +672,58 @@ static bool worker_resume_service_matches(
                    actual->descriptor_len);
 }
 
-/* Resume only fully published reservations whose service and kernel identities
- * still agree.  Intent-only and partially completed resource operations remain
- * fail-closed because replaying them cannot prove whether the preceding ioctl
- * completed.  The returned fd retains the exclusive ledger lock for the
- * worker's lifetime. */
+static bool worker_resume_service_preflight(
+    const struct worker_config *config,
+    const struct worker_resume_object *object)
+{
+    const struct mem_service_client_allocation *service;
+
+    if (!config || !object) return false;
+    service = &object->service;
+    switch (object->action) {
+    case WORKER_RESUME_DONE:
+        return true;
+    case WORKER_RESUME_RESTORE:
+        return worker_resume_service_matches(
+            config, &object->last, &object->saved, service);
+    case WORKER_RESUME_EXPORT_AND_PUBLISH:
+        return worker_resume_unpublished_service_matches(
+                   config, &object->last, service) &&
+               !strcmp(service->state, "allocating");
+    case WORKER_RESUME_PUBLISH:
+        return (worker_resume_unpublished_service_matches(
+                    config, &object->last, service) &&
+                !strcmp(service->state, "allocating")) ||
+               worker_resume_service_matches(
+                   config, &object->last, &object->saved, service);
+    case WORKER_RESUME_RELEASE:
+        return (worker_resume_service_matches(
+                    config, &object->last, &object->saved, service) &&
+                !strcmp(service->state, "retiring")) ||
+               (object->match && !strcmp(object->match, "retired-record") &&
+                worker_resume_unpublished_service_matches(
+                    config, &object->last, service) &&
+                !strcmp(service->state, "retired"));
+    case WORKER_RESUME_CANCEL:
+        return worker_resume_unpublished_service_matches(
+            config, &object->last, service);
+    case WORKER_RESUME_INVALID:
+    default:
+        return false;
+    }
+}
+
+static int worker_resume_apply(
+    int device, int journal, const struct worker_config *config,
+    const struct mem_service_client *client,
+    struct worker_resume_object *object,
+    struct worker_reservation *restored,
+    bool *restored_out);
+
+/* Resume only ledger stages whose exact service and stable kernel states prove
+ * the next operation.  A bare reserve intent and an invalid/torn frame remain
+ * fail-closed because neither identifies an owned segment.  The returned fd
+ * retains the exclusive ledger lock for the worker's lifetime. */
 static int worker_load_resume_state(
     struct worker_config *config,
     const struct mem_service_client *client,
@@ -501,6 +734,7 @@ static int worker_load_resume_state(
 {
     enum { limit = 65536 };
     struct worker_ledger_entry *entries = NULL;
+    struct worker_resume_object *objects = NULL;
     struct obmm_cmd_gsva_enumerate_v1 *inventory = NULL;
     struct obmm_cmd_gsva_enumerate_v1 cursor = {
         .version = OBMM_GSVA_ABI_VERSION,
@@ -509,7 +743,7 @@ static int worker_load_resume_state(
     struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
     unsigned char *claimed = NULL;
     const char *reason = "journal-invalid";
-    size_t count = 0, records = 0, restored = 0, unclaimed = 0;
+    size_t count = 0, records = 0, groups = 0, restored = 0, unclaimed = 0;
     size_t i, j;
     int fd = -1, result = 1;
 
@@ -524,9 +758,10 @@ static int worker_load_resume_state(
         before.st_size / WORKER_LEDGER_FRAME_BYTES > limit) goto done;
     count = (size_t)before.st_size / WORKER_LEDGER_FRAME_BYTES;
     entries = calloc(count, sizeof(*entries));
+    objects = calloc(count, sizeof(*objects));
     inventory = calloc(limit, sizeof(*inventory));
     claimed = calloc(limit, 1);
-    if (!entries || !inventory || !claimed) goto done;
+    if (!entries || !objects || !inventory || !claimed) goto done;
     for (i = 0; i < count; ++i)
         if (ledger_read_entry(fd, i + 1, config, &entries[i])) goto done;
 
@@ -546,11 +781,10 @@ static int worker_load_resume_state(
     reason = "resource-unresolved";
     for (i = 1; i < count;) {
         struct worker_reservation saved = {0};
-        struct mem_service_client_allocation actual;
         enum mem_service_wire_status status;
         size_t begin = i, found = records;
         const struct worker_ledger_entry *last;
-        const char *match = NULL;
+        struct worker_resume_object *object = &objects[groups];
 
         while (i < count &&
                entries[i].work.generation == entries[begin].work.generation) {
@@ -571,44 +805,40 @@ static int worker_load_resume_state(
             ++i;
         }
         last = &entries[i - 1];
-        if (!saved.segment.segment_id) {
-            if (strcmp(last->phase, "cancel-confirmed")) {
-                reason = "phase-not-resumable";
-                goto done;
+        object->last = *last;
+        object->saved = saved;
+        if (saved.segment.segment_id) {
+            if (!saved.occupied) goto done;
+            strcpy(object->saved.key, last->work.key);
+            object->saved.generation = last->work.generation;
+            for (j = 0; j < records; ++j) {
+                if (inventory[j].desc.segment_id != saved.segment.segment_id)
+                    continue;
+                if (found != records) goto done;
+                found = j;
             }
-            continue;
+            if (found == records || claimed[found]) goto done;
+            object->actual = inventory[found];
+            object->has_resource = true;
+            object->match = worker_resume_resource_match(
+                config, &object->saved, &object->actual, &object->saved);
+            if (!object->match) goto done;
+            claimed[found] = 1;
         }
-        for (j = 0; j < records; ++j) {
-            if (inventory[j].desc.segment_id != saved.segment.segment_id)
-                continue;
-            if (found != records) goto done;
-            found = j;
-        }
-        if (found == records || claimed[found]) goto done;
-        match = reconcile_resource(last, &saved, &inventory[found]);
-        if (!match) goto done;
-        claimed[found] = 1;
-
-        if (worker_resume_completed_phase(last->phase)) {
-            if (strcmp(match, "retired-record")) goto done;
-            continue;
-        }
-        if (strcmp(last->phase, "published") ||
-            strcmp(match, "export-bound")) {
+        object->action = worker_resume_action_for(
+            last->phase, object->has_resource, object->match);
+        if (object->action == WORKER_RESUME_INVALID) {
             reason = "phase-not-resumable";
             goto done;
         }
-        if (!saved.occupied) goto done;
-        strcpy(saved.key, last->work.key);
-        saved.generation = last->work.generation;
-        reason = "service-state-mismatch";
-        memset(&actual, 0, sizeof(actual));
-        if (mem_service_client_inspect_allocation(
-                client, last->work.key, &actual, &status) ||
-            status != MEM_SERVICE_WIRE_STATUS_OK ||
-            !worker_resume_service_matches(config, last, &saved, &actual) ||
-            restored == reservation_capacity) goto done;
-        reservations[restored++] = saved;
+        if (object->action != WORKER_RESUME_DONE) {
+            reason = "service-state-mismatch";
+            if (mem_service_client_inspect_allocation(
+                    client, last->work.key, &object->service, &status) ||
+                status != MEM_SERVICE_WIRE_STATUS_OK ||
+                !worker_resume_service_preflight(config, object)) goto done;
+        }
+        ++groups;
     }
 
     reason = "snapshot-changed";
@@ -621,6 +851,20 @@ static int worker_load_resume_state(
         before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
         before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) goto done;
     for (j = 0; j < records; ++j) if (!claimed[j]) ++unclaimed;
+    reason = "resume-operation-failed";
+    for (i = 0; i < groups; ++i) {
+        bool did_restore = false;
+
+        if (restored == reservation_capacity &&
+            objects[i].action != WORKER_RESUME_DONE &&
+            objects[i].action != WORKER_RESUME_RELEASE &&
+            objects[i].action != WORKER_RESUME_CANCEL) goto done;
+        if (worker_resume_apply(
+                device, fd, config, client, &objects[i],
+                restored < reservation_capacity ? &reservations[restored] : NULL,
+                &did_restore)) goto done;
+        if (did_restore) ++restored;
+    }
     printf("obmm-worker-resume: status=ready reservations=%zu "
            "kernel_records=%zu unclaimed_records=%zu revision=%" PRIu64
            " kernel_instance=",
@@ -634,6 +878,7 @@ static int worker_load_resume_state(
 done:
     if (fd >= 0) close(fd);
     free(entries);
+    free(objects);
     free(inventory);
     free(claimed);
     if (result)
@@ -1122,6 +1367,248 @@ static int rollback_unbacked_work(int device, int journal, const struct worker_c
         cancel_unbacked_work(journal, config, client, work, "backing_allocation")) return -1;
     memset(reservation, 0, sizeof(*reservation));
     return 0;
+}
+
+static int worker_resume_refresh_service(
+    const struct mem_service_client *client,
+    struct worker_resume_object *object)
+{
+    enum mem_service_wire_status status;
+
+    memset(&object->service, 0, sizeof(object->service));
+    return mem_service_client_inspect_allocation(
+               client, object->last.work.key, &object->service, &status) ||
+                   status != MEM_SERVICE_WIRE_STATUS_OK
+               ? -1
+               : 0;
+}
+
+static int worker_resume_publish(
+    int device, int journal, const struct worker_config *config,
+    const struct mem_service_client *client,
+    struct worker_resume_object *object,
+    struct worker_reservation *restored)
+{
+    struct worker_reservation *saved = &object->saved;
+    struct mem_service_client_allocation published;
+    enum mem_service_wire_status status;
+
+    if (!restored || !saved->occupied || !object->has_resource) return -1;
+    if (object->action == WORKER_RESUME_EXPORT_AND_PUBLISH) {
+        struct obmm_cmd_export exported = {0};
+        int export_result = gva_manager_export_segment_checked(
+            device, &saved->segment, config->fast_allocation, &exported);
+
+        saved->exported = exported;
+        if (export_result == 1) {
+            saved->export_no_backing = true;
+            if (record_phase(journal, config, &object->last.work, saved,
+                             object->last.work.generation,
+                             "export-no-backing",
+                             saved->segment.segment_id, 0)) return -1;
+            object->action = WORKER_RESUME_CANCEL;
+            object->match = "reserved-no-export";
+            return worker_resume_apply(
+                device, journal, config, client, object, NULL, &(bool){false});
+        }
+        if (export_result) {
+            (void)record_phase(journal, config, &object->last.work, saved,
+                               object->last.work.generation,
+                               "export-unknown", saved->segment.segment_id,
+                               exported.mem_id);
+            return -1;
+        }
+        if (mem_service_provider_obmm_encode_gsva(
+                &saved->segment, &saved->exported,
+                &saved->descriptor)) {
+            (void)record_phase(journal, config, &object->last.work, saved,
+                               object->last.work.generation,
+                               "export-unknown", saved->segment.segment_id,
+                               saved->exported.mem_id);
+            return -1;
+        }
+    }
+    if (strcmp(object->last.phase, "exported") ||
+        object->action == WORKER_RESUME_EXPORT_AND_PUBLISH) {
+        if (record_phase(journal, config, &object->last.work, saved,
+                         object->last.work.generation, "exported",
+                         saved->segment.segment_id,
+                         saved->exported.mem_id)) return -1;
+    }
+    if (worker_resume_refresh_service(client, object)) return -1;
+    if (!strcmp(object->service.state, "allocating")) {
+        if (!worker_resume_unpublished_service_matches(
+                config, &object->last, &object->service) ||
+            mem_service_client_publish_allocation(
+                client, object->last.work.key, config->node,
+                config->incarnation, object->last.work.generation,
+                saved->descriptor.bytes, saved->descriptor.len,
+                saved->segment.home_va, saved->segment.size,
+                &published, &status) ||
+            status != MEM_SERVICE_WIRE_STATUS_OK ||
+            (strcmp(published.state, "active") &&
+             strcmp(published.state, "retiring")) ||
+            published.generation != object->last.work.generation ||
+            published.address != saved->segment.home_va ||
+            published.address_len != saved->segment.size ||
+            published.descriptor_len != saved->descriptor.len ||
+            memcmp(published.descriptor, saved->descriptor.bytes,
+                   saved->descriptor.len)) return -1;
+    } else if (!worker_resume_service_matches(
+                   config, &object->last, saved, &object->service)) {
+        return -1;
+    }
+    if (record_phase(journal, config, &object->last.work, saved,
+                     object->last.work.generation, "published",
+                     saved->segment.segment_id,
+                     saved->exported.mem_id)) return -1;
+    *restored = *saved;
+    return 0;
+}
+
+static int worker_resume_release(
+    int device, int journal, const struct worker_config *config,
+    const struct mem_service_client *client,
+    struct worker_resume_object *object)
+{
+    struct worker_reservation *saved = &object->saved;
+    struct obmm_cmd_gsva_retire_segment_v1 retire = {0};
+    struct mem_service_client_allocation reclaimed;
+    enum mem_service_wire_status status;
+
+    if (!object->has_resource || !object->match) return -1;
+    if (!strcmp(object->match, "export-bound")) {
+        if (gva_manager_unexport_segment(
+                device, &saved->segment, &saved->exported) ||
+            record_phase(journal, config, &object->last.work, saved,
+                         object->last.work.generation, "unexported",
+                         saved->segment.segment_id,
+                         saved->exported.mem_id)) return -1;
+    } else if (!strcmp(object->match, "reserved-no-export")) {
+        if (strcmp(object->last.phase, "unexported") &&
+            record_phase(journal, config, &object->last.work, saved,
+                         object->last.work.generation, "unexported",
+                         saved->segment.segment_id,
+                         saved->exported.mem_id)) return -1;
+    } else if (strcmp(object->match, "retired-record")) {
+        return -1;
+    }
+    if (strcmp(object->match, "retired-record")) {
+        retire.version = OBMM_GSVA_ABI_VERSION;
+        retire.segment_id = saved->segment.segment_id;
+        retire.epoch = saved->segment.epoch;
+        retire.timeout_ms = 5000;
+        if (gva_manager_retire_segment(device, &retire) ||
+            record_phase(journal, config, &object->last.work, saved,
+                         object->last.work.generation, "retired",
+                         retire.segment_id, 0)) return -1;
+    }
+    if (worker_resume_refresh_service(client, object)) return -1;
+    if (!strcmp(object->service.state, "retiring")) {
+        if (!worker_resume_service_matches(
+                config, &object->last, saved, &object->service) ||
+            mem_service_client_reclaim_allocation(
+                client, object->last.work.key, config->node,
+                config->incarnation, object->last.work.generation, true,
+                &reclaimed, &status) ||
+            status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(reclaimed.state, "retired") ||
+            reclaimed.generation != object->last.work.generation) return -1;
+    } else if (!worker_resume_unpublished_service_matches(
+                   config, &object->last, &object->service) ||
+               strcmp(object->service.state, "retired")) {
+        return -1;
+    }
+    return record_phase(journal, config, &object->last.work, saved,
+                        object->last.work.generation, "reclaimed",
+                        saved->segment.segment_id, 0);
+}
+
+static int worker_resume_cancel(
+    int device, int journal, const struct worker_config *config,
+    const struct mem_service_client *client,
+    struct worker_resume_object *object)
+{
+    struct worker_reservation *saved = &object->saved;
+    struct obmm_cmd_gsva_retire_segment_v1 retire = {0};
+
+    if (object->has_resource) {
+        if (!object->match) return -1;
+        if (!strcmp(object->match, "reserved-no-export")) {
+            retire.version = OBMM_GSVA_ABI_VERSION;
+            retire.segment_id = saved->segment.segment_id;
+            retire.epoch = saved->segment.epoch;
+            retire.timeout_ms = 5000;
+            if (strcmp(object->last.phase, "unbacked-retire-intent") &&
+                record_phase(journal, config, &object->last.work, saved,
+                             object->last.work.generation,
+                             "unbacked-retire-intent", retire.segment_id,
+                             0)) return -1;
+            if (gva_manager_retire_segment(device, &retire) ||
+                record_phase(journal, config, &object->last.work, saved,
+                             object->last.work.generation,
+                             "unbacked-retired", retire.segment_id,
+                             0)) return -1;
+        } else if (!strcmp(object->match, "retired-record")) {
+            if (strcmp(object->last.phase, "unbacked-retired") &&
+                record_phase(journal, config, &object->last.work, saved,
+                             object->last.work.generation,
+                             "unbacked-retired", saved->segment.segment_id,
+                             0)) return -1;
+        } else {
+            return -1;
+        }
+    }
+    if (worker_resume_refresh_service(client, object) ||
+        !worker_resume_unpublished_service_matches(
+            config, &object->last, &object->service)) return -1;
+    if (!strcmp(object->service.state, "allocating"))
+        return cancel_unbacked_work(
+            journal, config, client, &object->service,
+            object->has_resource ? "backing_allocation" :
+                                   "address_capacity");
+    if (!strcmp(object->service.state, "retiring"))
+        return cancel_unreserved_work(
+            journal, config, client, &object->service);
+    if (strcmp(object->service.state, "retired")) return -1;
+    return record_phase(journal, config, &object->last.work, NULL,
+                        object->last.work.generation,
+                        "cancel-confirmed", 0, 0);
+}
+
+static int worker_resume_apply(
+    int device, int journal, const struct worker_config *config,
+    const struct mem_service_client *client,
+    struct worker_resume_object *object,
+    struct worker_reservation *restored,
+    bool *restored_out)
+{
+    if (!config || !client || !object || !restored_out) return -1;
+    *restored_out = false;
+    switch (object->action) {
+    case WORKER_RESUME_DONE:
+        return 0;
+    case WORKER_RESUME_RESTORE:
+        if (!restored) return -1;
+        *restored = object->saved;
+        *restored_out = true;
+        return 0;
+    case WORKER_RESUME_EXPORT_AND_PUBLISH:
+    case WORKER_RESUME_PUBLISH:
+        if (worker_resume_publish(
+                device, journal, config, client, object, restored)) return -1;
+        *restored_out = object->action != WORKER_RESUME_CANCEL;
+        return 0;
+    case WORKER_RESUME_RELEASE:
+        return worker_resume_release(
+            device, journal, config, client, object);
+    case WORKER_RESUME_CANCEL:
+        return worker_resume_cancel(
+            device, journal, config, client, object);
+    case WORKER_RESUME_INVALID:
+    default:
+        return -1;
+    }
 }
 
 static int worker_serve_allocations(const char *config_path, bool resume)

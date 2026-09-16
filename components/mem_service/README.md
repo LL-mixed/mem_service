@@ -57,11 +57,13 @@ QUARANTINED 义务。调用方身份仍为当前活动 home incarnation；服务
 OBMM provider 的 `recover-allocation-state` 已接入 lost-home 执行：仅接受新
 incarnation 和不同 kernel instance，在稳定库存中拒绝旧 segment 身份复用，
 扫描上述 recovery poll 并逐项完成直接退役，最后原子归档旧 ledger。
-`resume-allocations` 只在相同 kernel instance、稳定库存、完整 published ledger 与
-服务 ACTIVE/RETIRING 身份逐项一致时恢复 worker reservation slot；部分完成阶段
-继续隔离。holder 节点的物理映射/计算排空及强制撤销仍保持拒绝；这些缺口关闭前，
-lost-home 入口只证明“旧 home kernel 已消失”的恢复子集，同-kernel 入口只证明
-既有 backing 的稳态 worker 续作。
+`resume-allocations` 在相同 kernel instance 和稳定库存中逐项关联 ledger、segment、
+export 与同代服务对象。完整 `published` reservation 直接恢复 slot；已有 segment
+身份的 reserve/export/release/retire 与无 backing 取消阶段按库存中的确切物理状态
+续作，每个外部操作后先同步新 ledger 阶段。裸 `reserve-intent` 没有可绑定的
+segment 身份，日志半写也没有完整帧证明，两者继续隔离。holder 节点的物理映射/
+计算排空及强制撤销仍保持拒绝；这些缺口关闭前，lost-home 入口只证明“旧 home
+kernel 已消失”的恢复子集，同-kernel 入口只证明 ledger 可确定归属的 worker 续作。
 
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍

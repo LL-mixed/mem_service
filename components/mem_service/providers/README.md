@@ -105,12 +105,23 @@ lost-home 的保守恢复。两份配置必须保持 endpoint、node、state fil
 
 `resume-allocations --config <path>` 覆盖同一 kernel instance 中稳态 worker 崩溃
 后的 reservation 续作。它独占并完整校验现有 ledger，读取稳定 kernel inventory，
-只恢复最后阶段为 `published`、segment/export/descriptor 精确匹配、且服务仍返回
-同 key/generation/home/incarnation ACTIVE 或 RETIRING 对象的 slot。已完成的
-`reclaimed`、`cancel-confirmed` 和 `unbacked-retired` 记录只核对，不恢复 slot；
-其他意图或部分完成阶段保持 fail-closed。成功后进程持有原 ledger 锁并进入现有
-poll/reclaim 循环，不重新分配、export 或 publish。远端 holder 的物理映射/计算
-排空证明和强制撤销仍须单独实现。
+先对全部对象完成只读预检和库存快照复核，再执行可证明的阶段续作：
+
+- `published` 在 segment/export/descriptor 与服务 ACTIVE/RETIRING 身份完全一致时
+  恢复 slot；
+- `reserved`、带完整 segment 的 `reserve-unknown`、`export-unknown` 与 `exported`
+  根据库存是否存在 export，继续 checked export 或 generation-bound publish；
+- `release-intent`、`unexported` 与 `retired` 根据 export/segment 的实际终态继续
+  unexport、retire 和服务 reclaim；
+- `export-no-backing`、`unbacked-retire-intent`、`unbacked-retired`、`reserve-empty`、
+  `capacity-reject-intent` 与 `cancel-empty` 完成物理 retire 和未发布对象取消；
+- `reclaimed` 与 `cancel-confirmed` 只核对终态，不恢复 slot。
+
+每个外部操作的完成证明先同步为新 ledger 帧；失败后的下一次启动从新阶段继续。
+`reserve-intent` 未记录 segment 身份，无法把任一库存项唯一绑定到该事务，继续
+fail-closed。截断、校验失败或半写帧同样拒绝，禁止删除尾部或推断操作未发生。
+成功后进程持有原 ledger 锁并进入现有 poll/reclaim 循环。远端 holder 的物理映射/
+计算排空证明和强制撤销仍须单独实现。
 
 `serve-allocations` 的 state_file 使用版本化、固定长度、字段级小端记录。
 每个阶段保存 node/incarnation、对象 key/generation、逻辑尺寸及对齐、完整
