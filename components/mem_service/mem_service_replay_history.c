@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
 #include "mem_service_replay_history.h"
 
 #include <errno.h>
@@ -8,7 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const unsigned char history_magic[16] = "MSREPLAY0000001\n";
+static const unsigned char history_magic[] = "MSREPLAY0000001\n";
+#define HISTORY_MAGIC_BYTES (sizeof(history_magic) - 1U)
 #define FRAME_HEADER 48U
 #define FRAME_BYTES (FRAME_HEADER + MEM_SERVICE_IDEMPOTENCY_KEY_LEN + \
                      MEM_SERVICE_IDEMPOTENCY_RESPONSE_LEN + 8U)
@@ -88,8 +92,8 @@ static int scan(struct mem_service_replay_history *h, uint64_t prefix_count,
     uint64_t count = 0, checksum = 0;
     bool prefix_seen = prefix_count == 0 && prefix_checksum == 0;
     if (!same_file(h) || lseek(h->fd, 0, SEEK_SET) != 0 ||
-        read_exact(h->fd, frame, sizeof(history_magic)) != 0 ||
-        memcmp(frame, history_magic, sizeof(history_magic)) != 0)
+        read_exact(h->fd, frame, HISTORY_MAGIC_BYTES) != 0 ||
+        memcmp(frame, history_magic, HISTORY_MAGIC_BYTES) != 0)
         goto fail;
     for (;;) {
         int rc = read_exact(h->fd, frame, FRAME_HEADER);
@@ -179,7 +183,7 @@ int mem_service_replay_history_open(struct mem_service_replay_history *h,
                  (create ? O_CREAT | O_EXCL : 0), 0600);
     if (h->fd < 0) return -1;
     if (flock(h->fd, LOCK_EX | LOCK_NB) != 0 || !same_file(h)) goto fail;
-    if (create && (write_exact(h->fd, history_magic, sizeof(history_magic)) != 0 ||
+    if (create && (write_exact(h->fd, history_magic, HISTORY_MAGIC_BYTES) != 0 ||
                    fsync(h->fd) != 0 || sync_parent(path) != 0))
         goto fail;
     if (scan(h, checkpoint_count, checkpoint_checksum, NULL, NULL, true, NULL) < 0)
