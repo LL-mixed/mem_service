@@ -2543,6 +2543,8 @@ static int mem_service_client_reference_mapping_begin(
     const struct mem_service_client *client,
     struct mem_service_client_reference_lifecycle *lifecycle,
     struct mem_service_client_allocation *allocation,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
     enum mem_service_wire_status *status_out)
 {
     struct mem_service_reference_request request = {0};
@@ -2558,13 +2560,36 @@ static int mem_service_client_reference_mapping_begin(
     snprintf(request.session_id, sizeof(request.session_id), "%s", lifecycle->mapping.session_id);
     snprintf(request.idempotency_key, sizeof(request.idempotency_key), "%s-ref",
              lifecycle->mapping.operation_id);
-    rc = mem_service_client_reference_map_begin(&single_attempt, &request, &result,
-                                                &transaction, status_out);
+    rc = holder_node_id ? mem_service_client_reference_map_begin_at_node(
+        &single_attempt, &request, holder_node_id,
+        holder_provider_incarnation, &result, &transaction, status_out) :
+        mem_service_client_reference_map_begin(&single_attempt, &request,
+            &result, &transaction, status_out);
     if (!rc) {
         lifecycle->mapping.transaction = transaction;
         if (allocation) *allocation = result.allocation;
     }
     return rc;
+}
+
+static int mem_service_client_unmap_managed_reference_internal(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
+    enum mem_service_wire_status *status_out)
+{
+    if (!client || !channel || !mapping || !lifecycle || !lifecycle->mapping.pending)
+        return mem_service_client_invalid(status_out);
+    mapping->base = NULL; mapping->len = 0; mapping->flags = 0;
+    if (!lifecycle->mapping.transaction.mapping_id &&
+        mem_service_client_reference_mapping_begin(client, lifecycle, NULL,
+            holder_node_id, holder_provider_incarnation, status_out))
+        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
+    return mem_service_client_unmap_managed_allocation(client, channel, mapping,
+                                                      &lifecycle->mapping, status_out);
 }
 
 int mem_service_client_unmap_managed_reference(
@@ -2574,21 +2599,33 @@ int mem_service_client_unmap_managed_reference(
     struct mem_service_client_reference_lifecycle *lifecycle,
     enum mem_service_wire_status *status_out)
 {
-    if (!client || !channel || !mapping || !lifecycle || !lifecycle->mapping.pending)
-        return mem_service_client_invalid(status_out);
-    mapping->base = NULL; mapping->len = 0; mapping->flags = 0;
-    if (!lifecycle->mapping.transaction.mapping_id &&
-        mem_service_client_reference_mapping_begin(client, lifecycle, NULL, status_out))
-        return MEM_SERVICE_MAPPING_CLEANUP_REQUIRED;
-    return mem_service_client_unmap_managed_allocation(client, channel, mapping,
-                                                      &lifecycle->mapping, status_out);
+    return mem_service_client_unmap_managed_reference_internal(
+        client, channel, mapping, lifecycle, NULL, 0, status_out);
 }
 
-int mem_service_client_map_managed_reference(
+int mem_service_client_unmap_managed_reference_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
+    enum mem_service_wire_status *status_out)
+{
+    if (!holder_node_id || !holder_node_id[0] ||
+        !holder_provider_incarnation)
+        return mem_service_client_invalid(status_out);
+    return mem_service_client_unmap_managed_reference_internal(
+        client, channel, mapping, lifecycle, holder_node_id,
+        holder_provider_incarnation, status_out);
+}
+
+static int mem_service_client_map_managed_reference_internal(
     const struct mem_service_client *client,
     const struct mem_service_provider_channel *channel,
     const struct lingqu_object_ref_wire_v2 *reference,
     const char *session_id, const char *operation_id,
+    const char *holder_node_id,
+    uint64_t holder_provider_incarnation,
     struct mem_service_client_object_mapping *mapping,
     struct mem_service_client_reference_lifecycle *lifecycle,
     enum mem_service_wire_status *status_out)
@@ -2600,6 +2637,8 @@ int mem_service_client_map_managed_reference(
         mapping->binding.mapped || lingqu_object_ref_v2_validate(reference) ||
         !(reference->access & LINGQU_OBJECT_REF_V2_READ) || !session_id || !operation_id ||
         !*session_id || !*operation_id ||
+        ((holder_node_id == NULL) != (holder_provider_incarnation == 0)) ||
+        (holder_node_id && !holder_node_id[0]) ||
         strlen(session_id) >= sizeof(lifecycle->mapping.session_id) ||
         strlen(operation_id) >= sizeof(lifecycle->mapping.operation_id))
         return mem_service_client_invalid(status_out);
@@ -2616,7 +2655,8 @@ int mem_service_client_map_managed_reference(
     snprintf(mapping->key, sizeof(mapping->key), "%s", reference->allocation_key);
     mapping->generation = reference->allocation_generation;
     lifecycle->mapping.pending = true;
-    rc = mem_service_client_reference_mapping_begin(client, lifecycle, &current, &status);
+    rc = mem_service_client_reference_mapping_begin(client, lifecycle,
+        &current, holder_node_id, holder_provider_incarnation, &status);
     if (rc) {
         if (rc == 1 && (status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND ||
             status == MEM_SERVICE_WIRE_STATUS_STALE_REF ||
@@ -2644,9 +2684,42 @@ int mem_service_client_map_managed_reference(
     return 0;
 failed:
     if (status == MEM_SERVICE_WIRE_STATUS_OK) status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
-    rc = mem_service_client_unmap_managed_reference(client, channel, mapping, lifecycle, NULL);
+    rc = mem_service_client_unmap_managed_reference_internal(client, channel,
+        mapping, lifecycle, holder_node_id, holder_provider_incarnation, NULL);
     mem_service_client_set_status(status_out, status);
     return rc ? MEM_SERVICE_MAPPING_CLEANUP_REQUIRED : -1;
+}
+
+int mem_service_client_map_managed_reference(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct lingqu_object_ref_wire_v2 *reference,
+    const char *session_id, const char *operation_id,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out)
+{
+    return mem_service_client_map_managed_reference_internal(
+        client, channel, reference, session_id, operation_id, NULL, 0,
+        mapping, lifecycle, status_out);
+}
+
+int mem_service_client_map_managed_reference_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct lingqu_object_ref_wire_v2 *reference,
+    const char *session_id, const char *operation_id,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out)
+{
+    if (!holder_node_id || !holder_node_id[0] ||
+        !holder_provider_incarnation)
+        return mem_service_client_invalid(status_out);
+    return mem_service_client_map_managed_reference_internal(
+        client, channel, reference, session_id, operation_id, holder_node_id,
+        holder_provider_incarnation, mapping, lifecycle, status_out);
 }
 
 static void mem_service_client_parse_provider_directory(

@@ -10,7 +10,8 @@ RoCE/TCP 或 DS4 transfer 路径，也不授予映射或解除隔离。
 managed store V2 增加 holder 的精确节点/incarnation 归属和 V2 绑定持久化，重启
 后保持隔离、等待实际对账，不能直接恢复 payload 访问。V1 checkpoint 仍可加载，
 其中未绑定 holder 按保守规则处理；原 wire snapshot 导出/覆盖不能替代该恢复域。
-安装 SDK 增加 node-aware opt-in acquire API，DS4 现有 transfer 热路径不变。
+安装 SDK 增加 node-aware opt-in acquire 及 reference map/unmap API，DS4 现有
+transfer 热路径不变。
 
 managed daemon 的运行期 provider 失联隔离按已绑定 holder 的精确节点/incarnation
 生效；旧版未绑定 holder 继续在任一 provider 失联时保守隔离。重新注册不能恢复

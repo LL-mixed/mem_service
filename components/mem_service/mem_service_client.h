@@ -810,11 +810,27 @@ int mem_service_client_map_managed_reference(
     struct mem_service_client_object_mapping *mapping,
     struct mem_service_client_reference_lifecycle *lifecycle,
     enum mem_service_wire_status *status_out);
+int mem_service_client_map_managed_reference_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    const struct lingqu_object_ref_wire_v2 *reference,
+    const char *session_id, const char *operation_id,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out);
 int mem_service_client_unmap_managed_reference(
     const struct mem_service_client *client,
     const struct mem_service_provider_channel *channel,
     struct mem_service_client_object_mapping *mapping,
     struct mem_service_client_reference_lifecycle *lifecycle,
+    enum mem_service_wire_status *status_out);
+int mem_service_client_unmap_managed_reference_at_node(
+    const struct mem_service_client *client,
+    const struct mem_service_provider_channel *channel,
+    struct mem_service_client_object_mapping *mapping,
+    struct mem_service_client_reference_lifecycle *lifecycle,
+    const char *holder_node_id, uint64_t holder_provider_incarnation,
     enum mem_service_wire_status *status_out);
 
 #endif

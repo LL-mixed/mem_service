@@ -48,7 +48,9 @@ version=<new-version> idempotency_key=<id>`、release。版本值显式指定，
 禁止 seal。多个视图应先全部写好，再逐项发布。此命令序列不需要手填 reference_hex。
 loopback 的匿名 payload 不能证明跨进程数据共享；真实 guest 的读写闭环另行验收。
 
-V2 reader 新增 `mem_service_client_map_managed_reference()` 与配套 unmap，
+V2 reader 新增 `mem_service_client_map_managed_reference()` 与配套 unmap；需要
+故障恢复归属的 guest 使用对应 `_at_node` 入口，并在 map 与不确定清理重试中
+传入同一 `(holder_node_id, provider_incarnation)`。
 使用独立 reference lifecycle 保留引用和不确定的 BEGIN。客户端先 resolve、
 acquire，再发起只读映射；服务在 `map-begin` 中核对完整登记引用、封存版本、
 实际 holder 和活动 home。映射采用 allocation-relative 子区间，原 raw 入口

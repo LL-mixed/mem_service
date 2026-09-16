@@ -11,7 +11,7 @@ static struct {
     unsigned state, maps, unmaps, unmap_failures, map_failures, snapshots;
     unsigned fail_before, fail_after;
     bool ready, timeout, snapshot_failure, admission_rejected, seen[7];
-    bool reference_mode;
+    bool reference_mode, holder_identity;
     unsigned replies[7];
     char keys[7][96];
 } peer;
@@ -35,9 +35,18 @@ int __wrap_mem_service_send_request_with_options(
     bool reference_begin = operation == MEM_SERVICE_WIRE_OP_REFERENCE_TRANSITION;
     if (reference_begin) {
         struct mem_service_reference_request decoded;
+        char holder_node[64] = "";
+        uint64_t holder_incarnation = mem_service_wire_payload_get_u64(
+            &view, "holder_provider_incarnation", 0);
+        bool has_holder_node = mem_service_wire_payload_get_string(
+            &view, "holder_node_id", holder_node, sizeof(holder_node));
         if (!peer.reference_mode || mem_service_reference_parse_request(payload_in, &decoded) ||
             decoded.action != MEM_SERVICE_REFERENCE_MAP_BEGIN ||
-            memcmp(&decoded.reference, &reference, sizeof(reference))) return 1;
+            memcmp(&decoded.reference, &reference, sizeof(reference)) ||
+            peer.holder_identity != has_holder_node ||
+            (peer.holder_identity &&
+             (strcmp(holder_node, "client-node") || holder_incarnation != 11)) ||
+            (!peer.holder_identity && holder_incarnation != 0)) return 1;
         action = MEM_SERVICE_CLIENT_MAPPING_BEGIN;
     }
     if (operation == MEM_SERVICE_WIRE_OP_INSPECT_ALLOCATION) {
@@ -176,7 +185,7 @@ int main(void)
     reference.object.key_hash = lingqu_object_ref_key_hash("object", 6);
     mem_service_client_init(&client, "unix:/unused");
     client.wire_options.max_attempts = 3;
-    for (unsigned mode = 0; mode < 2; ++mode) {
+    for (unsigned mode = 0; mode < 3; ++mode) {
     for (unsigned scenario = 0; scenario < 9; ++scenario) {
         struct mem_service_client_object_mapping mapping = {0};
         struct mem_service_client_mapping_lifecycle lifecycle = {0};
@@ -188,6 +197,7 @@ int main(void)
         memset(&peer, 0, sizeof(peer));
         peer.ready = true;
         peer.reference_mode = mode != 0;
+        peer.holder_identity = mode == 2;
         if (scenario == 0) peer.fail_after = MEM_SERVICE_CLIENT_MAPPING_BEGIN;
         if (scenario == 8) {
             peer.fail_after = MEM_SERVICE_CLIENT_MAPPING_BEGIN;
@@ -199,11 +209,18 @@ int main(void)
             peer.map_failures = 1;
             peer.fail_after = MEM_SERVICE_CLIENT_MAPPING_CANCEL;
         }
-        rc = mode ? mem_service_client_map_managed_reference(&client, &channel,
-            &reference, "owner", "fresh-operation", &mapping, &reference_lifecycle, &status) :
-            mem_service_client_map_managed_allocation(&client, &channel,
-            &allocation, "owner", "fresh-operation", MEM_SERVICE_CLIENT_MAP_READ,
-            &mapping, &lifecycle, &status);
+        if (mode == 2)
+            rc = mem_service_client_map_managed_reference_at_node(
+                &client, &channel, &reference, "owner", "fresh-operation",
+                "client-node", 11, &mapping, &reference_lifecycle, &status);
+        else if (mode == 1)
+            rc = mem_service_client_map_managed_reference(&client, &channel,
+                &reference, "owner", "fresh-operation", &mapping,
+                &reference_lifecycle, &status);
+        else
+            rc = mem_service_client_map_managed_allocation(&client, &channel,
+                &allocation, "owner", "fresh-operation",
+                MEM_SERVICE_CLIENT_MAP_READ, &mapping, &lifecycle, &status);
         if (scenario <= 3 || scenario == 8) {
             CHECK(rc != 0 && !mapping.base && !mapping.flags);
             if (scenario <= 1 || scenario == 8)
@@ -216,25 +233,40 @@ int main(void)
             if (scenario == 5) peer.fail_after = MEM_SERVICE_CLIENT_MAPPING_FINISH;
             if (scenario == 6) peer.fail_before = MEM_SERVICE_CLIENT_MAPPING_INSPECT;
             if (scenario == 7) peer.unmap_failures = 1;
-            rc = mode ? mem_service_client_unmap_managed_reference(&client, &channel,
-                &mapping, &reference_lifecycle, &status) :
-                mem_service_client_unmap_managed_allocation(&client, &channel, &mapping, &lifecycle, &status);
+            if (mode == 2)
+                rc = mem_service_client_unmap_managed_reference_at_node(
+                    &client, &channel, &mapping, &reference_lifecycle,
+                    "client-node", 11, &status);
+            else if (mode == 1)
+                rc = mem_service_client_unmap_managed_reference(&client,
+                    &channel, &mapping, &reference_lifecycle, &status);
+            else
+                rc = mem_service_client_unmap_managed_allocation(&client,
+                    &channel, &mapping, &lifecycle, &status);
             CHECK(rc == MEM_SERVICE_MAPPING_CLEANUP_REQUIRED);
             CHECK(active->pending && !mapping.base && !mapping.flags);
             CHECK(mapping.binding.mapped == (scenario != 5));
             peer.ready = false;
         }
         if (active->pending) {
-            rc = mode ? mem_service_client_unmap_managed_reference(&client, &channel,
-                &mapping, &reference_lifecycle, &status) :
-                mem_service_client_unmap_managed_allocation(&client, &channel, &mapping, &lifecycle, &status);
+            if (mode == 2)
+                rc = mem_service_client_unmap_managed_reference_at_node(
+                    &client, &channel, &mapping, &reference_lifecycle,
+                    "client-node", 11, &status);
+            else if (mode == 1)
+                rc = mem_service_client_unmap_managed_reference(&client,
+                    &channel, &mapping, &reference_lifecycle, &status);
+            else
+                rc = mem_service_client_unmap_managed_allocation(&client,
+                    &channel, &mapping, &lifecycle, &status);
             CHECK(rc == 0);
         }
         CHECK(!active->pending && !mapping.binding.mapped && peer.state == 0);
         CHECK(peer.maps <= 1 && peer.unmaps <= 2);
     }
     }
-    puts("reference_mapping_faults=pass scenarios=9 exact_subrange=1 cleanup=confirmed");
+    puts("reference_mapping_faults=pass scenarios=18 exact_subrange=1 "
+         "holder_identity=1 cleanup=confirmed");
     for (unsigned state = 2; state <= 3; ++state) {
         struct mem_service_client_object_mapping mapping = {0};
         struct mem_service_client_mapping_lifecycle lifecycle = {0};
