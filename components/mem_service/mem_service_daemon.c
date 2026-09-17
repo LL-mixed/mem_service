@@ -14936,6 +14936,326 @@ int mem_service_run_runtime_quota_fixture_check(void)
     return 0;
 }
 
+static uint64_t mem_service_fixture_record_backing_bytes(
+    const struct mem_service *svc)
+{
+    uint64_t bytes = 0;
+    size_t i;
+
+    if (svc == NULL) {
+        return 0;
+    }
+    for (i = 0; i < MEM_SERVICE_MAX_RECORDS; ++i) {
+        const struct mem_service_record *record = &svc->records[i];
+
+        if (!record->in_use) {
+            continue;
+        }
+        if (UINT64_MAX - bytes < record->object_backing_len) {
+            return UINT64_MAX;
+        }
+        bytes += record->object_backing_len;
+    }
+    return bytes;
+}
+
+int mem_service_run_semantic_pressure_fixture_check(void)
+{
+    static struct mem_service svc;
+    struct mem_service_daemon_limits limits;
+    struct mem_service_record *record;
+    char response[MEM_SERVICE_WIRE_MAX_PAYLOAD_LEN];
+    uint64_t initial_object_count;
+    uint64_t initial_byte_count;
+    uint64_t ttl_object_count;
+    uint64_t ttl_byte_count;
+    uint64_t capacity_object_count;
+    uint64_t capacity_byte_count;
+    uint64_t now_ms;
+
+    memset(&limits, 0, sizeof(limits));
+    if (mem_service_init(&svc, true, true, true) != 0) {
+        fprintf(stderr, "mem_service semantic-pressure-fixtures: init failed\n");
+        return 1;
+    }
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUT_OBJECT,
+            "key=pressure/capacity-victim\nowner=1\nversion=0\n"
+            "payload_kind=5\nbacking_len=256\nchecksum=1001\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: capacity victim setup failed\n");
+        return 1;
+    }
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY,
+            "request_id=pressure-client-a\nprefix_group=shared-prefix\n"
+            "group_id=pressure-prefix-group\nblock_hash=prefix-4\n"
+            "placement_node=1\nplacement_level=1\nhot_segment_id=104\n"
+            "result_segment_id=4\nstate=hot\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY,
+            "request_id=pressure-client-a\nprefix_group=shared-prefix\n"
+            "group_id=pressure-prefix-group\nblock_hash=prefix-8\n"
+            "placement_node=1\nplacement_level=1\nhot_segment_id=108\n"
+            "result_segment_id=8\nstate=hot\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_LOOKUP_PREFIX_ENTRY,
+            "request_id=pressure-client-a\nprefix_group=shared-prefix\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        strstr(response, "block_hash=prefix-8\n") == NULL ||
+        strstr(response, "last_result_segment=8\n") == NULL) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: longest prefix mismatch\n");
+        return 1;
+    }
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_REGISTER_PREFIX_ENTRY,
+            "request_id=pressure-client-a\nprefix_group=shared-prefix\n"
+            "group_id=pressure-prefix-group\nblock_hash=prefix-6-stale\n"
+            "placement_node=1\nplacement_level=1\nhot_segment_id=106\n"
+            "result_segment_id=6\nstate=hot\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_VERSION_CONFLICT) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: shorter prefix was accepted\n");
+        return 1;
+    }
+
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUT_OBJECT,
+            "key=pressure/client-a/decode-kv\nowner=1\nversion=2\n"
+            "payload_kind=5\nbacking_len=4096\nchecksum=2001\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUT_OBJECT,
+            "key=pressure/client-b/decode-kv\nowner=2\nversion=2\n"
+            "payload_kind=5\nbacking_len=8192\nchecksum=2002\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF,
+            "key=pressure/client-a/hidden-expired\nsession_id=pressure-client-a\n"
+            "model_key=pressure-model\nartifact_kind=hidden-range\n"
+            "artifact_id=hidden-expired\nowner=1\nversion=1\n"
+            "payload_kind=6\nbacking_len=1024\nchecksum=3001\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF,
+            "key=pressure/client-b/hidden-live\nsession_id=pressure-client-b\n"
+            "model_key=pressure-model\nartifact_kind=hidden-range\n"
+            "artifact_id=hidden-live\nowner=2\nversion=2\n"
+            "payload_kind=6\nbacking_len=2048\nchecksum=3002\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF,
+            "key=pressure/client-b/hidden-live\nsession_id=pressure-client-b\n"
+            "model_key=pressure-model\nartifact_kind=hidden-range\n"
+            "artifact_id=hidden-live\nowner=2\nversion=3\n"
+            "payload_kind=6\nbacking_len=3072\nchecksum=3003\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: semantic object setup failed\n");
+        return 1;
+    }
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_RESOLVE_RUNTIME_HANDOFF,
+            "key=pressure/client-b/hidden-live\n"
+            "expected_session_id=pressure-client-b\n"
+            "expected_model_key=pressure-model\n"
+            "expected_artifact_kind=hidden-range\n"
+            "expected_artifact_id=hidden-live\nexpected_owner=2\n"
+            "expected_version=2\nexpected_checksum=3002\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_STALE_REF ||
+        mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_RESOLVE_RUNTIME_HANDOFF,
+            "key=pressure/client-b/hidden-live\n"
+            "expected_session_id=pressure-client-b\n"
+            "expected_model_key=pressure-model\n"
+            "expected_artifact_kind=hidden-range\n"
+            "expected_artifact_id=hidden-live\nexpected_owner=2\n"
+            "expected_version=3\nexpected_checksum=3003\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            NULL) != MEM_SERVICE_WIRE_STATUS_OK) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: version invalidation mismatch\n");
+        return 1;
+    }
+
+    initial_object_count = (uint64_t)svc.record_count;
+    initial_byte_count = mem_service_fixture_record_backing_bytes(&svc);
+    if (initial_object_count != 9U || initial_byte_count != 16640U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_PREFIX_GROUP) != 1U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_REQUEST_PREFIX) != 1U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_BLOCK_META) != 2U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_KVCACHE_OBJECT) != 3U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_RUNTIME_HANDOFF) != 2U) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: initial accounting mismatch "
+                "objects=%" PRIu64 " bytes=%" PRIu64 "\n",
+                initial_object_count,
+                initial_byte_count);
+        return 1;
+    }
+
+    record = mem_service_find_record(&svc, "pressure/client-a/hidden-expired");
+    now_ms = mem_service_wall_clock_ms();
+    if (record == NULL || now_ms <= 120000U) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: ttl setup failed\n");
+        return 1;
+    }
+    record->object_publish_monotonic_ms = now_ms - 120000U;
+    memset(&limits, 0, sizeof(limits));
+    limits.max_retained_record_age_ms = 60000U;
+    limits.max_retained_record_kind = MEM_SERVICE_RECORD_RUNTIME_HANDOFF;
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUBLISH_RUNTIME_HANDOFF,
+            "key=pressure/client-a/hidden-trigger\nsession_id=pressure-client-a\n"
+            "model_key=pressure-model\nartifact_kind=hidden-range\n"
+            "artifact_id=hidden-trigger\nowner=1\nversion=4\n"
+            "payload_kind=6\nbacking_len=512\nchecksum=3004\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            &limits) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_find_record(&svc, "pressure/client-a/hidden-expired") != NULL ||
+        mem_service_find_record(&svc, "pressure/client-b/hidden-live") == NULL ||
+        mem_service_find_record(&svc, "pressure/client-a/hidden-trigger") == NULL) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: ttl invalidation mismatch\n");
+        return 1;
+    }
+    ttl_object_count = (uint64_t)svc.record_count;
+    ttl_byte_count = mem_service_fixture_record_backing_bytes(&svc);
+    if (ttl_object_count != 9U || ttl_byte_count != 16128U) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: ttl accounting mismatch "
+                "objects=%" PRIu64 " bytes=%" PRIu64 "\n",
+                ttl_object_count,
+                ttl_byte_count);
+        return 1;
+    }
+
+    memset(&limits, 0, sizeof(limits));
+    limits.max_retained_records = 9U;
+    if (mem_service_handle_operation_with_limits(
+            &svc,
+            MEM_SERVICE_WIRE_OP_PUT_OBJECT,
+            "key=pressure/client-b/capacity-new\nowner=2\nversion=5\n"
+            "payload_kind=5\nbacking_len=16384\nchecksum=4001\n",
+            response,
+            sizeof(response),
+            NULL,
+            NULL,
+            &limits) != MEM_SERVICE_WIRE_STATUS_OK ||
+        mem_service_find_record(&svc, "pressure/capacity-victim") != NULL ||
+        mem_service_find_record(&svc, "pressure/client-a/decode-kv") == NULL ||
+        mem_service_find_record(&svc, "pressure/client-b/decode-kv") == NULL ||
+        mem_service_find_record(&svc, "pressure/client-b/hidden-live") == NULL ||
+        mem_service_find_record(&svc, "pressure/client-b/capacity-new") == NULL) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: capacity eviction mismatch\n");
+        return 1;
+    }
+    capacity_object_count = (uint64_t)svc.record_count;
+    capacity_byte_count = mem_service_fixture_record_backing_bytes(&svc);
+    if (capacity_object_count != 9U || capacity_byte_count != 32256U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_KVCACHE_OBJECT) != 3U ||
+        mem_service_count_record_kind(&svc, MEM_SERVICE_RECORD_RUNTIME_HANDOFF) != 2U) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: capacity accounting mismatch "
+                "objects=%" PRIu64 " bytes=%" PRIu64 "\n",
+                capacity_object_count,
+                capacity_byte_count);
+        return 1;
+    }
+
+    if (mem_service_init(&svc, true, true, true) != 0 ||
+        svc.record_count != 0U ||
+        mem_service_fixture_record_backing_bytes(&svc) != 0U) {
+        fprintf(stderr,
+                "mem_service semantic-pressure-fixtures: baseline reset mismatch\n");
+        return 1;
+    }
+    printf("mem_service semantic-pressure-fixtures: status=ok "
+           "clients=2 longest_prefix_segments=8 shorter_prefix_rejected=1 "
+           "version_stale_rejected=1 ttl_pruned=1 capacity_evicted=1 "
+           "initial_objects=%" PRIu64 " initial_bytes=%" PRIu64 " "
+           "ttl_objects=%" PRIu64 " ttl_bytes=%" PRIu64 " "
+           "capacity_objects=%" PRIu64 " capacity_bytes=%" PRIu64 " "
+           "prefix_groups=1 prefix_entries=1 decode_kv_objects=3 "
+           "hidden_objects=2 final_objects=0 final_bytes=0\n",
+           initial_object_count,
+           initial_byte_count,
+           ttl_object_count,
+           ttl_byte_count,
+           capacity_object_count,
+           capacity_byte_count);
+    return 0;
+}
+
 int mem_service_run_retention_fixture_check(void)
 {
     static struct mem_service svc;

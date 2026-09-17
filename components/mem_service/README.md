@@ -601,7 +601,11 @@ a Qwen3 adapter inspect build:
 - `mem_service_daemon.c` contains the model-neutral Unix-socket service loop,
   public wire schema checks, the minimal object,
   prefix, KV, runtime handoff, execution artifact, and training artifact RPC
-  handlers, plus the read-only `status`/`list-records` admin handlers.
+  handlers, plus the read-only `status`/`list-records` admin handlers. The
+  `semantic-pressure-fixtures` CLI runs one two-client sequence that mixes
+  prefix, decode-KV, and hidden records of different sizes, checks longest-prefix
+  replacement, stale-version rejection, TTL pruning, bounded-capacity eviction,
+  object/byte accounting, and final return to the empty baseline.
 - `mem_service_daemon.h` contains the public daemon/client helper contract used
   by the CLI entrypoint.
 - `mem_service_runtime_config.h` contains runtime wait defaults, environment

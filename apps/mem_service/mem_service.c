@@ -90,7 +90,7 @@ static void usage(const char *argv0)
     printf(" [wire-fixtures] [wire-schema] [wire-schema-fixtures]");
     printf(" [store-fixtures] [journal-fixtures] [journal-compaction-fixtures] [journal-torn-recovery-fixtures] [config-fixtures]");
     printf(" [restore-policy-fixtures]");
-    printf(" [runtime-quota-fixtures] [retention-fixtures]");
+    printf(" [runtime-quota-fixtures] [semantic-pressure-fixtures] [retention-fixtures]");
     printf(" [checkpoint-retention-fixtures] [payload-gc-fixtures]");
     printf(" [record-retention-fixtures] [encryption-fixtures]");
     printf(" [metrics-export-fixtures] [collector-fixtures] [deployment-fixtures]");
@@ -14029,6 +14029,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "runtime-quota-fixtures") == 0) {
         return mem_service_run_runtime_quota_fixture_check();
+    }
+    if (strcmp(argv[1], "semantic-pressure-fixtures") == 0) {
+        return mem_service_run_semantic_pressure_fixture_check();
     }
     if (strcmp(argv[1], "retention-fixtures") == 0) {
         return mem_service_run_retention_fixture_check();

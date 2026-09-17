@@ -2340,6 +2340,24 @@ int main(int argc, char **argv)
         self.assertIn("max_payload_bytes=24", fixtures.stdout)
         self.assertIn("capacity_exceeded=1", fixtures.stdout)
 
+    def test_semantic_pressure_fixture_mixes_serving_objects_and_reclaims_baseline(self):
+        fixtures = self._run_client("semantic-pressure-fixtures")
+
+        self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)
+        self.assertIn("mem_service semantic-pressure-fixtures: status=ok", fixtures.stdout)
+        self.assertIn("clients=2", fixtures.stdout)
+        self.assertIn("longest_prefix_segments=8", fixtures.stdout)
+        self.assertIn("shorter_prefix_rejected=1", fixtures.stdout)
+        self.assertIn("version_stale_rejected=1", fixtures.stdout)
+        self.assertIn("ttl_pruned=1", fixtures.stdout)
+        self.assertIn("capacity_evicted=1", fixtures.stdout)
+        self.assertIn("initial_objects=9 initial_bytes=16640", fixtures.stdout)
+        self.assertIn("ttl_objects=9 ttl_bytes=16128", fixtures.stdout)
+        self.assertIn("capacity_objects=9 capacity_bytes=32256", fixtures.stdout)
+        self.assertIn("prefix_groups=1 prefix_entries=1", fixtures.stdout)
+        self.assertIn("decode_kv_objects=3 hidden_objects=2", fixtures.stdout)
+        self.assertIn("final_objects=0 final_bytes=0", fixtures.stdout)
+
     def test_retention_fixtures_cover_durable_audit_gc(self):
         fixtures = self._run_client("retention-fixtures")
         self.assertEqual(fixtures.returncode, 0, fixtures.stderr + fixtures.stdout)

@@ -384,6 +384,7 @@ host-artifact-smoke: linqu_mem_service_host
 	./linqu_mem_service_host upgrade-rollback-runtime-fixtures
 	./linqu_mem_service_host restore-policy-fixtures
 	./linqu_mem_service_host runtime-quota-fixtures
+	./linqu_mem_service_host semantic-pressure-fixtures
 	./linqu_mem_service_host retention-fixtures
 	./linqu_mem_service_host checkpoint-retention-fixtures
 	./linqu_mem_service_host payload-gc-fixtures
