@@ -42,3 +42,6 @@ class ObmmWorkerLedgerTest(unittest.TestCase):
 
     def test_noncanonical_frames_and_process_pointers_rejected(self):
         self.run_case('canonical')
+
+    def test_crash_injection_phase_allowlist(self):
+        self.run_case('fault-phases')

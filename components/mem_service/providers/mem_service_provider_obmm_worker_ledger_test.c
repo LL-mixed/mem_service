@@ -12,6 +12,7 @@ static void reseal(unsigned char *frame)
 int main(int argc, char **argv)
 {
     struct worker_ledger_entry in = {0}, out;
+    struct worker_config changed;
     unsigned char frame[WORKER_LEDGER_FRAME_BYTES], copy[WORKER_LEDGER_FRAME_BYTES];
     size_t i;
     assert(argc == 3 && !strcmp(argv[1], "--case"));
@@ -21,6 +22,13 @@ int main(int argc, char **argv)
     in.config.incarnation = UINT64_MAX - 1;
     in.config.readiness_generation = 37;
     in.config.allocation_granularity_bytes = 2097152;
+    strcpy(in.config.connect, "unix:/run/mem-service-test.sock");
+    strcpy(in.config.state, "/tmp/mem-service-test.state");
+    worker_config_set_binding(&in.config);
+    assert(worker_config_binding_matches(&in.config, &in.config));
+    changed = in.config;
+    changed.fast_allocation = true;
+    assert(!worker_config_binding_matches(&in.config, &changed));
     for (i = 0; i < 16; i++) in.config.kernel_instance[i] = (unsigned char)(i + 1);
     strcpy(in.work.key, "object-identity");
     in.work.generation = UINT64_C(0x1234567887654321);
@@ -48,7 +56,8 @@ int main(int argc, char **argv)
     in.reservation.descriptor.len = 96;
     for (i = 0; i < 96; i++) in.reservation.descriptor.bytes[i] = (unsigned char)(i * 17);
     assert(!ledger_encode(frame, &in));
-    assert(!memcmp(frame, "obmm-worker-ledger-v2", sizeof("obmm-worker-ledger-v2") - 1));
+    assert(!memcmp(frame, "obmm-worker-ledger-v3",
+                   sizeof("obmm-worker-ledger-v3") - 1));
     if (!strcmp(argv[2], "roundtrip")) {
         assert(!ledger_decode(frame, &out));
         assert(out.sequence == in.sequence);
@@ -94,6 +103,18 @@ int main(int argc, char **argv)
         in.reservation.descriptor.len = 0;
         memset(in.work.key, 'x', sizeof(in.work.key));
         assert(ledger_encode(copy, &in));
+    } else if (!strcmp(argv[2], "fault-phases")) {
+        static const char *phases[] = {
+            "reserve-intent", "reserved", "exported", "published",
+            "release-intent", "unexported", "retired", "reclaimed",
+        };
+        for (i = 0; i < sizeof(phases) / sizeof(phases[0]); ++i)
+            assert(worker_fault_injection_phase_supported(phases[i]));
+        assert(!worker_fault_injection_phase_supported(NULL));
+        assert(!worker_fault_injection_phase_supported(""));
+        assert(!worker_fault_injection_phase_supported("worker-start"));
+        assert(!worker_fault_injection_phase_supported("reserve-empty"));
+        assert(!worker_fault_injection_phase_supported("unknown"));
     } else return 2;
     printf("worker_ledger_%s=pass\n", argv[2]);
     return 0;

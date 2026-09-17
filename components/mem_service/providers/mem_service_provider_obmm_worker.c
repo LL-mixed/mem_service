@@ -96,7 +96,8 @@ static int read_config(const char *path, struct worker_config *config)
     if (!ferror(file) && (seen & 63U) == 63U && config->state[0] == '/' &&
         (!!(seen & (1U << 7)) == !!(seen & (1U << 8))) &&
         (!(seen & (1U << 7)) ||
-         (!strcmp(config->fault_injection_phase, "reserve-intent") &&
+         (worker_fault_injection_phase_supported(
+              config->fault_injection_phase) &&
           config->fault_injection_mode != WORKER_FAULT_INJECTION_NONE)) &&
         !(config->allocation_granularity_bytes & (config->allocation_granularity_bytes - 1)) &&
         sysconf(_SC_PAGESIZE) > 0 &&

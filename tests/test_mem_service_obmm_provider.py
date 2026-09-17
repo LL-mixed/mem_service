@@ -148,6 +148,24 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("原子归档", provider_readme)
         self.assertIn("禁止使用该命令跳过资源对账", provider_readme)
 
+    def test_worker_crash_injection_covers_durable_transaction_boundaries(self):
+        worker = (PROVIDERS / "mem_service_provider_obmm_worker.c").read_text()
+        ledger = (
+            PROVIDERS / "mem_service_provider_obmm_worker_ledger.h"
+        ).read_text()
+        provider_readme = (PROVIDERS / "README.md").read_text()
+        phases = (
+            "reserve-intent", "reserved", "exported", "published",
+            "release-intent", "unexported", "retired", "reclaimed",
+        )
+
+        self.assertIn("worker_fault_injection_phase_supported", worker)
+        for phase in phases:
+            self.assertIn(f'"{phase}"', ledger)
+            self.assertIn(f'`{phase}`', provider_readme)
+        self.assertIn("before the next operation", provider_readme)
+        self.assertIn("preceding complete frame", provider_readme)
+
     def test_qemu_conformance_uses_real_provider_through_neutral_channel(self):
         source = CONFORMANCE_SOURCE.read_text()
 

@@ -14,6 +14,26 @@ enum worker_fault_injection_mode {
     WORKER_FAULT_INJECTION_TORN_EXIT = 2,
 };
 
+static bool worker_fault_injection_phase_supported(const char *phase)
+{
+    static const char *phases[] = {
+        "reserve-intent",
+        "reserved",
+        "exported",
+        "published",
+        "release-intent",
+        "unexported",
+        "retired",
+        "reclaimed",
+    };
+    size_t i;
+
+    if (!phase || !phase[0]) return false;
+    for (i = 0; i < sizeof(phases) / sizeof(phases[0]); ++i)
+        if (!strcmp(phase, phases[i])) return true;
+    return false;
+}
+
 struct worker_config {
     char connect[256];
     char node[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];

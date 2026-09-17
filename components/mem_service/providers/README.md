@@ -251,16 +251,20 @@ Optional `fast_allocation=0|1` defaults to 0. When enabled, the checked export
 uses only the kernel's already-cleared cached pool pages without slow-path expansion;
 pool pressure can therefore reject an allocation even when other system RAM
 is available. This provider setting is useful for bounded pool validation.
-Crash validation may add both
-`fault_injection_phase=reserve-intent` and
+Crash validation may add both `fault_injection_phase=<phase>` and
 `fault_injection_mode=sync-exit|torn-exit`. The pair is optional and incomplete,
-duplicated, or unknown values are rejected. `sync-exit` fsyncs the complete
-reserve-intent frame and exits with code 86 before the allocation ioctl;
-`torn-exit` fsyncs exactly half of that frame and exits with the same code.
-Both modes bypass normal deregistration so that
-`quarantine-allocation-state` must withdraw the provider and preserve the
-ambiguous allocation as reconciliation-required. This validation-only control
-has no default and supports no other phase.
+duplicated, or unknown values are rejected. Supported phases are
+`reserve-intent`, `reserved`, `exported`, `published`, `release-intent`,
+`unexported`, `retired`, and `reclaimed`; they cover the durable boundaries
+after allocation intent, address reservation, backing export, service publish,
+release intent, physical unexport, segment retirement, and service reclaim.
+`sync-exit` fsyncs the complete selected phase frame and exits with code 86
+before the next operation. `torn-exit` fsyncs exactly half of that frame and
+exits with the same code, so the preceding complete frame remains the last
+trusted state. At `reserve-intent`, both exits still happen before the allocation
+ioctl. All modes bypass normal deregistration so that recovery tests must use
+the explicit resume or quarantine path and preserve any ambiguous allocation as
+reconciliation-required. This validation-only control has no default.
 The granularity must match the deployed OBMM pool profile (2097152 for the
 2 MiB guest profile); it is a power of two, at least the system page size.
 Logical object sizes remain unchanged. Backing and address reservations are
