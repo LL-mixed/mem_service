@@ -347,6 +347,12 @@ token 分别传入内核；`0x8` 导入标志要求新内核显式支持，旧�
 长度和 token 语义保留。失败不重试旧版导入。该路径要求匹配的平台组件；隔离
 开发快照已通过 64 KiB 双 guest 双向访问和回收，正式发布认证仍待完成。
 
+endpoint 打开时从 sysfs memory windows 枚举最多 64 个对齐的本机 import PA
+候选。首批候选保持原有按窗口顺序的放置，备用候选按窗口轮询加入，因此可覆盖
+多个不连续 window。远端 import 遇到明确的 `EEXIST` 地址冲突时自动尝试下一个
+未被当前 endpoint 使用的候选；其他错误立即失败关闭，所有候选冲突时报告池耗尽。
+该候选池只处理本机 import backing PA，与 GSVA 地址分配权威相互独立。
+
 受管理导入的正常 unimport 使用既有 UNMAP opcode 的 version=2：仅释放本地
 视图，完成 fence、删除 coherence/route 和刷新 TLB，不留下对象退役 tombstone。
 实际 Retire 事件继续保留 tombstone。旧 version=1 保持原退役语义；旧 QEMU

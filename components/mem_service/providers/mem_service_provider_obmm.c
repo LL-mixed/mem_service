@@ -29,6 +29,7 @@
 #define MEM_SERVICE_OBMM_DEFAULT_DEVICE "/dev/obmm"
 #define MEM_SERVICE_OBMM_DEFAULT_CNA_PATH \
     "/sys/bus/ub/devices/00001/primary_cna"
+#define MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES 64U
 
 struct mem_service_obmm_descriptor_v1 {
     uint64_t export_mem_id;
@@ -74,6 +75,7 @@ struct mem_service_obmm_mapping_slot {
     uint64_t view_len;
     uint64_t view_access;
     uint64_t compute_pins;
+    uint64_t import_pa;
     struct mem_service_obmm_descriptor_v1 descriptor;
     struct obmm_helpers_region region;
     struct mem_service_obmm_view view;
@@ -93,9 +95,11 @@ struct mem_service_obmm_context {
     uint64_t next_region_handle;
     uint64_t next_mapping_handle;
     uint64_t import_region_bytes;
+    uint32_t import_pa_candidate_count;
+    uint32_t next_import_pa_candidate;
     char instance[MEM_SERVICE_PROVIDER_INSTANCE_LEN];
-    uint64_t import_pas[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
-    bool import_osync[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
+    uint64_t import_pa_candidates[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES];
+    bool import_candidate_osync[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES];
     struct mem_service_obmm_descriptor_v1
         verified_peer_descriptors[MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS];
     struct mem_service_obmm_region_slot
@@ -421,6 +425,147 @@ int mem_service_provider_obmm_probe_device(const char *device_path,
 }
 
 #ifdef __linux__
+static bool mem_service_obmm_advance_import_pa(uint64_t *cursor,
+                                               uint64_t size,
+                                               uint64_t end)
+{
+    uint64_t next;
+
+    if (cursor == NULL || *cursor > UINT64_MAX - size) {
+        return false;
+    }
+    next = *cursor + size;
+    if (next > UINT64_MAX - (OBMM_POOL_HELPERS_IMPORT_ALIGN - 1U)) {
+        return false;
+    }
+    next = obmm_align_up_u64(next, OBMM_POOL_HELPERS_IMPORT_ALIGN);
+    if (next > end || size > end - next) {
+        return false;
+    }
+    *cursor = next;
+    return true;
+}
+
+static bool mem_service_obmm_add_import_pa_candidate(
+    uint64_t pa,
+    bool osync,
+    uint64_t candidates[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES],
+    bool candidate_osync[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES],
+    uint32_t *count)
+{
+    uint32_t i;
+
+    if (candidates == NULL || candidate_osync == NULL || count == NULL) {
+        return false;
+    }
+    for (i = 0; i < *count; ++i) {
+        if (candidates[i] == pa) {
+            return true;
+        }
+    }
+    if (*count >= MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES) {
+        return false;
+    }
+    candidates[*count] = pa;
+    candidate_osync[*count] = osync;
+    *count += 1U;
+    return true;
+}
+
+static uint32_t mem_service_obmm_fill_import_pa_candidates(
+    const struct obmm_helpers_window *windows,
+    int window_count,
+    uint64_t size,
+    uint64_t bias,
+    uint32_t initially_required,
+    uint64_t candidates[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES],
+    bool candidate_osync[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES])
+{
+    uint64_t cursors[OBMM_POOL_HELPERS_MAX_WINDOWS] = {0};
+    uint64_t ends[OBMM_POOL_HELPERS_MAX_WINDOWS] = {0};
+    bool available[OBMM_POOL_HELPERS_MAX_WINDOWS] = {0};
+    uint32_t count = 0;
+    int wi;
+
+    if (windows == NULL || window_count <= 0 ||
+        window_count > OBMM_POOL_HELPERS_MAX_WINDOWS || size == 0 ||
+        candidates == NULL || candidate_osync == NULL) {
+        return 0;
+    }
+    for (wi = 0; wi < window_count; ++wi) {
+        uint64_t start;
+
+        if (windows[wi].size_bytes <= bias ||
+            windows[wi].base_pa > UINT64_MAX - windows[wi].size_bytes ||
+            windows[wi].base_pa > UINT64_MAX - bias) {
+            continue;
+        }
+        start = windows[wi].base_pa + bias;
+        if (start > UINT64_MAX - (OBMM_POOL_HELPERS_IMPORT_ALIGN - 1U)) {
+            continue;
+        }
+        start = obmm_align_up_u64(start, OBMM_POOL_HELPERS_IMPORT_ALIGN);
+        ends[wi] = windows[wi].base_pa + windows[wi].size_bytes;
+        if (start > ends[wi] || size > ends[wi] - start) {
+            continue;
+        }
+        cursors[wi] = start;
+        available[wi] = true;
+    }
+
+    /* Preserve the historical first-window placement for active slots. */
+    for (wi = 0; wi < window_count && count < initially_required; ++wi) {
+        while (available[wi] && count < initially_required) {
+            (void)mem_service_obmm_add_import_pa_candidate(
+                cursors[wi], !windows[wi].is_cacheable,
+                candidates, candidate_osync, &count);
+            available[wi] = mem_service_obmm_advance_import_pa(
+                &cursors[wi], size, ends[wi]);
+        }
+    }
+
+    /* Add fallbacks round-robin so disjoint windows remain represented. */
+    while (count < MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES) {
+        bool progressed = false;
+
+        for (wi = 0; wi < window_count &&
+                     count < MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES; ++wi) {
+            if (!available[wi]) {
+                continue;
+            }
+            (void)mem_service_obmm_add_import_pa_candidate(
+                cursors[wi], !windows[wi].is_cacheable,
+                candidates, candidate_osync, &count);
+            available[wi] = mem_service_obmm_advance_import_pa(
+                &cursors[wi], size, ends[wi]);
+            progressed = true;
+        }
+        if (!progressed) {
+            break;
+        }
+    }
+    return count;
+}
+
+static uint32_t mem_service_obmm_build_import_pa_candidates(
+    uint64_t size,
+    uint64_t bias,
+    uint32_t initially_required,
+    uint64_t candidates[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES],
+    bool candidate_osync[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES])
+{
+    struct obmm_helpers_window windows[OBMM_POOL_HELPERS_MAX_WINDOWS];
+    int window_count = 0;
+
+    if (!obmm_parse_windows(windows, &window_count,
+                            obmm_parse_import_cache_mode())) {
+        return 0;
+    }
+    return mem_service_obmm_fill_import_pa_candidates(
+        windows, window_count, size, bias, initially_required,
+        candidates, candidate_osync);
+}
+
 static struct mem_service_obmm_region_slot *mem_service_obmm_find_region(
     struct mem_service_obmm_context *context,
     uint64_t handle)
@@ -625,6 +770,90 @@ static int mem_service_obmm_import_gsva(
     return 0;
 }
 
+static bool mem_service_obmm_import_pa_in_use(
+    const struct mem_service_obmm_context *context,
+    uint64_t import_pa)
+{
+    size_t i;
+
+    for (i = 0; i < MEM_SERVICE_PROVIDER_OBMM_MAX_MAPPINGS; ++i) {
+        if (context->mappings[i].active && context->mappings[i].imported &&
+            context->mappings[i].import_pa == import_pa) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int mem_service_obmm_import_remote(
+    struct mem_service_obmm_context *context,
+    const struct mem_service_obmm_descriptor_v1 *descriptor,
+    uint64_t *import_mem_id,
+    uint64_t *import_pa,
+    bool *import_osync)
+{
+    struct obmm_helpers_meta meta;
+    uint32_t start;
+    uint32_t attempt;
+    int last_error = ENOSPC;
+
+    if (context == NULL || descriptor == NULL || import_mem_id == NULL ||
+        import_pa == NULL || import_osync == NULL ||
+        context->import_pa_candidate_count == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    start = context->next_import_pa_candidate %
+            context->import_pa_candidate_count;
+    memset(&meta, 0, sizeof(meta));
+    meta.export_mem_id = descriptor->export_mem_id;
+    meta.remote_uba = descriptor->remote_uba;
+    meta.size = descriptor->size;
+    meta.token_id = descriptor->token_id;
+    meta.export_cna = descriptor->export_cna;
+
+    for (attempt = 0; attempt < context->import_pa_candidate_count;
+         ++attempt) {
+        uint32_t candidate =
+            (start + attempt) % context->import_pa_candidate_count;
+        uint64_t candidate_pa = context->import_pa_candidates[candidate];
+        int rc;
+
+        if (mem_service_obmm_import_pa_in_use(context, candidate_pa)) {
+            continue;
+        }
+        errno = 0;
+        if (descriptor->strict_gsva) {
+            rc = mem_service_obmm_import_gsva(
+                context, descriptor, candidate_pa, import_mem_id);
+        } else {
+            rc = obmm_do_import(context->obmm_fd, &meta,
+                                context->local_cna, candidate_pa,
+                                descriptor->token_id, import_mem_id);
+        }
+        if (rc == 0) {
+            context->next_import_pa_candidate =
+                (candidate + 1U) % context->import_pa_candidate_count;
+            *import_pa = candidate_pa;
+            *import_osync = context->import_candidate_osync[candidate];
+            return 0;
+        }
+        last_error = errno != 0 ? errno : EIO;
+        if (last_error != EEXIST) {
+            errno = last_error;
+            return -1;
+        }
+    }
+    fprintf(stderr,
+            "[mem_service_obmm] import PA candidates exhausted "
+            "count=%u bytes=%" PRIu64 " errno=%d\n",
+            context->import_pa_candidate_count,
+            context->import_region_bytes,
+            last_error);
+    errno = last_error;
+    return -1;
+}
+
 static int mem_service_obmm_unmap_view(struct mem_service_obmm_view *view)
 {
     int rc = 0;
@@ -725,11 +954,11 @@ static int mem_service_obmm_provider_map_remote_region(
     struct mem_service_obmm_context *context = opaque;
     struct mem_service_obmm_mapping_slot *slot = NULL;
     struct mem_service_obmm_descriptor_v1 descriptor;
-    struct obmm_helpers_meta meta;
     uint64_t import_mem_id = 0;
+    uint64_t import_pa = 0;
     bool local;
     bool map_osync;
-    size_t slot_index = 0;
+    bool import_osync = false;
     size_t i;
 
     if (context == NULL || context->closing || request == NULL || mapping_out == NULL ||
@@ -767,7 +996,6 @@ static int mem_service_obmm_provider_map_remote_region(
     for (i = 0; i < context->max_remote_mappings; ++i) {
         if (!context->mappings[i].active) {
             slot = &context->mappings[i];
-            slot_index = i;
             break;
         }
     }
@@ -776,35 +1004,20 @@ static int mem_service_obmm_provider_map_remote_region(
     }
     local = descriptor.strict_gsva ? descriptor.export_cna == context->local_cna :
                                     mem_service_obmm_descriptor_is_local(context, &descriptor);
-    map_osync = context->force_osync ||
-                (!local && context->import_osync[slot_index]);
     if (local) {
         import_mem_id = descriptor.export_mem_id;
-    } else if (descriptor.strict_gsva) {
-        if (mem_service_obmm_import_gsva(context, &descriptor,
-                                         context->import_pas[slot_index],
-                                         &import_mem_id) != 0) return -1;
-    } else {
-        memset(&meta, 0, sizeof(meta));
-        meta.export_mem_id = descriptor.export_mem_id;
-        meta.remote_uba = descriptor.remote_uba;
-        meta.size = descriptor.size;
-        meta.token_id = descriptor.token_id;
-        meta.export_cna = descriptor.export_cna;
-        if (obmm_do_import(context->obmm_fd,
-                           &meta,
-                           context->local_cna,
-                           context->import_pas[slot_index],
-                           descriptor.token_id,
-                           &import_mem_id) != 0) {
-            return -1;
-        }
+    } else if (mem_service_obmm_import_remote(
+                   context, &descriptor, &import_mem_id,
+                   &import_pa, &import_osync) != 0) {
+        return -1;
     }
+    map_osync = context->force_osync || (!local && import_osync);
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->imported = !local;
     slot->map_osync = map_osync;
     slot->handle = ++context->next_mapping_handle;
+    slot->import_pa = import_pa;
     slot->descriptor = descriptor;
     slot->region.fd = -1;
     slot->region.mem_id = import_mem_id;
@@ -1179,24 +1392,19 @@ int mem_service_provider_obmm_endpoint_open(
     context->obmm_fd = open(device, O_RDWR);
     if (context->obmm_fd < 0 ||
         !mem_service_obmm_parse_u32_file(cna_path, &context->local_cna) ||
-        !obmm_alloc_import_pas((int)config->max_remote_mappings,
-                               config->import_region_bytes,
-                               context->import_pas,
-                               context->import_osync,
-                               obmm_parse_import_cache_mode())) {
+        (context->import_pa_candidate_count =
+             mem_service_obmm_build_import_pa_candidates(
+                 config->import_region_bytes,
+                 config->import_pa_bias,
+                 config->max_remote_mappings,
+                 context->import_pa_candidates,
+                 context->import_candidate_osync)) <
+            config->max_remote_mappings) {
         if (context->obmm_fd >= 0) {
             close(context->obmm_fd);
         }
         free(context);
         return -1;
-    }
-    for (i = 0; i < config->max_remote_mappings; ++i) {
-        if (UINT64_MAX - context->import_pas[i] < config->import_pa_bias) {
-            close(context->obmm_fd);
-            free(context);
-            return -1;
-        }
-        context->import_pas[i] += config->import_pa_bias;
     }
     context->max_remote_mappings = config->max_remote_mappings;
     context->import_region_bytes = config->import_region_bytes;

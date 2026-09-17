@@ -15,6 +15,8 @@ static struct obmm_cmd_update_range last_update;
 
 static bool cleanup_mode, open_fails, unimport_fails, unexport_fails, close_fails;
 static unsigned cleanup_imports, cleanup_unimports, cleanup_unexports, cleanup_closes;
+static unsigned cleanup_import_eexist_count;
+static uint64_t cleanup_import_pas[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES];
 static unsigned cleanup_unmaps;
 static unsigned cleanup_opens, cleanup_maps;
 static void *failed_unmap_address;
@@ -117,7 +119,14 @@ mem_id __wrap_obmm_import(const struct obmm_mem_desc *desc, unsigned long flags,
 {
     if (cleanup_mode) {
         assert(desc && flags == (OBMM_IMPORT_FLAG_ALLOW_MMAP | 0x8UL));
+        assert(cleanup_imports < MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES);
+        cleanup_import_pas[cleanup_imports] = desc->addr;
         ++cleanup_imports;
+        if (cleanup_import_eexist_count != 0) {
+            --cleanup_import_eexist_count;
+            errno = EEXIST;
+            return OBMM_INVALID_MEMID;
+        }
         return 31;
     }
     struct private_v4 {
@@ -226,6 +235,8 @@ static struct mem_service_obmm_context *cleanup_context(
     cleanup_mode = true;
     open_fails = unimport_fails = unexport_fails = close_fails = false;
     cleanup_imports = cleanup_unimports = cleanup_unexports = cleanup_closes = 0;
+    cleanup_import_eexist_count = 0;
+    memset(cleanup_import_pas, 0, sizeof(cleanup_import_pas));
     cleanup_unmaps = 0;
     cleanup_opens = cleanup_maps = 0;
     failed_unmap_address = NULL;
@@ -239,7 +250,8 @@ static struct mem_service_obmm_context *cleanup_context(
     context->local_cna = 8;
     context->max_remote_mappings = 1;
     context->import_region_bytes = size;
-    context->import_pas[0] = 0x90000000;
+    context->import_pa_candidate_count = 1;
+    context->import_pa_candidates[0] = 0x90000000;
     context->mapping_verified = true;
     endpoint->implementation = context;
     return context;
@@ -262,6 +274,60 @@ static struct mem_service_mapping_request cleanup_request(void *base, size_t pag
     };
     assert(!mem_service_obmm_descriptor_encode(&descriptor, &request.remote_descriptor));
     return request;
+}
+
+static void test_import_pa_candidate_fallback(void)
+{
+    const uint64_t two_mb = 2U * 1024U * 1024U;
+    struct obmm_helpers_window windows[2] = {
+        {
+            .base_pa = 0x40000000000ULL,
+            .size_bytes = 3U * two_mb,
+            .is_cacheable = false,
+        },
+        {
+            .base_pa = 0x50000000000ULL,
+            .size_bytes = 2U * two_mb,
+            .is_cacheable = true,
+        },
+    };
+    uint64_t candidates[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES] = {0};
+    bool candidate_osync[MEM_SERVICE_OBMM_MAX_IMPORT_PA_CANDIDATES] = {0};
+    uint32_t count = mem_service_obmm_fill_import_pa_candidates(
+        windows, 2, two_mb, 0, 2, candidates, candidate_osync);
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    void *base = __real_mmap(NULL, page * 4, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    struct mem_service_mapping_request request;
+    struct mem_service_mapping mapping = {0};
+    struct mem_service_provider_obmm_endpoint endpoint = {0};
+    struct mem_service_obmm_context *context;
+
+    assert(count == 5);
+    assert(candidates[0] == 0x40000000000ULL && candidate_osync[0]);
+    assert(candidates[1] == 0x40000200000ULL && candidate_osync[1]);
+    assert(candidates[2] == 0x40000400000ULL && candidate_osync[2]);
+    assert(candidates[3] == 0x50000000000ULL && !candidate_osync[3]);
+    assert(candidates[4] == 0x50000200000ULL && !candidate_osync[4]);
+
+    assert(base != MAP_FAILED && !__real_munmap(base, page * 4));
+    request = cleanup_request(base, page);
+    context = cleanup_context(&endpoint, page * 4);
+    context->import_pa_candidate_count = 2;
+    context->import_pa_candidates[1] = 0xa0000000;
+    cleanup_import_eexist_count = 1;
+    assert(!mem_service_obmm_provider_map_remote_region(
+        context, &request, &mapping));
+    assert(cleanup_imports == 2);
+    assert(cleanup_import_pas[0] == 0x90000000);
+    assert(cleanup_import_pas[1] == 0xa0000000);
+    assert(context->mappings[0].import_pa == 0xa0000000);
+    assert(!mem_service_obmm_provider_unmap_remote_region(
+        context, mapping.handle));
+    assert(cleanup_unimports == 1);
+    assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
+    cleanup_mode = false;
+    puts("obmm_import_pa_fallback=pass candidates=5 first_conflict=retried");
 }
 
 static void test_compute_mapping_pins(void)
@@ -482,7 +548,8 @@ static void test_retained_descriptor_probe(void)
     assert(!mem_service_obmm_provider_map_remote_region(context, &request, &mapping));
     assert(mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
     context->max_remote_mappings = 2;
-    context->import_pas[1] = 0xa0000000;
+    context->import_pa_candidate_count = 2;
+    context->import_pa_candidates[1] = 0xa0000000;
     unsigned opens = cleanup_opens, maps = cleanup_maps, events = event_calls;
     assert(!mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
     assert(!mem_service_provider_obmm_endpoint_probe_descriptor(&endpoint, mapping.handle));
@@ -861,6 +928,7 @@ int main(int argc, char **argv)
     test_unmap_and_endpoint_failure_retention();
     test_failed_export_encoding_retains_resources();
     test_compute_mapping_pins();
+    test_import_pa_candidate_fallback();
     test_force_revoke_receipt_boundary();
     puts("obmm_cleanup_ownership=pass");
     puts("gsva_import_dual_token=pass gsva_visibility_fail_closed=pass page_guards=pass");
