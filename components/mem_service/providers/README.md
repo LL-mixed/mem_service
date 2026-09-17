@@ -76,6 +76,36 @@ or service readiness.
 
 ## OBMM Functional Conformance
 
+### Source-free deployment package
+
+`scripts/build_mem_service_obmm_package.py` builds and verifies the standalone
+OBMM deployment artifact. The build command accepts already compiled core and
+managed-provider binaries, the checked provider configuration, the exact
+service/platform revisions, and the OBMM UAPI version:
+
+```text
+python3 scripts/build_mem_service_obmm_package.py build \
+  --core <linqu_mem_service> \
+  --provider <linqu_mem_service_provider_obmm> \
+  --config apps/mem_service/configs/providers/obmm/worker.example.conf \
+  --service-revision <mem-service-sha> \
+  --platform-revision <platform-sha> \
+  --uapi-version <version> \
+  --output <package.tar>
+python3 scripts/build_mem_service_obmm_package.py verify \
+  --package <package.tar>
+```
+
+The artifact contains only the two runtime binaries, the strict worker config,
+and a hash-bound manifest. The provider binary statically links the platform
+adapter and GVA manager implementation; the manifest records that linkage and
+its revision. Runtime deployment therefore does not require an infer process,
+model weights, or a source checkout. Each node must copy the packaged config
+and assign its own `node_id`, monotonically fresh `incarnation`, absolute
+`state_file`, and reachable control endpoint before `serve-allocations` starts.
+The verifier rejects extra archive members, links, missing config fields, and
+payload/manifest hash mismatches.
+
 ### Worker 持久资源记录
 
 日志 v3 在首次资源操作前通过平台枚举接口取得 16-byte kernel_instance，
