@@ -192,6 +192,12 @@ node/incarnation 和粒度，逐条展示资源身份；损坏、截断、并发
 完整三方身份核对后续作。lost-home 恢复成功会归档旧 state file，之后只能用具有
 新 incarnation 的 replacement 配置创建新的 ledger。
 
+worker 对 provider refresh 和 allocation poll 的 wire `TIMEOUT` 保持原
+incarnation、ledger 与物理资源并重试，避免控制面短时不可调度被误判为 provider
+进程崩溃。服务端 lease 仍是失联上限；超过 lease 后，后续 refresh 会返回 provider
+身份失效，worker 按原 fail-closed 路径停止并保留 ledger。非超时传输错误、服务端
+拒绝和 incarnation 冲突不重试。
+
 ### 固定地址子区间
 
 缓存刷新必须保持当前视图的权限：`UPDATE_RANGE` 对 READ 视图使用 READONLY，

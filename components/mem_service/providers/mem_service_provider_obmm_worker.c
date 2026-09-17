@@ -36,6 +36,23 @@ static void stop_worker(int signal_number)
     worker_stop = 1;
 }
 
+static bool worker_control_timeout(
+    int result,
+    enum mem_service_wire_status status)
+{
+    return result != 0 && status == MEM_SERVICE_WIRE_STATUS_TIMEOUT;
+}
+
+static void worker_report_control_recovered(
+    uint64_t timeout_count,
+    const char *last_stage)
+{
+    if (timeout_count == 0) return;
+    printf("obmm-worker control recovered after timeouts=%" PRIu64
+           " last_stage=%s\n", timeout_count, last_stage);
+    fflush(stdout);
+}
+
 static int read_config(const char *path, struct worker_config *config)
 {
     static const char *names[] = {
@@ -2309,6 +2326,8 @@ static int worker_serve_allocations(const char *config_path, bool resume)
     enum mem_service_wire_status status;
     int device = -1, journal = -1, result = 1;
     bool signals = false, refreshed = false;
+    uint64_t control_timeout_count = 0;
+    const char *control_timeout_stage = "none";
     struct worker_reservation *reservations = NULL;
 
     if (read_config(config_path, &config)) {
@@ -2351,12 +2370,25 @@ static int worker_serve_allocations(const char *config_path, bool resume)
     }
     signals = true;
     while (!worker_stop) {
-        int poll_result;
+        int poll_result, refresh_result;
         struct worker_reservation *owned = NULL, *available = NULL;
         size_t i;
-        if (mem_service_client_provider_refresh(&client, config.node,
-                config.incarnation, config.readiness_generation, &directory, &status) ||
-            status != MEM_SERVICE_WIRE_STATUS_OK) goto done;
+        refresh_result = mem_service_client_provider_refresh(
+            &client, config.node, config.incarnation,
+            config.readiness_generation, &directory, &status);
+        if (refresh_result || status != MEM_SERVICE_WIRE_STATUS_OK) {
+            if (!worker_control_timeout(refresh_result, status)) goto done;
+            if (worker_stop) break;
+            if (control_timeout_count == 0) {
+                printf("obmm-worker control timeout stage=provider-refresh "
+                       "action=retry-within-provider-lease\n");
+                fflush(stdout);
+            }
+            ++control_timeout_count;
+            control_timeout_stage = "provider-refresh";
+            nanosleep(&interval, NULL);
+            continue;
+        }
         if (!refreshed) {
             printf("obmm-worker initial refresh provider_directory_ready=%u\n",
                    directory.directory_ready ? 1U : 0U);
@@ -2372,11 +2404,28 @@ static int worker_serve_allocations(const char *config_path, bool resume)
         poll_result = mem_service_client_poll_allocation(&client, config.node,
                 config.incarnation, 0, &work, &status);
         if (worker_stop) break;
+        if (worker_control_timeout(poll_result, status)) {
+            if (control_timeout_count == 0) {
+                printf("obmm-worker control timeout stage=allocation-poll "
+                       "action=retry-within-provider-lease\n");
+                fflush(stdout);
+            }
+            ++control_timeout_count;
+            control_timeout_stage = "allocation-poll";
+            nanosleep(&interval, NULL);
+            continue;
+        }
         if (poll_result >= 0 && status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND) {
+            worker_report_control_recovered(
+                control_timeout_count, control_timeout_stage);
+            control_timeout_count = 0;
             nanosleep(&interval, NULL);
             continue;
         }
         if (poll_result || status != MEM_SERVICE_WIRE_STATUS_OK) goto done;
+        worker_report_control_recovered(
+            control_timeout_count, control_timeout_stage);
+        control_timeout_count = 0;
         printf("obmm-worker work key=%s generation=%" PRIu64 " state=%s\n",
                work.key, work.generation, work.state);
         fflush(stdout);

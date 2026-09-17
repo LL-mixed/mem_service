@@ -184,6 +184,29 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("before the next operation", provider_readme)
         self.assertIn("preceding complete frame", provider_readme)
 
+    def test_worker_retries_only_wire_timeouts_within_provider_lease(self):
+        worker = (PROVIDERS / "mem_service_provider_obmm_worker.c").read_text()
+        provider_readme = (PROVIDERS / "README.md").read_text()
+
+        retry_classifier = worker.split(
+            "static bool worker_control_timeout(", 1
+        )[1].split("static void worker_report_control_recovered(", 1)[0]
+        self.assertIn("result != 0", retry_classifier)
+        self.assertIn(
+            "status == MEM_SERVICE_WIRE_STATUS_TIMEOUT", retry_classifier
+        )
+        serve_loop = worker.split(
+            "static int worker_serve_allocations(", 1
+        )[1].split(
+            "int mem_service_provider_obmm_serve_allocations(", 1
+        )[0]
+        self.assertEqual(serve_loop.count("worker_control_timeout("), 2)
+        self.assertIn("stage=provider-refresh", serve_loop)
+        self.assertIn("stage=allocation-poll", serve_loop)
+        self.assertIn("action=retry-within-provider-lease", serve_loop)
+        self.assertIn("服务端 lease 仍是失联上限", provider_readme)
+        self.assertIn("非超时传输错误", provider_readme)
+
     def test_qemu_conformance_uses_real_provider_through_neutral_channel(self):
         source = CONFORMANCE_SOURCE.read_text()
 
