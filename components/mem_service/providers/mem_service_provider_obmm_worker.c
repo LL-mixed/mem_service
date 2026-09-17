@@ -1765,6 +1765,34 @@ done:
     return result;
 }
 
+static bool worker_node_allocation_window(
+    const struct obmm_cmd_gsva_aperture *aperture,
+    uint64_t alignment, uint64_t backing_size,
+    uint64_t *first_out, uint64_t *candidate_count_out)
+{
+    uint64_t slice_size, slice_offset, slice_end_offset;
+    uint64_t slice_base, slice_end, first;
+
+    if (!aperture || !alignment || !backing_size || !first_out ||
+        !candidate_count_out || !aperture->base || !aperture->size ||
+        !aperture->node_count || aperture->node_id >= aperture->node_count ||
+        aperture->size > UINT64_MAX - aperture->base) return false;
+    slice_size = aperture->size / aperture->node_count;
+    if (!slice_size) return false;
+    slice_offset = slice_size * aperture->node_id;
+    slice_end_offset = aperture->node_id + 1U == aperture->node_count
+                           ? aperture->size
+                           : slice_offset + slice_size;
+    slice_base = aperture->base + slice_offset;
+    slice_end = aperture->base + slice_end_offset;
+    if (slice_base > UINT64_MAX - (alignment - 1U)) return false;
+    first = (slice_base + alignment - 1U) & ~(alignment - 1U);
+    if (first >= slice_end || backing_size > slice_end - first) return false;
+    *first_out = first;
+    *candidate_count_out = (slice_end - first - backing_size) / alignment + 1U;
+    return true;
+}
+
 static int allocate_work(int device, int journal,
     const struct worker_config *config, const struct mem_service_client *client,
     const struct obmm_cmd_gsva_aperture *aperture,
@@ -1778,9 +1806,12 @@ static int allocate_work(int device, int journal,
     enum mem_service_wire_status status;
     uint64_t alignment = work->alignment_bytes;
     uint64_t granularity = config->allocation_granularity_bytes;
-    uint64_t backing_size, first_aligned;
+    uint64_t backing_size, first_aligned, candidate_count;
+    uint64_t start_candidate, attempt;
+    const struct obmm_gsva_segment_desc_v1 empty = {0};
     long page_size = sysconf(_SC_PAGESIZE);
     int export_result;
+    bool segment_allocated = false;
 
     if (strcmp(work->state, "allocating") || work->capabilities != MEM_SERVICE_MANAGED_CAP_MAP ||
         strcmp(work->home_node, config->node) ||
@@ -1797,15 +1828,9 @@ static int allocate_work(int device, int journal,
     backing_size = (work->size_bytes + granularity - 1) & ~(granularity - 1);
     if (alignment && (alignment & (alignment - 1))) return -1;
     if (alignment < granularity) alignment = granularity;
-    if (aperture->base > UINT64_MAX - (alignment - 1))
+    if (!worker_node_allocation_window(aperture, alignment, backing_size,
+                                       &first_aligned, &candidate_count))
         return WORKER_ALLOCATE_CAPACITY;
-    first_aligned = (aperture->base + alignment - 1) & ~(alignment - 1);
-    if (first_aligned - aperture->base > aperture->size ||
-        backing_size > aperture->size - (first_aligned - aperture->base))
-        return WORKER_ALLOCATE_CAPACITY;
-    /* The kernel owns interval selection and reuse. This zero request must
-     * not be replaced by a second worker-side address allocator. */
-    request.requested_home_va = 0;
     if (record_phase(journal, config, work, reservation,
                      work->generation, "reserve-intent", 0, 0)) return -1;
     reservation->occupied = true;
@@ -1818,30 +1843,40 @@ static int allocate_work(int device, int journal,
     request.cache_policy = GSVA_CACHE_POLICY_WRITE_THROUGH;
     request.requested_p_tag = OBMM_GSVA_P_TAG_AUTO;
     request.access_flags = OBMM_GSVA_ACCESS_READ | OBMM_GSVA_ACCESS_WRITE;
-    if (gva_manager_allocate_segment(device, &request)) {
-        const struct obmm_gsva_segment_desc_v1 empty = {0};
-        /* Only this direct allocation API guarantees ENOSPC before reserving
-         * an interval. Lost output (EFAULT) and contradictory output remain
-         * unknown, even if no segment ID is visible to this process. */
-        if (errno == ENOSPC && !memcmp(&request.desc, &empty, sizeof(empty))) {
-            if (record_phase(journal, config, work, reservation,
-                             work->generation, "reserve-empty", 0, 0))
-                return WORKER_ALLOCATE_ERROR;
-            memset(reservation, 0, sizeof(*reservation));
-            return WORKER_ALLOCATE_CAPACITY;
+    start_candidate = (work->generation - 1U) % candidate_count;
+    for (attempt = 0; attempt < candidate_count; ++attempt) {
+        uint64_t candidate = (start_candidate + attempt) % candidate_count;
+        int allocation_error;
+
+        request.requested_home_va = first_aligned + candidate * alignment;
+        memset(&request.desc, 0, sizeof(request.desc));
+        if (!gva_manager_allocate_segment(device, &request)) {
+            segment_allocated = true;
+            break;
         }
+        allocation_error = errno;
+        if (allocation_error == EBUSY &&
+            !memcmp(&request.desc, &empty, sizeof(empty))) continue;
+        if (allocation_error == ENOSPC &&
+            !memcmp(&request.desc, &empty, sizeof(empty))) break;
         reservation->segment = request.desc;
         (void)record_phase(journal, config, work, reservation,
                            work->generation, "reserve-unknown",
                            request.desc.segment_id, 0);
-        return -1;
+        return WORKER_ALLOCATE_ERROR;
+    }
+    if (!segment_allocated) {
+        if (record_phase(journal, config, work, reservation,
+                         work->generation, "reserve-empty", 0, 0))
+            return WORKER_ALLOCATE_ERROR;
+        memset(reservation, 0, sizeof(*reservation));
+        return WORKER_ALLOCATE_CAPACITY;
     }
     reservation->segment = request.desc;
     if (record_phase(journal, config, work, reservation,
                      work->generation, "reserved", request.desc.segment_id, 0)) return -1;
-    if (request.desc.home_va < aperture->base ||
-        request.desc.home_va - aperture->base > aperture->size ||
-        request.desc.size > aperture->size - (request.desc.home_va - aperture->base)) return -1;
+    if (request.desc.home_va != request.requested_home_va ||
+        request.desc.size != backing_size) return WORKER_ALLOCATE_ERROR;
     export_result = gva_manager_export_segment_checked(device, &request.desc,
                                                       config->fast_allocation, &exported);
     if (export_result) {
@@ -2300,7 +2335,8 @@ static int worker_serve_allocations(const char *config_path, bool resume)
         journal = create_state(&config);
         if (journal < 0) goto done;
     }
-    printf("obmm-worker address_reuse=kernel-confirmed home_policy=single-owner "
+    printf("obmm-worker address_reuse=kernel-confirmed "
+           "home_policy=node-partitioned-probe "
            "forced_revoke=unsupported recovery=quarantine\n");
     printf("obmm-worker starting provider refresh node=%s startup=%s\n",
            config.node, resume ? "resume" : "new");

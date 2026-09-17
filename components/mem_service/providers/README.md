@@ -305,13 +305,18 @@ uncertain steps stop processing and retain state for reconciliation. This
 path relies on clients unmapping before releasing their holders; forced
 revocation and recovery require separate validation.
 
-地址复用由 kernel 区间分配器统一执行：worker 提交 requested_home_va=0，
-不维护第二份空闲表或单调游标。匹配的平台必须在 managed unmap 时停止新访问、
-等待完整 CPU/PTO 调用退出、完成 fence/route/TLB 清理；SDK 确认全部映射
-终结后才允许 holder release。worker 确认 unexport、segment retire 和 service
-reclaim 后继续分配；同址新对象必须使用内核返回的新 segment/token 和服务
-generation。任何不确定清理均停止 worker，保留状态；已有 state 文件仍禁止
-重启，不提供跨重启重用或强制撤销。此接入须经实际 guest 复用/旧身份测试验收。
+地址复用由 kernel 区间分配器确认。worker 按 aperture 的 `(node_id,
+node_count)` 将全局地址范围切成互斥 node slice，使用服务生成的全局 allocation
+generation 选择首个对齐候选，再以精确 `requested_home_va` 循环探测该 slice。
+只有 `EBUSY` 且 descriptor 全零时才允许尝试下一个候选；worker 不维护第二份
+空闲表或单调游标，最终占用和复用结果仍以内核为准。该规则允许非连续地址，
+同时避免不同 home provider 独立执行 kernel first-fit 时选中同一 GSVA。匹配的
+平台必须在 managed unmap 时停止新访问、等待完整 CPU/PTO 调用退出、完成
+fence/route/TLB 清理；SDK 确认全部映射终结后才允许 holder release。worker
+确认 unexport、segment retire 和 service reclaim 后继续分配；同址新对象必须
+使用内核返回的新 segment/token 和服务 generation。任何不确定清理均停止
+worker，保留状态；已有 state 文件仍禁止重启，不提供跨重启重用或强制撤销。
+此接入须经实际 guest 复用/旧身份测试验收。
 
 Capacity rejection before the first kernel allocation uses the existing
 generation-checked retire and home reclaim confirmations. The worker records
