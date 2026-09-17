@@ -117,6 +117,17 @@ writeback、cache/TLB 失效、CPU window unmap 和 tombstone 后才返回成功
 descriptor 不完整、服务回复冲突或 receipt 不完整时立即停止；物理失败路径绝不
 提交 receipt。重试通过 QEMU tombstone 和服务持久 receipt 幂等收敛。
 
+`fence-terminated-holder-state --config <old> --replacement-config <new>
+--terminated-kernel-instance <32-hex>` 只覆盖外部编排器已明确确认旧 guest/QEMU
+终止后的 holder 恢复。调用者提供被终止实例的 kernel identity；该参数本身不构成
+终止证明。命令要求 replacement incarnation 已登记且 required provider directory
+ready，当前 kernel identity 与被终止实例不同，两次完整 inventory 均稳定且为空。
+随后对每个旧 holder 的严格 descriptor 提交本地撤销检查：只接受 replacement 中
+精确 route 不存在，或该 route 当场完成完整 `LOCAL_REVOKE`；其他结果不提交
+receipt。每笔 receipt 前再次核对同一 kernel inventory revision。旧 guest 是否已经
+退出必须由平台 supervisor 的进程/VM 终止回执证明；网络 lease 到期、provider
+替换或调用者提供一个不同的随机 identity 均不足以调用本命令。
+
 `prepare-holder-rejoin --config <old> --replacement-config <new>` 在上述 fencing
 完成后为 replacement worker 准备同一路径重启。它只接受恰好包含一个完整
 `worker-start` 帧的旧 ledger；任何 home allocation 帧、损坏、截断或活动 writer

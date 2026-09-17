@@ -20,6 +20,9 @@ static void mem_service_obmm_cli_usage(const char *program)
                     "--replacement-config <new-path>\n", program);
     fprintf(stderr, "       %s fence-holder-state --config <old-path> "
                     "--replacement-config <new-path>\n", program);
+    fprintf(stderr, "       %s fence-terminated-holder-state --config <old-path> "
+                    "--replacement-config <new-path> "
+                    "--terminated-kernel-instance <32-hex>\n", program);
     fprintf(stderr, "       %s prepare-holder-rejoin --config <old-path> "
                     "--replacement-config <new-path>\n", program);
 #endif
@@ -77,6 +80,13 @@ int main(int argc, char **argv)
         strcmp(argv[2], "--config") == 0 &&
         strcmp(argv[4], "--replacement-config") == 0) {
         return mem_service_provider_obmm_fence_holder_state(argv[3], argv[5]);
+    }
+    if (strcmp(argv[1], "fence-terminated-holder-state") == 0 && argc == 8 &&
+        strcmp(argv[2], "--config") == 0 &&
+        strcmp(argv[4], "--replacement-config") == 0 &&
+        strcmp(argv[6], "--terminated-kernel-instance") == 0) {
+        return mem_service_provider_obmm_fence_terminated_holder_state(
+            argv[3], argv[5], argv[7]);
     }
     if (strcmp(argv[1], "prepare-holder-rejoin") == 0 && argc == 6 &&
         strcmp(argv[2], "--config") == 0 &&

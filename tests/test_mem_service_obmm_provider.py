@@ -148,6 +148,22 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("原子归档", provider_readme)
         self.assertIn("禁止使用该命令跳过资源对账", provider_readme)
 
+    def test_terminated_holder_fence_requires_reboot_and_route_evidence(self):
+        cli = (PROVIDERS / "mem_service_provider_obmm_cli.c").read_text()
+        worker = (PROVIDERS / "mem_service_provider_obmm_worker.c").read_text()
+        provider_readme = (PROVIDERS / "README.md").read_text()
+
+        self.assertIn("fence-terminated-holder-state", cli)
+        self.assertIn("--terminated-kernel-instance", cli)
+        self.assertIn("terminated-kernel-still-active", worker)
+        self.assertIn("replacement-inventory-not-empty", worker)
+        self.assertIn("replacement-snapshot-changed", worker)
+        self.assertIn("GSVA_ERR_ROUTE_MISSING", worker)
+        self.assertIn("replacement-route-state-unproven", worker)
+        self.assertIn("obmm-holder-reboot-", worker)
+        self.assertIn("该参数本身不构成", provider_readme)
+        self.assertIn("平台 supervisor", provider_readme)
+
     def test_worker_crash_injection_covers_durable_transaction_boundaries(self):
         worker = (PROVIDERS / "mem_service_provider_obmm_worker.c").read_text()
         ledger = (

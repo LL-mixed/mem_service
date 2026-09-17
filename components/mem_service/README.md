@@ -91,6 +91,12 @@ segment 身份，日志半写也没有完整帧证明，两者继续隔离。hol
 key/token 的 route、VMA、cache、TLB 与设备访问排空后才提交 receipt。lost-home
 入口仍只证明“旧 home kernel 已消失”的恢复子集，同-kernel 入口只证明 ledger
 可确定归属的 worker 续作。
+整个 holder guest 已由外部 supervisor 确认终止时，OBMM provider 另提供
+`fence-terminated-holder-state`。它要求显式传入被终止 kernel identity，并核对
+replacement kernel identity 已变化、库存稳定且为空、旧 descriptor 在当前 QEMU
+中无 route，之后才提交 holder receipt。kernel identity 参数只绑定被终止实例，
+不能替代 supervisor 的 VM/进程终止回执；单纯 lease 到期或 provider replacement
+不允许调用该入口。
 
 quarantined_bytes 单独计量已确认 backing；尚未 publish 的隔离意图保持 in_flight，
 已确认字节数为零不证明 provider 未分配。隔离对象的 holder、export/import 仍

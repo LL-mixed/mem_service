@@ -147,6 +147,10 @@ int mem_service_provider_obmm_recover_allocation_state(
 int mem_service_provider_obmm_fence_holder_state(
     const char *config_path,
     const char *replacement_config_path);
+int mem_service_provider_obmm_fence_terminated_holder_state(
+    const char *config_path,
+    const char *replacement_config_path,
+    const char *terminated_kernel_instance);
 int mem_service_provider_obmm_prepare_holder_rejoin(
     const char *config_path,
     const char *replacement_config_path);

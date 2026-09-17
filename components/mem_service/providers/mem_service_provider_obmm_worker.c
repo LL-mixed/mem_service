@@ -628,6 +628,208 @@ done:
     return result;
 }
 
+static int worker_parse_kernel_instance(
+    const char *text,
+    unsigned char instance[16])
+{
+    size_t i;
+    bool nonzero = false;
+
+    if (!text || strlen(text) != 32 || !instance) return -1;
+    for (i = 0; i < 16; ++i) {
+        unsigned high, low;
+        char a = text[i * 2], b = text[i * 2 + 1];
+
+        if (a >= '0' && a <= '9') high = (unsigned)(a - '0');
+        else if (a >= 'a' && a <= 'f') high = (unsigned)(a - 'a' + 10);
+        else return -1;
+        if (b >= '0' && b <= '9') low = (unsigned)(b - '0');
+        else if (b >= 'a' && b <= 'f') low = (unsigned)(b - 'a' + 10);
+        else return -1;
+        instance[i] = (unsigned char)((high << 4) | low);
+        nonzero = nonzero || instance[i] != 0;
+    }
+    return nonzero ? 0 : -1;
+}
+
+/*
+ * Fence holders after an external supervisor has positively terminated the
+ * old guest.  The supplied kernel identity names that terminated instance;
+ * it is not, by itself, a termination proof.  A different, stable and empty
+ * replacement kernel plus an absent exact route proves that no old local
+ * mapping survived into the replacement before the service receipt is sent.
+ */
+int mem_service_provider_obmm_fence_terminated_holder_state(
+    const char *config_path,
+    const char *replacement_config_path,
+    const char *terminated_kernel_instance)
+{
+    struct worker_config old_config, replacement;
+    struct mem_service_client client;
+    struct mem_service_client_provider_directory directory;
+    struct mem_service_client_allocation work, fenced;
+    struct mem_service_provider_descriptor descriptor;
+    struct obmm_cmd_gsva_enumerate_v1 cursor = {
+        .version = OBMM_GSVA_ABI_VERSION,
+    };
+    enum mem_service_wire_status status;
+    unsigned char terminated_instance[16] = {0};
+    unsigned char current_instance[16] = {0};
+    uint64_t after_generation = 0, revision = 0;
+    size_t fenced_allocations = 0, inventory_count = 0, i;
+    const char *reason = "invalid-config";
+    int device = -1, result = 1;
+    int last_gsva_error = GSVA_ERR_BAD_VERSION;
+    int last_errno = 0;
+    bool current_instance_seen = false;
+    bool receipt_attempted = false;
+
+    if (read_config(config_path, &old_config) ||
+        read_config(replacement_config_path, &replacement) ||
+        worker_parse_kernel_instance(
+            terminated_kernel_instance, terminated_instance)) return 2;
+    if (!worker_replacement_config_valid(&old_config, &replacement)) return 2;
+
+    reason = "obmm-device-unavailable";
+    device = open("/dev/obmm", O_RDWR | O_CLOEXEC);
+    if (device < 0) goto done;
+    reason = "replacement-inventory-unavailable";
+    for (;;) {
+        if (gva_manager_enumerate_segments(device, &cursor)) goto done;
+        reason = "terminated-kernel-still-active";
+        if (!memcmp(terminated_instance, cursor.kernel_instance, 16)) goto done;
+        reason = "replacement-inventory-inconsistent";
+        if (!current_instance_seen) {
+            memcpy(current_instance, cursor.kernel_instance, 16);
+            current_instance_seen = true;
+        } else if (memcmp(current_instance, cursor.kernel_instance, 16)) {
+            goto done;
+        }
+        if (cursor.flags == OBMM_GSVA_ENUM_END) {
+            revision = cursor.revision;
+            break;
+        }
+        if (cursor.flags != OBMM_GSVA_ENUM_ENTRY) goto done;
+        ++inventory_count;
+    }
+    reason = "replacement-inventory-not-empty";
+    if (inventory_count) goto done;
+    reason = "replacement-snapshot-changed";
+    if (gva_manager_enumerate_segments(device, &cursor) ||
+        cursor.flags != OBMM_GSVA_ENUM_END || cursor.revision != revision ||
+        memcmp(current_instance, cursor.kernel_instance, 16)) goto done;
+
+    mem_service_client_init(&client, replacement.connect);
+    reason = "replacement-provider-not-ready";
+    if (mem_service_client_provider_refresh(
+            &client, replacement.node, replacement.incarnation,
+            replacement.readiness_generation, &directory, &status) ||
+        status != MEM_SERVICE_WIRE_STATUS_OK || !directory.directory_ready) {
+        goto done;
+    }
+
+    for (;;) {
+        char idempotency_key[MEM_SERVICE_MANAGED_IDEMPOTENCY_KEY_LEN];
+        int gsva_error = GSVA_ERR_BAD_VERSION;
+        int revoke_result;
+        bool old_holder_remains;
+        const char *route_state;
+        int poll_result = mem_service_client_poll_holder_recovery_allocation(
+            &client, replacement.node, replacement.incarnation,
+            old_config.incarnation, after_generation, &work, &status);
+
+        receipt_attempted = false;
+        last_gsva_error = GSVA_ERR_BAD_VERSION;
+        last_errno = 0;
+        if (poll_result >= 0 && status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND)
+            break;
+        reason = "holder-recovery-poll-failed";
+        if (poll_result || status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(work.state, "quarantined") || !work.generation ||
+            work.generation <= after_generation || !work.provider_backed ||
+            !work.descriptor_len ||
+            work.descriptor_len > sizeof(descriptor.bytes) ||
+            !worker_allocation_has_holder(
+                &work, old_config.node, old_config.incarnation)) {
+            goto done;
+        }
+        memset(&descriptor, 0, sizeof(descriptor));
+        descriptor.len = work.descriptor_len;
+        memcpy(descriptor.bytes, work.descriptor, work.descriptor_len);
+        errno = 0;
+        revoke_result = mem_service_provider_obmm_force_revoke_local(
+            device, &descriptor, &gsva_error);
+        if (!revoke_result) {
+            route_state = "revoked";
+        } else if (gsva_error == GSVA_ERR_ROUTE_MISSING && errno == 0) {
+            route_state = "absent-after-kernel-replacement";
+        } else {
+            reason = "replacement-route-state-unproven";
+            last_gsva_error = gsva_error;
+            last_errno = errno;
+            goto done;
+        }
+        reason = "replacement-snapshot-changed";
+        if (gva_manager_enumerate_segments(device, &cursor) ||
+            cursor.flags != OBMM_GSVA_ENUM_END || cursor.revision != revision ||
+            memcmp(current_instance, cursor.kernel_instance, 16)) goto done;
+        if (snprintf(idempotency_key, sizeof(idempotency_key),
+                     "obmm-holder-reboot-%016" PRIx64 "-%016" PRIx64,
+                     old_config.incarnation, work.generation) < 0 ||
+            strlen(idempotency_key) >= sizeof(idempotency_key)) {
+            reason = "idempotency-key-invalid";
+            goto done;
+        }
+        reason = "holder-fence-receipt-failed";
+        receipt_attempted = true;
+        if (mem_service_client_fence_allocation_holder(
+                &client, work.key, replacement.node,
+                replacement.incarnation, work.generation,
+                old_config.incarnation, idempotency_key,
+                &fenced, &status) || status != MEM_SERVICE_WIRE_STATUS_OK ||
+            strcmp(fenced.key, work.key) ||
+            fenced.generation != work.generation ||
+            strcmp(fenced.state, "quarantined")) {
+            goto done;
+        }
+        old_holder_remains = worker_allocation_has_holder(
+            &fenced, old_config.node, old_config.incarnation);
+        if (old_holder_remains) {
+            reason = "holder-fence-receipt-incomplete";
+            goto done;
+        }
+        printf("obmm-terminated-holder-fence: status=fenced key=%s "
+               "generation=%" PRIu64 " old_incarnation=%" PRIu64
+               " current_incarnation=%" PRIu64 " route_state=%s\n",
+               work.key, work.generation, old_config.incarnation,
+               replacement.incarnation, route_state);
+        after_generation = work.generation;
+        ++fenced_allocations;
+    }
+    printf("obmm-terminated-holder-fence: status=complete node=%s "
+           "old_incarnation=%" PRIu64 " current_incarnation=%" PRIu64
+           " allocations=%zu inventory_records=%zu revision=%" PRIu64
+           " terminated_kernel_instance=%s current_kernel_instance=",
+           replacement.node, old_config.incarnation,
+           replacement.incarnation, fenced_allocations, inventory_count,
+           revision, terminated_kernel_instance);
+    for (i = 0; i < sizeof(current_instance); ++i)
+        printf("%02x", current_instance[i]);
+    putchar('\n');
+    if (!ferror(stdout)) result = 0;
+done:
+    if (device >= 0) close(device);
+    if (result) {
+        fprintf(stderr,
+                "obmm-terminated-holder-fence: status=failed reason=%s "
+                "receipt_state=%s gsva_error=%d errno=%d\n",
+                reason,
+                receipt_attempted ? "unknown-retry-safe" : "not-submitted",
+                last_gsva_error, last_errno);
+    }
+    return result;
+}
+
 /*
  * Retire an empty crashed-holder ledger after every old control-plane
  * obligation has disappeared.  The ledger must contain only worker-start;
