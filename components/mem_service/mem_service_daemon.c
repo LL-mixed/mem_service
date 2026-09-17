@@ -12966,11 +12966,14 @@ static enum mem_service_wire_status mem_service_provider_refresh(
              "status=ok\n"
              "node_id=%s\n"
              "directory_epoch=%" PRIu64 "\n"
+             "lease_ms=%" PRIu64 "\n"
              "provider_required_count=%zu\n"
              "provider_active_count=%zu\n"
              "provider_directory_ready=%u\n",
              node_id,
              svc->provider_directory.directory_epoch,
+             mem_service_provider_directory_effective_lease_ms(
+                 &svc->provider_directory),
              poll.required_count,
              poll.active_count,
              poll.ready ? 1U : 0U);

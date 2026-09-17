@@ -263,6 +263,7 @@ class MemServiceProviderDirectoryTests(unittest.TestCase):
 
             result = self._refresh("node-a", 1, generation=2)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("lease_ms=5000", result.stdout)
             self.assertIn("provider_directory_ready=1", result.stdout)
 
             result = self._run_client(
