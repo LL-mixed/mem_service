@@ -204,6 +204,15 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("stage=provider-refresh", serve_loop)
         self.assertIn("stage=allocation-poll", serve_loop)
         self.assertIn("action=retry-within-provider-lease", serve_loop)
+        retry_backoff = worker.split(
+            "static uint64_t worker_control_retry_backoff_ms(", 1
+        )[1].split("static void worker_sleep_ms(", 1)[0]
+        self.assertIn("provider_lease_ms / 20U", retry_backoff)
+        self.assertIn("delay_ms < 1000U", retry_backoff)
+        self.assertIn("delay_ms > 30000U", retry_backoff)
+        self.assertEqual(
+            serve_loop.count("worker_control_retry_backoff_ms("), 2
+        )
         self.assertIn("服务端 lease 仍是失联上限", provider_readme)
         self.assertIn("非超时传输错误", provider_readme)
 

@@ -53,6 +53,25 @@ static void worker_report_control_recovered(
     fflush(stdout);
 }
 
+static uint64_t worker_control_retry_backoff_ms(uint64_t provider_lease_ms)
+{
+    uint64_t delay_ms = provider_lease_ms / 20U;
+
+    if (delay_ms < 1000U) delay_ms = 1000U;
+    if (delay_ms > 30000U) delay_ms = 30000U;
+    return delay_ms;
+}
+
+static void worker_sleep_ms(uint64_t delay_ms)
+{
+    struct timespec delay = {
+        .tv_sec = (time_t)(delay_ms / 1000U),
+        .tv_nsec = (long)((delay_ms % 1000U) * 1000000U),
+    };
+
+    (void)nanosleep(&delay, NULL);
+}
+
 static int read_config(const char *path, struct worker_config *config)
 {
     static const char *names[] = {
@@ -2386,7 +2405,8 @@ static int worker_serve_allocations(const char *config_path, bool resume)
             }
             ++control_timeout_count;
             control_timeout_stage = "provider-refresh";
-            nanosleep(&interval, NULL);
+            worker_sleep_ms(worker_control_retry_backoff_ms(
+                directory.lease_ms));
             continue;
         }
         if (!refreshed) {
@@ -2412,7 +2432,8 @@ static int worker_serve_allocations(const char *config_path, bool resume)
             }
             ++control_timeout_count;
             control_timeout_stage = "allocation-poll";
-            nanosleep(&interval, NULL);
+            worker_sleep_ms(worker_control_retry_backoff_ms(
+                directory.lease_ms));
             continue;
         }
         if (poll_result >= 0 && status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND) {
