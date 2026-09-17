@@ -117,6 +117,17 @@ writeback、cache/TLB 失效、CPU window unmap 和 tombstone 后才返回成功
 descriptor 不完整、服务回复冲突或 receipt 不完整时立即停止；物理失败路径绝不
 提交 receipt。重试通过 QEMU tombstone 和服务持久 receipt 幂等收敛。
 
+`prepare-holder-rejoin --config <old> --replacement-config <new>` 在上述 fencing
+完成后为 replacement worker 准备同一路径重启。它只接受恰好包含一个完整
+`worker-start` 帧的旧 ledger；任何 home allocation 帧、损坏、截断或活动 writer
+均失败关闭。replacement provider 必须已经登记且 required provider directory
+ready，旧 incarnation 的 home recovery 与 holder recovery poll 还必须同时为空。
+全部条件满足后，命令把旧 ledger 原子归档为
+`.holder-fenced-<old>-by-<new>` 并同步目录；成功重试只重新验证归档和控制面终态。
+归档后才能用 replacement 配置和原 state path 启动新的 `serve-allocations`。
+旧 ledger 含本地资源时必须走 `resume-allocations` 或
+`recover-allocation-state`，禁止使用该命令跳过资源对账。
+
 `recover-allocation-state` 对旧 HOME holder 使用不同的物理证明：新 kernel instance
 的两次稳定 inventory 均不存在旧 ledger 记录的 segment，并且拒绝任何旧 segment
 身份复用。在该证明成立后，命令先用确定性幂等键提交旧 HOME holder receipt，再

@@ -393,6 +393,22 @@ static int worker_recovery_archive_path(const struct worker_config *config,
     return length < 0 || (size_t)length >= path_len ? -1 : 0;
 }
 
+static int worker_holder_rejoin_archive_path(
+    const struct worker_config *config,
+    const struct worker_config *replacement,
+    char *path,
+    size_t path_len)
+{
+    int length;
+
+    if (!config || !replacement || !path || !path_len) return -1;
+    length = snprintf(path, path_len,
+                      "%s.holder-fenced-%" PRIu64 "-by-%" PRIu64,
+                      config->state, config->incarnation,
+                      replacement->incarnation);
+    return length < 0 || (size_t)length >= path_len ? -1 : 0;
+}
+
 static int worker_sync_state_parent(const char *path)
 {
     char parent[1200];
@@ -568,6 +584,117 @@ done:
                 receipt_attempted ? "unknown-retry-safe" : "not-submitted",
                 last_gsva_error, last_errno);
     }
+    return result;
+}
+
+/*
+ * Retire an empty crashed-holder ledger after every old control-plane
+ * obligation has disappeared.  The ledger must contain only worker-start;
+ * any home allocation record requires resume or recovery instead.  Archiving
+ * preserves the old incarnation's evidence while freeing the configured path
+ * for a replacement worker.
+ */
+int mem_service_provider_obmm_prepare_holder_rejoin(
+    const char *config_path,
+    const char *replacement_config_path)
+{
+    struct worker_config old_config, replacement;
+    struct worker_ledger_entry entry;
+    struct mem_service_client client;
+    struct mem_service_client_provider_directory directory;
+    struct mem_service_client_allocation pending;
+    enum mem_service_wire_status status;
+    struct stat before, after, path_stat;
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    char archive[1200];
+    const char *ledger_path;
+    const char *reason = "invalid-config";
+    bool state_exists, archive_exists, already_archived;
+    int fd = -1, poll_result, result = 1;
+
+    if (read_config(config_path, &old_config) ||
+        read_config(replacement_config_path, &replacement)) return 2;
+    if (!worker_replacement_config_valid(&old_config, &replacement) ||
+        worker_holder_rejoin_archive_path(&old_config, &replacement,
+                                          archive, sizeof(archive))) return 2;
+
+    state_exists = lstat(old_config.state, &path_stat) == 0;
+    if (!state_exists && errno != ENOENT) goto done;
+    archive_exists = lstat(archive, &path_stat) == 0;
+    if (!archive_exists && errno != ENOENT) goto done;
+    reason = "ledger-location-conflict";
+    if (state_exists == archive_exists) goto done;
+    already_archived = archive_exists;
+    ledger_path = already_archived ? archive : old_config.state;
+
+    fd = open(ledger_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    reason = "nonempty-or-invalid-ledger";
+    if (fd < 0 || fcntl(fd, F_SETLK, &lock) || fstat(fd, &before) ||
+        !S_ISREG(before.st_mode) ||
+        before.st_size != WORKER_LEDGER_FRAME_BYTES ||
+        ledger_read_entry(fd, 1, &old_config, &entry) ||
+        strcmp(entry.phase, "worker-start") || entry.work.generation ||
+        entry.work.key[0] || entry.reservation.segment.segment_id ||
+        entry.reservation.exported.mem_id) goto done;
+
+    mem_service_client_init(&client, replacement.connect);
+    reason = "replacement-provider-not-ready";
+    if (mem_service_client_provider_refresh(
+            &client, replacement.node, replacement.incarnation,
+            replacement.readiness_generation, &directory, &status) ||
+        status != MEM_SERVICE_WIRE_STATUS_OK || !directory.directory_ready)
+        goto done;
+
+    reason = "old-home-obligations-remain";
+    poll_result = mem_service_client_poll_recovery_allocation(
+        &client, replacement.node, replacement.incarnation,
+        old_config.incarnation, 0, &pending, &status);
+    if (poll_result < 0 || status != MEM_SERVICE_WIRE_STATUS_NOT_FOUND)
+        goto done;
+
+    reason = "old-holder-obligations-remain";
+    poll_result = mem_service_client_poll_holder_recovery_allocation(
+        &client, replacement.node, replacement.incarnation,
+        old_config.incarnation, 0, &pending, &status);
+    if (poll_result < 0 || status != MEM_SERVICE_WIRE_STATUS_NOT_FOUND)
+        goto done;
+
+    reason = "journal-changed";
+    if (fstat(fd, &after) || lstat(ledger_path, &path_stat) ||
+        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+        before.st_size != after.st_size ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+        before.st_dev != path_stat.st_dev ||
+        before.st_ino != path_stat.st_ino) goto done;
+
+    if (!already_archived) {
+        reason = "archive-conflict";
+        if (lstat(archive, &path_stat) == 0 || errno != ENOENT ||
+            lstat(old_config.state, &path_stat) ||
+            path_stat.st_dev != before.st_dev ||
+            path_stat.st_ino != before.st_ino) goto done;
+        reason = "archive-failed";
+        if (rename(old_config.state, archive) ||
+            worker_sync_state_parent(old_config.state)) goto done;
+    }
+
+    printf("obmm-holder-rejoin: status=prepared node=%s "
+           "old_incarnation=%" PRIu64 " current_incarnation=%" PRIu64
+           " ledger_entries=1 home_obligations=0 holder_obligations=0 "
+           "archive=%s\n",
+           replacement.node, old_config.incarnation,
+           replacement.incarnation, archive);
+    if (!ferror(stdout)) result = 0;
+done:
+    if (fd >= 0) close(fd);
+    if (result)
+        fprintf(stderr,
+                "obmm-holder-rejoin: status=failed reason=%s "
+                "reconciliation_required=1\n",
+                reason);
     return result;
 }
 

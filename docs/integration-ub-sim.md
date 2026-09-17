@@ -63,6 +63,13 @@ generation，并须提前在服务目录登记。命令要求 guest/kernel insta
 replacement 配置启动 worker。该路径适用于 guest/kernel 已重建导致旧 backing
 确定消失的场景；同 kernel 恢复和远端 holder 的物理排空仍保持 fail-closed。
 
+仅承担 remote holder、旧 worker ledger 只有完整 `worker-start` 的节点，在完成
+`fence-holder-state` 后调用
+`prepare-holder-rejoin --config <old> --replacement-config <new>`。该命令要求旧
+incarnation 的 home/holder recovery poll 均为空，再原子归档旧 ledger；replacement
+随后使用同一 state path 启动 `serve-allocations`。存在任何本地资源帧、损坏尾部、
+活动 writer 或残留恢复义务时保持隔离，不能以换 state path 的方式绕过旧日志。
+
 同 kernel 的稳态 worker 崩溃使用 `linqu_mem_service_provider_obmm
 resume-allocations --config <path>`。命令要求原 ledger 无活动 writer、kernel instance
 不变，并在稳定库存中逐个核对 ledger 与同代服务对象。最终 `published`

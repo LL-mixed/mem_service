@@ -132,6 +132,20 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("obmm-provider-smoke:", makefile)
         self.assertIn("MEM_SERVICE_PROVIDER_OBMM", makefile)
 
+    def test_holder_rejoin_is_explicit_and_fail_closed(self):
+        cli = (PROVIDERS / "mem_service_provider_obmm_cli.c").read_text()
+        worker = (PROVIDERS / "mem_service_provider_obmm_worker.c").read_text()
+        provider_readme = (PROVIDERS / "README.md").read_text()
+
+        self.assertIn("prepare-holder-rejoin", cli)
+        self.assertIn("mem_service_provider_obmm_prepare_holder_rejoin", cli)
+        self.assertIn('before.st_size != WORKER_LEDGER_FRAME_BYTES', worker)
+        self.assertIn('reason = "old-home-obligations-remain"', worker)
+        self.assertIn('reason = "old-holder-obligations-remain"', worker)
+        self.assertIn(".holder-fenced-", worker)
+        self.assertIn("原子归档", provider_readme)
+        self.assertIn("禁止使用该命令跳过资源对账", provider_readme)
+
     def test_qemu_conformance_uses_real_provider_through_neutral_channel(self):
         source = CONFORMANCE_SOURCE.read_text()
 
