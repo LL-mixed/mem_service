@@ -24,11 +24,13 @@ struct mem_service_provider_obmm_endpoint {
     void *implementation;
 };
 
-/* Platform-private attachment to an already mapped strict import. Serialize
- * with all endpoint operations. The fields are borrowed until pin release;
- * callers must never close the fd or unmap this view directly. Initialize
- * *pin_out to NULL; acquire errors return no new pin or usable view. Rights
- * use MEM_SERVICE_MAPPING_FLAG_READ/WRITE, without FIXED_ADDRESS. */
+/* Platform-private attachment to an already mapped strict-GSVA view. The view
+ * may be an imported mapping or the home export mapping whose route is already
+ * registered by the managed GSVA lifecycle. Serialize with all endpoint
+ * operations. The fields are borrowed until pin release; callers must never
+ * close the fd or unmap this view directly. Initialize *pin_out to NULL;
+ * acquire errors return no new pin or usable view. Rights use
+ * MEM_SERVICE_MAPPING_FLAG_READ/WRITE, without FIXED_ADDRESS. */
 struct mem_service_provider_obmm_mapping_pin;
 struct mem_service_provider_obmm_pinned_mapping {
     int obmm_fd;

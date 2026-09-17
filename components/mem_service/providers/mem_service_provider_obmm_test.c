@@ -349,7 +349,8 @@ static void test_compute_mapping_pins(void)
     struct mem_service_provider_mapping_binding binding = {
         .mapping = mapping, .owner = &provider, .mapped = true,
     };
-    struct mem_service_provider_obmm_mapping_pin *first = NULL, *second = NULL, *denied = NULL;
+    struct mem_service_provider_obmm_mapping_pin *first = NULL, *second = NULL;
+    struct mem_service_provider_obmm_mapping_pin *local = NULL, *denied = NULL;
     struct mem_service_provider_obmm_pinned_mapping view, other;
     struct mem_service_obmm_mapping_slot *slot = &context->mappings[0];
     assert(!mem_service_provider_obmm_mapping_pin_acquire(&binding,
@@ -375,7 +376,13 @@ static void test_compute_mapping_pins(void)
     assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOPNOTSUPP);
     provider.ops = &mem_service_obmm_provider_ops;
     slot->imported = false;
-    assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOPNOTSUPP);
+    assert(!mem_service_provider_obmm_mapping_pin_acquire(
+        &binding, MEM_SERVICE_MAPPING_FLAG_READ, &local, &other));
+    assert(local && slot->compute_pins == 3 && other.base == mapping.base &&
+           other.mem_id == slot->region.mem_id &&
+           other.access_flags == MEM_SERVICE_MAPPING_FLAG_READ);
+    assert(!mem_service_provider_obmm_mapping_pin_release(&local) &&
+           !local && slot->compute_pins == 2);
     slot->imported = true;
     slot->descriptor.strict_gsva = false;
     assert(mem_service_provider_obmm_mapping_pin_acquire(&binding, 1, &denied, &other) == -EOPNOTSUPP);
@@ -403,7 +410,7 @@ static void test_compute_mapping_pins(void)
     assert(!mem_service_provider_obmm_endpoint_close_checked(&endpoint));
     assert(!endpoint.implementation && cleanup_unmaps == 3 && cleanup_closes == 1 && cleanup_unimports == 1);
     cleanup_mode = false;
-    puts("obmm_compute_mapping_pins=pass no_alias=1 deferred_cleanup=1");
+    puts("obmm_compute_mapping_pins=pass local_home=1 no_alias=1 deferred_cleanup=1");
 }
 
 static void test_import_and_partial_view_cleanup(void)

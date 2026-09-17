@@ -1877,7 +1877,7 @@ int mem_service_provider_obmm_mapping_pin_acquire(
     slot = mem_service_obmm_find_mapping(context, binding->mapping.handle);
     if (!slot || slot->close_uncertain || slot->region.fd < 0 || !slot->region.mem_id ||
         !slot->region.addr || !slot->view_len) return -ESTALE;
-    if (!slot->descriptor.strict_gsva || !slot->imported) return -EOPNOTSUPP;
+    if (!slot->descriptor.strict_gsva) return -EOPNOTSUPP;
     if (!mem_service_obmm_gsva_valid(&slot->descriptor) ||
         (uintptr_t)slot->region.addr != slot->descriptor.remote_uba ||
         slot->view_offset > slot->descriptor.size ||

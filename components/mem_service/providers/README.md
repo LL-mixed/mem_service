@@ -216,10 +216,12 @@ channel 调用 provider，并使用真实文件共享映射核对非零偏移、
 ### Compute attachment ownership
 
 平台 compute adapter 可从当前 SDK mapping binding 取得不透明 pin。provider
-核对实际 ops/context、handle、可访问视图和读写权限；只接纳已导入的严格 GSVA
-映射。pin 借用现有 control fd、mem_id 和逻辑视图，不新建 import、不复制 payload。
-这些字段仅交给平台 adapter，业务代码继续使用统一 SDK/memref。
-home 直接 export 视图及 legacy mapping 返回 `-EOPNOTSUPP`，不合成 PA 或隐式导入。
+核对实际 ops/context、handle、可访问视图和读写权限；只接纳已建立 managed route
+的严格 GSVA 映射，包括远端 import 和本机 home export。pin 借用现有 control fd、
+mem_id 和逻辑视图，不新建 import、不复制 payload。这些字段仅交给平台 adapter，
+业务代码继续使用统一 SDK/memref。legacy mapping 返回 `-EOPNOTSUPP`，不合成 PA
+或隐式导入。本机 home 路径依赖相同 managed GSVA 生命周期已经登记的 home route；
+缺少 strict descriptor、route 或真实 VMA 身份时，后续 strict PTO 注册失败关闭。
 
 pin 存在时，provider unmap 在改变任何 VMA/fd/视图归属前返回 `-EBUSY`。
 endpoint close 保留上下文并停止新接纳，已有 pin 仍可释放；所有 pin 释放后才可

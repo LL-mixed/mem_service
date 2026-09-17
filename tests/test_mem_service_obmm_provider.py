@@ -56,7 +56,9 @@ class MemServiceObmmProviderTest(unittest.TestCase):
                 self.assertIn("obmm_cleanup_ownership=pass", result.stdout)
                 self.assertIn("obmm_cached_visibility=pass readonly=1 readwrite=1 "
                               "bounds=1 ioctl_failure=1", result.stdout)
-                self.assertIn("obmm_compute_mapping_pins=pass no_alias=1 deferred_cleanup=1",
+                self.assertIn(
+                    "obmm_compute_mapping_pins=pass local_home=1 no_alias=1 "
+                    "deferred_cleanup=1",
                               result.stdout)
                 self.assertIn("retained_handle_conflict=pass", result.stdout)
                 self.assertIn("retained_descriptor_probe=pass checks=24 device_operations=0",
