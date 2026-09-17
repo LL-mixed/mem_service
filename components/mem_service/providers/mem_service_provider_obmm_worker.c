@@ -26,6 +26,8 @@ enum worker_allocate_result {
     WORKER_ALLOCATE_BACKING_EMPTY = 2,
 };
 
+enum { WORKER_FAULT_INJECTION_EXIT_CODE = 86 };
+
 static volatile sig_atomic_t worker_stop;
 
 static void stop_worker(int signal_number)
@@ -38,7 +40,8 @@ static int read_config(const char *path, struct worker_config *config)
 {
     static const char *names[] = {
         "connect", "node_id", "state_file", "incarnation", "readiness_generation",
-        "allocation_granularity_bytes", "fast_allocation"
+        "allocation_granularity_bytes", "fast_allocation",
+        "fault_injection_phase", "fault_injection_mode"
     };
     FILE *file = fopen(path, "r");
     char line[2048];
@@ -67,6 +70,17 @@ static int read_config(const char *path, struct worker_config *config)
                               i == 1 ? sizeof(config->node) : sizeof(config->state);
             if (strlen(value) >= capacity) goto done;
             strcpy(target, value);
+        } else if (i == 7) {
+            if (strlen(value) >= sizeof(config->fault_injection_phase)) goto done;
+            strcpy(config->fault_injection_phase, value);
+        } else if (i == 8) {
+            if (!strcmp(value, "sync-exit")) {
+                config->fault_injection_mode = WORKER_FAULT_INJECTION_SYNC_EXIT;
+            } else if (!strcmp(value, "torn-exit")) {
+                config->fault_injection_mode = WORKER_FAULT_INJECTION_TORN_EXIT;
+            } else {
+                goto done;
+            }
         } else {
             uint64_t number;
             if (*value < '0' || *value > '9') goto done;
@@ -80,6 +94,10 @@ static int read_config(const char *path, struct worker_config *config)
         }
     }
     if (!ferror(file) && (seen & 63U) == 63U && config->state[0] == '/' &&
+        (!!(seen & (1U << 7)) == !!(seen & (1U << 8))) &&
+        (!(seen & (1U << 7)) ||
+         (!strcmp(config->fault_injection_phase, "reserve-intent") &&
+          config->fault_injection_mode != WORKER_FAULT_INJECTION_NONE)) &&
         !(config->allocation_granularity_bytes & (config->allocation_granularity_bytes - 1)) &&
         sysconf(_SC_PAGESIZE) > 0 &&
         config->allocation_granularity_bytes >= (uint64_t)sysconf(_SC_PAGESIZE)) {
@@ -100,7 +118,8 @@ static int record_phase(int fd, const struct worker_config *config,
     struct worker_ledger_entry entry = {0};
     unsigned char frame[WORKER_LEDGER_FRAME_BYTES];
     off_t end = lseek(fd, 0, SEEK_END);
-    size_t written = 0;
+    size_t write_limit = sizeof(frame), written = 0;
+    bool inject = false;
     if (!config || !phase || strlen(phase) >= sizeof(entry.phase) ||
         end < 0 || end % WORKER_LEDGER_FRAME_BYTES ||
         (work && work->generation != generation)) return -1;
@@ -110,16 +129,37 @@ static int record_phase(int fd, const struct worker_config *config,
     if (reservation) entry.reservation = *reservation;
     strcpy(entry.phase, phase);
     if (ledger_encode(frame, &entry)) return -1;
-    while (written < sizeof(frame)) {
-        ssize_t n = write(fd, frame + written, sizeof(frame) - written);
+    inject = config->fault_injection_mode != WORKER_FAULT_INJECTION_NONE &&
+             !strcmp(config->fault_injection_phase, phase);
+    if (inject &&
+        config->fault_injection_mode == WORKER_FAULT_INJECTION_TORN_EXIT) {
+        write_limit /= 2;
+    }
+    while (written < write_limit) {
+        ssize_t n = write(fd, frame + written, write_limit - written);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return -1;
         written += (size_t)n;
     }
     if (fsync(fd)) return -1;
+    if (inject &&
+        config->fault_injection_mode == WORKER_FAULT_INJECTION_TORN_EXIT) {
+        dprintf(STDERR_FILENO,
+                "obmm-worker fault-injection=triggered phase=%s "
+                "mode=torn-exit ledger_bytes=%zu\n",
+                phase, written);
+        _exit(WORKER_FAULT_INJECTION_EXIT_CODE);
+    }
     printf("obmm-worker generation=%" PRIu64 " phase=%s segment=%" PRIu64
            " export=%" PRIu64 "\n", generation, phase, segment, exported);
     fflush(stdout);
+    if (inject) {
+        dprintf(STDERR_FILENO,
+                "obmm-worker fault-injection=triggered phase=%s "
+                "mode=sync-exit ledger_bytes=%zu\n",
+                phase, written);
+        _exit(WORKER_FAULT_INJECTION_EXIT_CODE);
+    }
     return 0;
 }
 

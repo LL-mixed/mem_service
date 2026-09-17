@@ -8,6 +8,12 @@
 #include <ub/gsva.h>
 #include <string.h>
 
+enum worker_fault_injection_mode {
+    WORKER_FAULT_INJECTION_NONE = 0,
+    WORKER_FAULT_INJECTION_SYNC_EXIT = 1,
+    WORKER_FAULT_INJECTION_TORN_EXIT = 2,
+};
+
 struct worker_config {
     char connect[256];
     char node[MEM_SERVICE_CLIENT_PROVIDER_NODE_ID_LEN];
@@ -16,6 +22,8 @@ struct worker_config {
     uint64_t readiness_generation;
     uint64_t allocation_granularity_bytes;
     bool fast_allocation;
+    char fault_injection_phase[32];
+    enum worker_fault_injection_mode fault_injection_mode;
     unsigned char kernel_instance[16];
     uint64_t binding_version;
     uint64_t connect_length;
