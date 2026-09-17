@@ -6,9 +6,10 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 
-static unsigned import_calls, event_calls;
+static unsigned import_calls;
+static volatile unsigned event_calls;
 static bool import_fails, ioctl_fails, event_fails;
-static uint32_t last_event;
+static volatile uint32_t last_event;
 static unsigned update_calls;
 static bool update_readonly;
 static struct obmm_cmd_update_range last_update;
