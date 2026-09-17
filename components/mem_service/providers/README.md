@@ -198,7 +198,11 @@ incarnation、ledger 与物理资源并重试，避免控制面短时不可调�
 清空结果结构，也不会丢失这个退避依据。重试间隔取该 lease 的 5%，并限制在 1 到
 30 秒，避免恢复中的单线程控制面被重连请求淹没。服务端 lease 仍是失联上限；超过
 lease 后，后续 refresh 会返回 provider 身份失效，worker 按原 fail-closed 路径停止
-并保留 ledger。非超时传输错误、服务端拒绝和 incarnation 冲突不重试。
+并保留 ledger。非超时传输错误、服务端拒绝和 incarnation 冲突不重试。无待处理
+allocation 时，每个 worker 最多每秒执行一轮 refresh/poll；这限制多节点部署的一次
+连接 RPC 速率，避免空闲轮询填满控制面监听队列。worker 失败退出行包含精确的
+`failure_stage`、client result 与 wire status，不能再仅凭随后发生的 provider
+注销推断首个故障。
 
 ### 固定地址子区间
 

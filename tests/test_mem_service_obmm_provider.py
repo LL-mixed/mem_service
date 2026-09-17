@@ -229,6 +229,21 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertIn("服务端 lease 仍是失联上限", provider_readme)
         self.assertIn("非超时传输错误", provider_readme)
 
+    def test_worker_bounds_idle_control_rpc_rate_and_reports_exit_stage(self):
+        worker = (PROVIDERS / "mem_service_provider_obmm_worker.c").read_text()
+        provider_readme = (PROVIDERS / "README.md").read_text()
+
+        self.assertIn("WORKER_IDLE_POLL_INTERVAL_MS = 1000", worker)
+        self.assertIn(
+            ".tv_sec = WORKER_IDLE_POLL_INTERVAL_MS / 1000", worker
+        )
+        self.assertIn('failure_stage = "provider-refresh"', worker)
+        self.assertIn('failure_stage = "allocation-poll"', worker)
+        self.assertIn(
+            '"failure_stage=%s failure_result=%d status=%s\\n"', worker
+        )
+        self.assertIn("最多每秒执行一轮 refresh/poll", provider_readme)
+
     def test_qemu_conformance_uses_real_provider_through_neutral_channel(self):
         source = CONFORMANCE_SOURCE.read_text()
 

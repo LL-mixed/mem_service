@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = ROOT
 SERVICE_DIR = ROOT / "components" / "mem_service"
+DAEMON_SOURCE = SERVICE_DIR / "mem_service_daemon.c"
 CLI_SOURCE = ROOT / "apps" / "mem_service" / "mem_service.c"
 CONFIG_SCHEMA = ROOT / "apps" / "mem_service" / "configs" / "mem_service.conf.schema"
 EXAMPLE_CONFIG = ROOT / "apps" / "mem_service" / "configs" / "mem_service.example.conf"
@@ -130,6 +131,17 @@ def _primary_ipv4() -> str | None:
 @unittest.skipUnless(shutil.which("cc"), "host cc is required")
 class MemServiceNetworkControlTests(unittest.TestCase):
     """T-control: wire-over-TCP control channel behavior (plan section 6.2)."""
+
+    def test_tcp_listener_backlog_covers_multi_node_client_bursts(self):
+        daemon = DAEMON_SOURCE.read_text()
+
+        self.assertIn("#define MEM_SERVICE_TCP_LISTEN_BACKLOG 128", daemon)
+        tcp_runtime = daemon.split(
+            "int mem_service_run_daemon_with_runtime(", 1
+        )[1]
+        self.assertIn(
+            "listen(server_fd, MEM_SERVICE_TCP_LISTEN_BACKLOG)", tcp_runtime
+        )
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="msvc_netctl_", dir=str(_tmp_parent())))

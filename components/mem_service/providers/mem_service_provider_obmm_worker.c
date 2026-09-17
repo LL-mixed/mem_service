@@ -27,6 +27,7 @@ enum worker_allocate_result {
 };
 
 enum { WORKER_FAULT_INJECTION_EXIT_CODE = 86 };
+enum { WORKER_IDLE_POLL_INTERVAL_MS = 1000 };
 
 static volatile sig_atomic_t worker_stop;
 
@@ -2341,13 +2342,20 @@ static int worker_serve_allocations(const char *config_path, bool resume)
     struct obmm_cmd_gsva_aperture aperture = {0};
     struct obmm_cmd_gsva_enumerate_v1 birth = {.version = OBMM_GSVA_ABI_VERSION};
     struct sigaction action = {0}, old_int, old_term;
-    const struct timespec interval = {.tv_nsec = 100000000};
-    enum mem_service_wire_status status;
+    const struct timespec interval = {
+        .tv_sec = WORKER_IDLE_POLL_INTERVAL_MS / 1000,
+        .tv_nsec = (WORKER_IDLE_POLL_INTERVAL_MS % 1000) * 1000000,
+    };
+    enum mem_service_wire_status status = MEM_SERVICE_WIRE_STATUS_INTERNAL;
+    enum mem_service_wire_status failure_status =
+        MEM_SERVICE_WIRE_STATUS_INTERNAL;
     int device = -1, journal = -1, result = 1;
+    int failure_result = 0;
     bool signals = false, refreshed = false;
     uint64_t control_timeout_count = 0;
     uint64_t provider_lease_ms = 0;
     const char *control_timeout_stage = "none";
+    const char *failure_stage = "startup";
     struct worker_reservation *reservations = NULL;
 
     if (read_config(config_path, &config)) {
@@ -2397,7 +2405,11 @@ static int worker_serve_allocations(const char *config_path, bool resume)
             &client, config.node, config.incarnation,
             config.readiness_generation, &directory, &status);
         if (refresh_result || status != MEM_SERVICE_WIRE_STATUS_OK) {
-            if (!worker_control_timeout(refresh_result, status)) goto done;
+            if (!worker_control_timeout(refresh_result, status)) {
+                failure_stage = "provider-refresh";
+                failure_result = refresh_result;
+                goto done;
+            }
             if (worker_stop) break;
             if (control_timeout_count == 0) {
                 printf("obmm-worker control timeout stage=provider-refresh "
@@ -2445,7 +2457,11 @@ static int worker_serve_allocations(const char *config_path, bool resume)
             nanosleep(&interval, NULL);
             continue;
         }
-        if (poll_result || status != MEM_SERVICE_WIRE_STATUS_OK) goto done;
+        if (poll_result || status != MEM_SERVICE_WIRE_STATUS_OK) {
+            failure_stage = "allocation-poll";
+            failure_result = poll_result;
+            goto done;
+        }
         worker_report_control_recovered(
             control_timeout_count, control_timeout_stage);
         control_timeout_count = 0;
@@ -2462,27 +2478,65 @@ static int worker_serve_allocations(const char *config_path, bool resume)
         }
         if (!strcmp(work.state, "allocating")) {
             int allocation_result;
-            if (owned || !available) goto done;
+            if (owned || !available) {
+                failure_stage = "allocation-slot";
+                failure_result = -1;
+                goto done;
+            }
             allocation_result = allocate_work(device, journal, &config,
                     &client, &aperture, &work, available);
             if (allocation_result == WORKER_ALLOCATE_CAPACITY) {
-                if (available->occupied || reject_capacity_work(journal, &config, &client, &work))
+                if (available->occupied ||
+                    reject_capacity_work(
+                        journal, &config, &client, &work)) {
+                    failure_stage = "allocation-reject";
+                    failure_result = -1;
                     goto done;
+                }
             } else if (allocation_result == WORKER_ALLOCATE_BACKING_EMPTY) {
-                if (rollback_unbacked_work(device, journal, &config, &client, &work, available))
+                if (rollback_unbacked_work(
+                        device, journal, &config, &client, &work, available)) {
+                    failure_stage = "allocation-rollback";
+                    failure_result = -1;
                     goto done;
-            } else if (allocation_result != WORKER_ALLOCATE_OK) goto done;
+                }
+            } else if (allocation_result != WORKER_ALLOCATE_OK) {
+                failure_stage = "allocation-apply";
+                failure_result = allocation_result;
+                goto done;
+            }
         } else if (!strcmp(work.state, "retiring")) {
             if (owned ? reclaim_work(device, journal, &config, &client, &work, owned)
-                      : cancel_unreserved_work(journal, &config, &client, &work)) goto done;
-        } else goto done;
+                      : cancel_unreserved_work(journal, &config, &client, &work)) {
+                failure_stage = owned ? "reclaim" : "cancel-unreserved";
+                failure_result = -1;
+                goto done;
+            }
+        } else {
+            failure_stage = "work-state";
+            failure_result = -1;
+            goto done;
+        }
     }
     result = 0;
+    failure_stage = "none";
 done:
-    if (refreshed &&
-        (mem_service_client_provider_deregister(&client, config.node, config.incarnation,
-                                               &directory, &status) ||
-         status != MEM_SERVICE_WIRE_STATUS_OK)) result = 1;
+    if (result != 0) {
+        failure_status = status;
+    }
+    if (refreshed) {
+        int deregister_result = mem_service_client_provider_deregister(
+            &client, config.node, config.incarnation, &directory, &status);
+
+        if (deregister_result || status != MEM_SERVICE_WIRE_STATUS_OK) {
+            if (result == 0) {
+                failure_stage = "provider-deregister";
+                failure_result = deregister_result;
+                failure_status = status;
+            }
+            result = 1;
+        }
+    }
     if (signals) {
         sigaction(SIGINT, &old_int, NULL);
         sigaction(SIGTERM, &old_term, NULL);
@@ -2490,8 +2544,11 @@ done:
     if (journal >= 0) close(journal);
     if (device >= 0) close(device);
     free(reservations);
-    fprintf(stderr, "obmm-worker stopped result=%d reconciliation_required=%d\n",
-            result, journal >= 0);
+    fprintf(stderr,
+            "obmm-worker stopped result=%d reconciliation_required=%d "
+            "failure_stage=%s failure_result=%d status=%s\n",
+            result, journal >= 0, failure_stage, failure_result,
+            mem_service_wire_status_name(failure_status));
     return result;
 }
 

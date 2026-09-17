@@ -22,6 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define MEM_SERVICE_TCP_LISTEN_BACKLOG 128
+
 #include "mem_service_core.h"
 #include "mem_service_object_refs.h"
 #include "mem_service_reference_protocol.h"
@@ -17205,7 +17207,7 @@ int mem_service_run_daemon_with_runtime(
         mem_service_history_close(&svc);
         return 1;
     }
-    if (listen(server_fd, 16) != 0) {
+    if (listen(server_fd, MEM_SERVICE_TCP_LISTEN_BACKLOG) != 0) {
         perror("mem_service serve: listen");
         close(server_fd);
         mem_service_history_close(&svc);
