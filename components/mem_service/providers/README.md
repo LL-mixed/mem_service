@@ -194,10 +194,11 @@ node/incarnation 和粒度，逐条展示资源身份；损坏、截断、并发
 
 worker 对 provider refresh 和 allocation poll 的 wire `TIMEOUT` 保持原
 incarnation、ledger 与物理资源并重试，避免控制面短时不可调度被误判为 provider
-进程崩溃。重试间隔取最近一次成功 refresh 返回 lease 的 5%，并限制在 1 到 30 秒，
-避免恢复中的单线程控制面被重连请求淹没。服务端 lease 仍是失联上限；超过 lease
-后，后续 refresh 会返回 provider 身份失效，worker 按原 fail-closed 路径停止并保留
-ledger。非超时传输错误、服务端拒绝和 incarnation 冲突不重试。
+进程崩溃。worker 独立保留最近一次成功 refresh 返回的 lease；失败的 refresh 即使
+清空结果结构，也不会丢失这个退避依据。重试间隔取该 lease 的 5%，并限制在 1 到
+30 秒，避免恢复中的单线程控制面被重连请求淹没。服务端 lease 仍是失联上限；超过
+lease 后，后续 refresh 会返回 provider 身份失效，worker 按原 fail-closed 路径停止
+并保留 ledger。非超时传输错误、服务端拒绝和 incarnation 冲突不重试。
 
 ### 固定地址子区间
 

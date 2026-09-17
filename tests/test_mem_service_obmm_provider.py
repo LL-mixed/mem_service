@@ -213,6 +213,19 @@ class MemServiceObmmProviderTest(unittest.TestCase):
         self.assertEqual(
             serve_loop.count("worker_control_retry_backoff_ms("), 2
         )
+        self.assertIn("uint64_t provider_lease_ms = 0", serve_loop)
+        self.assertIn("provider_lease_ms = directory.lease_ms", serve_loop)
+        self.assertEqual(
+            serve_loop.count("worker_control_retry_backoff_ms(\n"
+                             "                provider_lease_ms)"),
+            2,
+        )
+        self.assertNotIn(
+            "worker_control_retry_backoff_ms(\n"
+            "                directory.lease_ms)",
+            serve_loop,
+        )
+        self.assertIn("失败的 refresh", provider_readme)
         self.assertIn("服务端 lease 仍是失联上限", provider_readme)
         self.assertIn("非超时传输错误", provider_readme)
 

@@ -2346,6 +2346,7 @@ static int worker_serve_allocations(const char *config_path, bool resume)
     int device = -1, journal = -1, result = 1;
     bool signals = false, refreshed = false;
     uint64_t control_timeout_count = 0;
+    uint64_t provider_lease_ms = 0;
     const char *control_timeout_stage = "none";
     struct worker_reservation *reservations = NULL;
 
@@ -2406,9 +2407,10 @@ static int worker_serve_allocations(const char *config_path, bool resume)
             ++control_timeout_count;
             control_timeout_stage = "provider-refresh";
             worker_sleep_ms(worker_control_retry_backoff_ms(
-                directory.lease_ms));
+                provider_lease_ms));
             continue;
         }
+        provider_lease_ms = directory.lease_ms;
         if (!refreshed) {
             printf("obmm-worker initial refresh provider_directory_ready=%u\n",
                    directory.directory_ready ? 1U : 0U);
@@ -2433,7 +2435,7 @@ static int worker_serve_allocations(const char *config_path, bool resume)
             ++control_timeout_count;
             control_timeout_stage = "allocation-poll";
             worker_sleep_ms(worker_control_retry_backoff_ms(
-                directory.lease_ms));
+                provider_lease_ms));
             continue;
         }
         if (poll_result >= 0 && status == MEM_SERVICE_WIRE_STATUS_NOT_FOUND) {
