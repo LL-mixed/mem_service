@@ -92,7 +92,33 @@ bool mem_service_model_publish_terminal_token_reference(
     return true;
 }
 
-bool mem_service_model_refresh_terminal_token_reference(
+const char *mem_service_terminal_token_reference_status_name(
+    enum mem_service_terminal_token_reference_status status)
+{
+    switch (status) {
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK:
+        return "ok";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_INVALID_ARGUMENT:
+        return "invalid_argument";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_SYNC_FAILED:
+        return "sync_failed";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_NOT_PUBLISHED:
+        return "not_published";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_COPY_MISMATCH:
+        return "copy_mismatch";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_KEY_MISMATCH:
+        return "key_mismatch";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_METADATA_INVALID:
+        return "metadata_invalid";
+    case MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_BOUNDS_INVALID:
+        return "bounds_invalid";
+    default:
+        return "unknown";
+    }
+}
+
+enum mem_service_terminal_token_reference_status
+mem_service_model_refresh_terminal_token_reference(
     const struct mem_service_cluster_runtime *rt,
     const struct mem_service_cluster_slot *slot,
     uint32_t expected_owner_node,
@@ -108,26 +134,28 @@ bool mem_service_model_refresh_terminal_token_reference(
 
     if (!rt || !slot || !slot->region.addr || !expected_key ||
         !reference_out) {
-        return false;
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_INVALID_ARGUMENT;
     }
     key_len = strnlen(expected_key,
                       sizeof(((struct mem_service_record *)0)->key));
     if (key_len == 0 ||
         key_len == sizeof(((struct mem_service_record *)0)->key)) {
-        return false;
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_INVALID_ARGUMENT;
     }
     expected_key_hash = lingqu_object_ref_key_hash(expected_key, key_len);
     offset = mem_service_model_terminal_token_reference_offset(
         expected_key_hash);
     if (offset > slot->region.len ||
         MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES >
-            slot->region.len - offset ||
-        !mem_service_model_refresh_remote_payload(
+            slot->region.len - offset) {
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_BOUNDS_INVALID;
+    }
+    if (!mem_service_model_refresh_remote_payload(
             rt,
             slot,
             offset,
             MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES)) {
-        return false;
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_SYNC_FAILED;
     }
     mapped_bytes = (const volatile uint8_t *)slot->region.addr + offset;
     mem_service_copy_from_mapped_volatile(&first,
@@ -136,21 +164,31 @@ bool mem_service_model_refresh_terminal_token_reference(
     mem_service_copy_from_mapped_volatile(&second,
                                           mapped_bytes + sizeof(first),
                                           sizeof(second));
-    if (memcmp(&first, &second, sizeof(first)) != 0 ||
-        first.magic != LINGQU_OBJECT_REF_MAGIC ||
+    if (first.magic == 0 && second.magic == 0) {
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_NOT_PUBLISHED;
+    }
+    if (memcmp(&first, &second, sizeof(first)) != 0) {
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_COPY_MISMATCH;
+    }
+    if (first.key_hash != expected_key_hash) {
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_KEY_MISMATCH;
+    }
+    if (first.magic != LINGQU_OBJECT_REF_MAGIC ||
         first.layout_version != LINGQU_OBJECT_REF_LAYOUT_VERSION ||
         first.object_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
         first.state != LINGQU_OBJECT_STATE_COMMITTED_WIRE || first.flags != 0 ||
         first.owner_entity != expected_owner_node ||
         first.producer_entity != expected_owner_node ||
-        first.object_version == 0 || first.key_hash != expected_key_hash ||
-        first.payload_bytes != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
-        first.payload_offset > slot->region.len ||
+        first.object_version == 0 ||
+        first.payload_bytes != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES) {
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_METADATA_INVALID;
+    }
+    if (first.payload_offset > slot->region.len ||
         first.payload_bytes > slot->region.len - first.payload_offset) {
-        return false;
+        return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_BOUNDS_INVALID;
     }
     *reference_out = first;
-    return true;
+    return MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK;
 }
 
 bool mem_service_model_refresh_remote_metadata(

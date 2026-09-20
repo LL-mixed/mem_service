@@ -10,6 +10,17 @@
 
 struct mem_service_cluster_runtime;
 
+enum mem_service_terminal_token_reference_status {
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK = 0,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_INVALID_ARGUMENT,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_SYNC_FAILED,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_NOT_PUBLISHED,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_COPY_MISMATCH,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_KEY_MISMATCH,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_METADATA_INVALID,
+    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_BOUNDS_INVALID,
+};
+
 bool mem_service_model_refresh_remote_metadata(
     const struct mem_service_cluster_runtime *rt,
     const struct mem_service_cluster_slot *slot);
@@ -25,12 +36,16 @@ bool mem_service_model_publish_terminal_token_reference(
     struct mem_service_cluster_slot *slot,
     const struct lingqu_object_ref_wire *reference);
 
-bool mem_service_model_refresh_terminal_token_reference(
+enum mem_service_terminal_token_reference_status
+mem_service_model_refresh_terminal_token_reference(
     const struct mem_service_cluster_runtime *rt,
     const struct mem_service_cluster_slot *slot,
     uint32_t expected_owner_node,
     const char *expected_key,
     struct lingqu_object_ref_wire *reference_out);
+
+const char *mem_service_terminal_token_reference_status_name(
+    enum mem_service_terminal_token_reference_status status);
 
 bool mem_service_try_read_stable_payload_region(
     const struct mem_service_cluster_slot *slot,

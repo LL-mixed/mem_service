@@ -107,19 +107,27 @@ static bool mem_service_model_read_terminal_token_reference(
     const char *token_result_key,
     const struct obmm_desc *descriptor,
     uint64_t expected_decode_step,
+    enum mem_service_terminal_token_reference_status *reference_status_out,
     struct lingqu_object_ref_wire *reference_out,
     const uint8_t **payload_view_out,
     uint64_t payload_words_out[8],
     uint64_t *checksum_out)
 {
     struct lingqu_object_ref_wire reference;
+    enum mem_service_terminal_token_reference_status reference_status;
     const uint8_t *payload_view;
     uint64_t checksum;
 
     if (!rt || !slot || !token_result_key || !reference_out ||
-        !payload_view_out || !payload_words_out || !checksum_out ||
-        !mem_service_model_refresh_terminal_token_reference(
-            rt, slot, owner_node, token_result_key, &reference)) {
+        !payload_view_out || !payload_words_out || !checksum_out) {
+        return false;
+    }
+    reference_status = mem_service_model_refresh_terminal_token_reference(
+        rt, slot, owner_node, token_result_key, &reference);
+    if (reference_status_out) {
+        *reference_status_out = reference_status;
+    }
+    if (reference_status != MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK) {
         return false;
     }
     if (descriptor &&
@@ -430,6 +438,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         uint64_t checksum;
         bool token_input_found = false;
         bool token_desc_found = false;
+        bool token_payload_failure_reported = false;
+        bool token_reference_success_reported = false;
         bool token_resolution_reported = false;
         bool token_reference_found = false;
         const char *token_resolution = "descriptor_object_ref";
@@ -518,20 +528,45 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 }
                 if (!token_desc_found && probe_token_reference &&
                     (uint32_t)owner_idx == token_reference_probe_owner) {
+                    enum mem_service_terminal_token_reference_status
+                        reference_status;
                     long reference_start_ms = obmm_now_ms();
 
-                    if (mem_service_model_refresh_terminal_token_reference(
+                    reference_status =
+                        mem_service_model_refresh_terminal_token_reference(
                             rt,
                             &rt->slots[owner_idx],
                             (uint32_t)owner_idx,
                             token_result_key,
-                            &token_reference)) {
+                            &token_reference);
+                    if (reference_status ==
+                        MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK) {
                         source_node = (uint32_t)owner_idx;
                         token_reference_found = true;
                         token_resolution = "durable_object_ref";
                         metadata_ms +=
                             (uint64_t)(obmm_now_ms() - reference_start_ms);
                         break;
+                    }
+                    if (!token_resolution_reported) {
+                        uint64_t key_hash = lingqu_object_ref_key_hash(
+                            token_result_key, strlen(token_result_key));
+                        uint64_t slot_index =
+                            key_hash % MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOTS;
+
+                        printf("[mem_service] gap model_range_forward="
+                               "runtime_token_reference_probe_failed"
+                               " local=node%u source=node%u key=%s"
+                               " key_hash=0x%016" PRIx64
+                               " slot=%" PRIu64 " status=%s\n",
+                               local_node + 1U,
+                               owner_idx + 1U,
+                               token_result_key,
+                               key_hash,
+                               slot_index,
+                               mem_service_terminal_token_reference_status_name(
+                                   reference_status));
+                        token_resolution_reported = true;
                     }
                 }
             }
@@ -555,14 +590,19 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             }
             owner_slot = &rt->slots[source_node];
             if (!token_reference_found) {
+                enum mem_service_terminal_token_reference_status
+                    reference_status;
                 long metadata_start_ms = obmm_now_ms();
 
-                if (!mem_service_model_refresh_terminal_token_reference(
+                reference_status =
+                    mem_service_model_refresh_terminal_token_reference(
                         rt,
                         owner_slot,
                         source_node,
                         token_result_key,
-                        &token_reference)) {
+                        &token_reference);
+                if (reference_status !=
+                    MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK) {
                     if (!token_resolution_reported) {
                         printf("[mem_service] gap model_range_forward="
                                "runtime_token_reference_resolution_failed"
@@ -570,13 +610,16 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                                " record_locator=%u"
                                " desc_offset=0x%016" PRIx64
                                " desc_bytes=%u desc_cookie=0x%08" PRIx32
+                               " status=%s"
                                "\n",
                                local_node + 1U,
                                source_node + 1U,
                                token_desc.region_id,
                                token_desc.payload_offset,
                                token_desc.payload_len,
-                               token_desc.cookie);
+                               token_desc.cookie,
+                               mem_service_terminal_token_reference_status_name(
+                                   reference_status));
                         token_resolution_reported = true;
                     }
                     token_desc_found = false;
@@ -586,6 +629,21 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 metadata_ms +=
                     (uint64_t)(obmm_now_ms() - metadata_start_ms);
                 token_reference_found = true;
+            }
+            if (!token_reference_success_reported) {
+                printf("[mem_service] stage model_range_forward="
+                       "runtime_token_reference_resolved"
+                       " local=node%u source=node%u key=%s"
+                       " offset=0x%016" PRIx64 " bytes=%" PRIu64
+                       " checksum=0x%016" PRIx64 " receive=%s status=ok\n",
+                       local_node + 1U,
+                       source_node + 1U,
+                       token_result_key,
+                       token_reference.payload_offset,
+                       token_reference.payload_bytes,
+                       token_reference.payload_checksum,
+                       token_resolution);
+                token_reference_success_reported = true;
             }
             if (token_desc_found &&
                 (token_desc.region_id == 0 ||
@@ -606,6 +664,18 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     owner_slot,
                     token_reference.payload_offset,
                     token_reference.payload_bytes)) {
+                if (!token_payload_failure_reported) {
+                    printf("[mem_service] gap model_range_forward="
+                           "runtime_token_payload_sync_failed"
+                           " local=node%u source=node%u key=%s"
+                           " offset=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
+                           local_node + 1U,
+                           source_node + 1U,
+                           token_result_key,
+                           token_reference.payload_offset,
+                           token_reference.payload_bytes);
+                    token_payload_failure_reported = true;
+                }
                 mem_service_cpu_relax_wait(&relax_attempt);
                 continue;
             }
@@ -628,6 +698,19 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 payload_view,
                 MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
             if (checksum != token_reference.payload_checksum) {
+                if (!token_payload_failure_reported) {
+                    printf("[mem_service] gap model_range_forward="
+                           "runtime_token_payload_checksum_mismatch"
+                           " local=node%u source=node%u key=%s"
+                           " checksum=0x%016" PRIx64
+                           " expected=0x%016" PRIx64 "\n",
+                           local_node + 1U,
+                           source_node + 1U,
+                           token_result_key,
+                           checksum,
+                           token_reference.payload_checksum);
+                    token_payload_failure_reported = true;
+                }
                 mem_service_cpu_relax_wait(&relax_attempt);
                 continue;
             }
@@ -853,6 +936,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         token_result_key,
                         &terminal_desc,
                         decode_step,
+                        NULL,
                         &token_reference,
                         &payload_view,
                         payload_words,
@@ -947,6 +1031,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         token_result_key,
                         NULL,
                         decode_step,
+                        NULL,
                         &token_reference,
                         &payload_view,
                         payload_words,

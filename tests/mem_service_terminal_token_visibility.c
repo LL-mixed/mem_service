@@ -185,7 +185,8 @@ int main(int argc, char **argv)
         }
         memset(&reference, 0, sizeof(reference));
         success = mem_service_model_refresh_terminal_token_reference(
-            &runtime, &runtime.slots[1], 1, key, &reference);
+                      &runtime, &runtime.slots[1], 1, key, &reference) ==
+                  MEM_SERVICE_TERMINAL_TOKEN_REFERENCE_OK;
         assert(success == (strcmp(argv[1], "reference_remote") == 0));
         if (success) {
             assert(reference.payload_checksum ==

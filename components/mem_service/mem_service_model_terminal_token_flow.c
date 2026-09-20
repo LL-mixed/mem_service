@@ -100,6 +100,8 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     char token_result_key[256];
     uint64_t payload_words[8];
     uint64_t token_result_offset;
+    uint64_t token_reference_offset;
+    uint64_t token_reference_slot;
     uint64_t checksum;
     uint32_t target_node;
     uint32_t token_record_locator;
@@ -221,6 +223,11 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
             rt, local_slot, &token_reference)) {
         return -1;
     }
+    token_reference_slot =
+        token_reference.key_hash % MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOTS;
+    token_reference_offset = MEM_SERVICE_OBMM_TOKEN_REFERENCE_OFFSET +
+                             token_reference_slot *
+                                 MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES;
     memset(&token_desc, 0, sizeof(token_desc));
     token_desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
     token_desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
@@ -289,7 +296,7 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
             notifications_backpressured = 1;
         }
     }
-    printf("[mem_service] stage model_terminal_token_result_publish local=node%u target=node%u step=%" PRIu64 " token=%" PRIu64 " runner_up=%" PRIu64 " margin_milli=%" PRIu64 " logits_checksum=0x%016" PRIx64 " text_checksum=0x%016" PRIx64 " piece_word0=0x%016" PRIx64 " piece_word1=0x%016" PRIx64 " object_key=%s record_locator=%u offset=0x%016" PRIx64 " bytes=%" PRIu64 " checksum=0x%016" PRIx64 " epoch=%u seq=%u backing=obmm_pool metadata=db queue=%s status=ok notification=%s publisher=%s broadcast_targets=%u\n",
+    printf("[mem_service] stage model_terminal_token_result_publish local=node%u target=node%u step=%" PRIu64 " token=%" PRIu64 " runner_up=%" PRIu64 " margin_milli=%" PRIu64 " logits_checksum=0x%016" PRIx64 " text_checksum=0x%016" PRIx64 " piece_word0=0x%016" PRIx64 " piece_word1=0x%016" PRIx64 " object_key=%s record_locator=%u offset=0x%016" PRIx64 " bytes=%" PRIu64 " checksum=0x%016" PRIx64 " reference_slot=%" PRIu64 " reference_offset=0x%016" PRIx64 " reference_copies=2 epoch=%u seq=%u backing=obmm_pool metadata=db queue=%s status=ok notification=%s publisher=%s broadcast_targets=%u\n",
            local_node + 1U,
            target_node + 1U,
            decode_step,
@@ -305,6 +312,8 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
            local_token_result.object_backing_offset,
            local_token_result.object_backing_len,
            local_token_result.object_payload_checksum,
+           token_reference_slot,
+           token_reference_offset,
            object_epoch,
            local_publish_seq,
            target_node == (uint32_t)rt->local_idx ? "local_pending" : "obmm_spsc",

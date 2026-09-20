@@ -3345,11 +3345,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertNotIn("if (!token_record_resolved)", range_wait_flow)
         self.assertNotIn("runtime_token_recovery_candidate", range_wait_flow)
         self.assertNotIn("runtime_token_record_unresolved", range_wait_flow)
-        self.assertLess(
-            range_wait_flow.index("mem_service_pop_ingress_desc(rt, owner_idx"),
-            range_wait_flow.index(
-                "if (mem_service_model_refresh_terminal_token_reference("
-            ),
+        self.assertIn(
+            "runtime_token_reference_probe_failed",
+            range_wait_flow,
         )
         self.assertIn("next_token_reference_probe_ms = 0", range_wait_flow)
         self.assertIn(
