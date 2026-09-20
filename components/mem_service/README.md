@@ -412,17 +412,26 @@ before exposing the path to unrelated callers or concurrent dispatch owners.
 
 ## Remote token visibility
 
-Range and terminal-token readers share the bounded remote refresh helpers in
-`mem_service_cluster_read.c`. An existing imported mapping requires explicit
-metadata refresh before lookup and payload refresh before copying token bytes.
-The metadata refresh confirms the publication sequence after copying records;
-sync failures and inconsistent publications leave the read unsuccessful.
-Local slots do not require remote synchronization. Token step, bounds, kind,
-and checksum checks remain required after refresh.
+Terminal-token publication writes a committed Lingqu object reference into a
+fixed OBMM control slot before sending the SPSC descriptor. Each slot contains
+two identical 64-byte copies. Readers require both copies to match and verify
+the exact object-key hash, owner, kind, bounds, token step, and payload
+checksum. A queue descriptor provides the low-latency notification and is
+cross-checked against the durable reference; a delayed, backpressured, or
+already-drained descriptor can be recovered by reading the exact reference
+slot. The decode hot path therefore does not scan the remote record table.
+
+Other range readers share the bounded remote metadata and payload refresh
+helpers in `mem_service_cluster_read.c`. An existing imported mapping requires
+an explicit refresh before reading remote bytes. Local slots do not require
+remote synchronization. Any sync failure, mismatched reference copies, stale
+key, inconsistent descriptor, invalid bounds, wrong step, or checksum mismatch
+leaves the token read unsuccessful.
 
 Run the following command from the repository root for
-the executable stale-import, local-read, sync-failure, publication-consistency,
-checksum, bounds, and address-overflow regression cases.
+the executable object-reference visibility, torn-copy, stale-import,
+sync-failure, publication-consistency, checksum, bounds, and address-overflow
+regression cases.
 
 ```sh
 python3 -m unittest discover -s tests -p test_mem_service_terminal_token_visibility.py

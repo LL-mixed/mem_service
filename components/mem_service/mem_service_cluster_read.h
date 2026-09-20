@@ -20,6 +20,18 @@ bool mem_service_model_refresh_remote_payload(
     uint64_t payload_offset,
     uint64_t payload_len);
 
+bool mem_service_model_publish_terminal_token_reference(
+    const struct mem_service_cluster_runtime *rt,
+    struct mem_service_cluster_slot *slot,
+    const struct lingqu_object_ref_wire *reference);
+
+bool mem_service_model_refresh_terminal_token_reference(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    uint32_t expected_owner_node,
+    const char *expected_key,
+    struct lingqu_object_ref_wire *reference_out);
+
 bool mem_service_try_read_stable_payload_region(
     const struct mem_service_cluster_slot *slot,
     struct mem_service_cluster_payload *snapshot,

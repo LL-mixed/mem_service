@@ -12,11 +12,11 @@
 #include "mem_service_record_table.h"
 #include "mem_service_ub_ssd_gsva_io.h"
 
-/* Descriptor delivery plus consumer ACK is authoritative. Record lookup is a
- * delayed recovery path for a lost/backpressured notification. */
+/* Queue descriptors minimize latency. The published object reference remains
+ * available when a descriptor is delayed, backpressured, or already drained. */
 #define MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS \
     (MEM_SERVICE_CLUSTER_WAIT_MS / 2L)
-#define MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS 5000L
+#define MEM_SERVICE_MODEL_TOKEN_REFERENCE_POLL_MS 250L
 
 static bool mem_service_model_record_recovery_due(long *next_probe_ms,
                                                    long interval_ms)
@@ -100,44 +100,58 @@ static void mem_service_model_format_runtime_wait_range_key(
              object_decode_step);
 }
 
-static bool mem_service_model_recover_token_desc(
+static bool mem_service_model_read_terminal_token_reference(
     struct mem_service_cluster_runtime *rt,
-    uint32_t owner_idx,
+    struct mem_service_cluster_slot *slot,
+    uint32_t owner_node,
     const char *token_result_key,
-    uint16_t expected_epoch,
-    struct mem_service_record *token_record,
-    struct obmm_desc *token_desc)
+    const struct obmm_desc *descriptor,
+    uint64_t expected_decode_step,
+    struct lingqu_object_ref_wire *reference_out,
+    const uint8_t **payload_view_out,
+    uint64_t payload_words_out[8],
+    uint64_t *checksum_out)
 {
-    struct mem_service_cluster_slot *slot;
+    struct lingqu_object_ref_wire reference;
+    const uint8_t *payload_view;
+    uint64_t checksum;
 
-    if (!rt || owner_idx >= (uint32_t)rt->node_count || !token_result_key ||
-        !token_record || !token_desc) {
+    if (!rt || !slot || !token_result_key || !reference_out ||
+        !payload_view_out || !payload_words_out || !checksum_out ||
+        !mem_service_model_refresh_terminal_token_reference(
+            rt, slot, owner_node, token_result_key, &reference)) {
         return false;
     }
-    slot = &rt->slots[owner_idx];
-    if (!slot->region.addr ||
-        !mem_service_model_refresh_remote_record_by_key(
-            rt, slot, token_result_key, token_record) ||
-        token_record->kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
-        token_record->object_owner_node != owner_idx ||
-        token_record->object_payload_kind !=
-            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
-        token_record->object_backing_len !=
-            MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES) {
+    if (descriptor &&
+        (descriptor->region_id == 0 ||
+         descriptor->region_id > MEM_SERVICE_CLUSTER_MAX_RECORDS ||
+         reference.payload_offset != descriptor->payload_offset ||
+         reference.payload_bytes != descriptor->payload_len ||
+         descriptor->cookie !=
+             (uint32_t)(reference.payload_checksum ^
+                        (reference.payload_checksum >> 32)))) {
         return false;
     }
-    memset(token_desc, 0, sizeof(*token_desc));
-    token_desc->type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
-    token_desc->flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
-    token_desc->seq = ((uint64_t)expected_epoch << 48) |
-                      ((uint64_t)(owner_idx + 1U) << 32) |
-                      (token_record->object_backing_offset & 0xffffffffULL);
-    token_desc->region_id = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
-    token_desc->payload_len = (uint32_t)token_record->object_backing_len;
-    token_desc->payload_offset = token_record->object_backing_offset;
-    token_desc->cookie =
-        (uint32_t)(token_record->object_payload_checksum ^
-                   (token_record->object_payload_checksum >> 32));
+    if (!mem_service_model_refresh_remote_payload(
+            rt, slot, reference.payload_offset, reference.payload_bytes)) {
+        return false;
+    }
+    payload_view = (const uint8_t *)slot->region.addr +
+                   reference.payload_offset;
+    memcpy(payload_words_out,
+           payload_view,
+           MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
+    if (payload_words_out[0] != expected_decode_step) {
+        return false;
+    }
+    checksum = mem_service_model_payload_checksum(
+        payload_view, MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
+    if (checksum != reference.payload_checksum) {
+        return false;
+    }
+    *reference_out = reference;
+    *payload_view_out = payload_view;
+    *checksum_out = checksum;
     return true;
 }
 
@@ -363,8 +377,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     long producer_publish_monotonic_ms;
     long producer_clock_offset_ms;
     long next_range_record_recovery_ms = 0;
-    long next_terminal_record_recovery_ms = 0;
-    long next_token_record_recovery_ms = 0;
+    long next_terminal_reference_probe_ms = 0;
+    long next_token_reference_probe_ms = 0;
     long producer_to_found_ms = 0;
     long producer_to_found_monotonic_ms = 0;
     uint64_t activate_ms = 0;
@@ -374,8 +388,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
     unsigned int relax_attempt = 0;
     uint32_t source_node = UINT32_MAX;
     uint32_t terminal_source_node = UINT32_MAX;
-    uint32_t terminal_record_recovery_owner = 0;
-    uint32_t token_record_recovery_owner = 0;
+    uint32_t terminal_reference_probe_owner = 0;
+    uint32_t token_reference_probe_owner = 0;
     uint64_t hidden_range_bytes;
     const uint8_t *payload_view;
     uint64_t checksum;
@@ -408,17 +422,17 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         return 0;
     }
     if (local_placement.layer_start == 0) {
-        struct mem_service_record token_record;
         struct mem_service_cluster_slot *owner_slot;
+        struct lingqu_object_ref_wire token_reference;
         char token_result_key[256];
         struct obmm_desc token_desc;
         uint64_t payload_words[8];
         uint64_t checksum;
         bool token_input_found = false;
         bool token_desc_found = false;
-        bool token_record_resolved = false;
         bool token_resolution_reported = false;
-        const char *token_resolution = "descriptor";
+        bool token_reference_found = false;
+        const char *token_resolution = "descriptor_object_ref";
 
         if (mem_service_cluster_runtime_require(rt) != 0) {
             fprintf(stderr,
@@ -440,19 +454,20 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         if (expected_epoch == 0) {
             expected_epoch = 1;
         }
-        token_record_recovery_owner = cluster_node_count - 1U;
-        next_token_record_recovery_ms = 0;
+        token_reference_probe_owner = cluster_node_count - 1U;
+        next_token_reference_probe_ms = 0;
         deadline = wait_enter_ms + mem_service_qwen3_runtime_range_wait_ms();
         while (obmm_now_ms() < deadline) {
-            bool probe_token_record =
+            bool probe_token_reference =
                 mem_service_model_record_recovery_due(
-                    &next_token_record_recovery_ms,
-                    MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS);
+                    &next_token_reference_probe_ms,
+                    MEM_SERVICE_MODEL_TOKEN_REFERENCE_POLL_MS);
             int owner_idx;
 
             attempts++;
             for (owner_idx = 0;
-                 !token_desc_found && owner_idx < rt->node_count;
+                 !token_desc_found && !token_reference_found &&
+                 owner_idx < rt->node_count;
                  ++owner_idx) {
                 struct obmm_desc rx;
 
@@ -501,29 +516,31 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                                ingress_drained);
                     }
                 }
-                if (!token_desc_found && probe_token_record &&
-                    (uint32_t)owner_idx == token_record_recovery_owner) {
-                    if (mem_service_model_recover_token_desc(
+                if (!token_desc_found && probe_token_reference &&
+                    (uint32_t)owner_idx == token_reference_probe_owner) {
+                    long reference_start_ms = obmm_now_ms();
+
+                    if (mem_service_model_refresh_terminal_token_reference(
                             rt,
+                            &rt->slots[owner_idx],
                             (uint32_t)owner_idx,
                             token_result_key,
-                            expected_epoch,
-                            &token_record,
-                            &token_desc)) {
+                            &token_reference)) {
                         source_node = (uint32_t)owner_idx;
-                        token_desc_found = true;
-                        token_record_resolved = true;
-                        token_resolution = "object_record";
+                        token_reference_found = true;
+                        token_resolution = "durable_object_ref";
+                        metadata_ms +=
+                            (uint64_t)(obmm_now_ms() - reference_start_ms);
                         break;
                     }
                 }
             }
-            if (probe_token_record) {
-                token_record_recovery_owner =
-                    (token_record_recovery_owner + 1U) %
+            if (probe_token_reference) {
+                token_reference_probe_owner =
+                    (token_reference_probe_owner + 1U) %
                     (uint32_t)rt->node_count;
             }
-            if (!token_desc_found) {
+            if (!token_desc_found && !token_reference_found) {
                 mem_service_cpu_relax_wait(&relax_attempt);
                 continue;
             }
@@ -537,26 +554,18 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 activate_ms += (uint64_t)(obmm_now_ms() - activate_start_ms);
             }
             owner_slot = &rt->slots[source_node];
-            if (!token_record_resolved) {
+            if (!token_reference_found) {
                 long metadata_start_ms = obmm_now_ms();
-                bool record_ready = false;
 
-                memset(&token_record, 0, sizeof(token_record));
-                record_ready =
-                    mem_service_model_refresh_remote_record_at_obmm_object_backing(
+                if (!mem_service_model_refresh_terminal_token_reference(
                         rt,
                         owner_slot,
-                        token_desc.region_id,
-                        MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
-                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
-                        token_desc.payload_offset,
-                        token_desc.payload_len,
-                        token_desc.cookie,
-                        &token_record);
-                if (!record_ready) {
+                        source_node,
+                        token_result_key,
+                        &token_reference)) {
                     if (!token_resolution_reported) {
                         printf("[mem_service] gap model_range_forward="
-                               "runtime_token_descriptor_resolution_failed"
+                               "runtime_token_reference_resolution_failed"
                                " local=node%u source=node%u"
                                " record_locator=%u"
                                " desc_offset=0x%016" PRIx64
@@ -574,23 +583,18 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
                 }
-                metadata_ms = (uint64_t)(obmm_now_ms() - metadata_start_ms);
+                metadata_ms +=
+                    (uint64_t)(obmm_now_ms() - metadata_start_ms);
+                token_reference_found = true;
             }
-            snprintf(token_result_key,
-                     sizeof(token_result_key),
-                     "%s",
-                     token_record.key);
-            if (token_record.kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
-                token_record.object_payload_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
-                token_record.object_backing_len != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
-                token_record.object_backing_offset != token_desc.payload_offset ||
-                token_record.object_backing_len != token_desc.payload_len ||
-                token_desc.cookie !=
-                    (uint32_t)(token_record.object_payload_checksum ^
-                               (token_record.object_payload_checksum >> 32)) ||
-                token_record.object_backing_offset > owner_slot->region.len ||
-                token_record.object_backing_len >
-                    owner_slot->region.len - token_record.object_backing_offset) {
+            if (token_desc_found &&
+                (token_desc.region_id == 0 ||
+                 token_desc.region_id > MEM_SERVICE_CLUSTER_MAX_RECORDS ||
+                 token_reference.payload_offset != token_desc.payload_offset ||
+                 token_reference.payload_bytes != token_desc.payload_len ||
+                 token_desc.cookie !=
+                     (uint32_t)(token_reference.payload_checksum ^
+                                (token_reference.payload_checksum >> 32)))) {
                 printf("[mem_service] gap model_range_forward=runtime_token_input_invalid local=node%u source=node%u key=%s\n",
                        local_node + 1U,
                        source_node + 1U,
@@ -600,14 +604,14 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             if (!mem_service_model_refresh_remote_payload(
                     rt,
                     owner_slot,
-                    token_record.object_backing_offset,
-                    token_record.object_backing_len)) {
+                    token_reference.payload_offset,
+                    token_reference.payload_bytes)) {
                 mem_service_cpu_relax_wait(&relax_attempt);
                 continue;
             }
             payload_view =
                 (const uint8_t *)owner_slot->region.addr +
-                token_record.object_backing_offset;
+                token_reference.payload_offset;
             memcpy(payload_words,
                    payload_view,
                    MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
@@ -623,7 +627,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             checksum = mem_service_model_payload_checksum(
                 payload_view,
                 MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-            if (checksum != token_record.object_payload_checksum) {
+            if (checksum != token_reference.payload_checksum) {
                 mem_service_cpu_relax_wait(&relax_attempt);
                 continue;
             }
@@ -631,22 +635,21 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             break;
         }
         if (!token_input_found) {
-            printf("[mem_service] gap model_range_forward=runtime_token_input_wait_failed local=node%u source=%s step=%" PRIu64 " epoch=%u attempts=%u desc_found=%u\n",
+            printf("[mem_service] gap model_range_forward=runtime_token_input_wait_failed local=node%u source=%s step=%" PRIu64 " epoch=%u attempts=%u desc_found=%u reference_found=%u\n",
                    local_node + 1U,
-                   source_node == UINT32_MAX ? "none" : "descriptor",
+                   source_node == UINT32_MAX ? "none" : token_resolution,
                    decode_step - 1U,
                    expected_epoch,
                    attempts,
-                   token_desc_found ? 1U : 0U);
+                   token_desc_found ? 1U : 0U,
+                   token_reference_found ? 1U : 0U);
             return -1;
         }
         found_local_ms = obmm_now_ms();
         found_ms = mem_service_wallclock_ms();
-        producer_publish_ms = (long)token_record.last_result_segment;
-        producer_publish_monotonic_ms =
-            (long)token_record.object_publish_monotonic_ms;
-        producer_clock_offset_ms =
-            (long)token_record.object_publish_supernode_offset_ms;
+        producer_publish_ms = 0;
+        producer_publish_monotonic_ms = 0;
+        producer_clock_offset_ms = 0;
         if (producer_publish_ms > 0 && found_ms > 0) {
             producer_to_found_ms = found_ms - producer_publish_ms;
         }
@@ -659,15 +662,12 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         view_out->len = MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES;
         view_out->checksum = checksum;
         view_out->owner_node = source_node;
-        view_out->payload_kind = token_record.object_payload_kind;
-        view_out->backing_offset = token_record.object_backing_offset;
+        view_out->payload_kind = token_reference.object_kind;
+        view_out->backing_offset = token_reference.payload_offset;
         memcpy(view_out->token_result_words,
                payload_words,
                MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-        if (mem_service_record_to_lingqu_object_ref(&token_record,
-                                                    &view_out->object_ref) != 0) {
-            return -1;
-        }
+        view_out->object_ref = token_reference;
         view_out->wait_enter_monotonic_ms =
             wait_enter_ms > 0 ? (uint64_t)wait_enter_ms : 0;
         view_out->found_monotonic_ms =
@@ -686,7 +686,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         view_out->wait_attempts = attempts;
         view_out->activate_ms = activate_ms;
         view_out->metadata_ms = metadata_ms;
-        printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " token=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=0 validation=object_desc_backing queue=obmm_spsc receive=%s metadata=lingqu_object_service backing=obmm_shmem source=terminal_token_result target=mapped_view status=ok\n",
+        printf("[mem_service] stage model_range_forward_runtime_input_resolve local=node%u source=node%u key=%s key_hash=0x%016" PRIx64 " version=%" PRIu64 " layers=[%u,%u) input_checksum=0x%016" PRIx64 " bytes=%" PRIu64 " token=%" PRIu64 " wait_enter_to_found_ms=%ld producer_publish_ms=%ld producer_publish_mono_ms=%ld producer_clock_offset_ms=%ld producer_to_found_ms=%ld producer_to_found_mono_ms=%ld attempts=%u activate_ms=%" PRIu64 " metadata_ms=%" PRIu64 " copy_ms=0 checksum_ms=0 validation=durable_object_ref queue=obmm_spsc_hint receive=%s metadata=lingqu_object_service backing=obmm_shmem source=terminal_token_result target=mapped_view status=ok\n",
                local_node + 1U,
                source_node + 1U,
                token_result_key,
@@ -772,11 +772,11 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         bool probe_range_record = mem_service_model_record_recovery_due(
             &next_range_record_recovery_ms,
             MEM_SERVICE_MODEL_RANGE_RECORD_RECOVERY_POLL_MS);
-        bool probe_terminal_record =
+        bool probe_terminal_reference =
             allow_terminal_commit &&
             mem_service_model_record_recovery_due(
-                &next_terminal_record_recovery_ms,
-                MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS);
+                &next_terminal_reference_probe_ms,
+                MEM_SERVICE_MODEL_TOKEN_REFERENCE_POLL_MS);
         struct obmm_desc rx;
 
         attempts++;
@@ -825,11 +825,10 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             if (terminal_desc_found &&
                 terminal_source_node < (uint32_t)rt->node_count) {
                 struct mem_service_cluster_slot *token_slot;
-                struct mem_service_record token_record;
-                struct mem_service_cluster_payload_compact_summary compact;
-                struct mem_service_cluster_payload_header seen;
+                struct lingqu_object_ref_wire token_reference;
                 uint64_t payload_words[8];
                 uint64_t token_checksum;
+                long metadata_start_ms;
 
                 if (terminal_source_node != (uint32_t)rt->local_idx &&
                     !rt->slots[terminal_source_node].region.addr) {
@@ -845,84 +844,30 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         (uint64_t)(obmm_now_ms() - activate_start_ms);
                 }
                 token_slot = &rt->slots[terminal_source_node];
-                memset(&token_record, 0, sizeof(token_record));
-                memset(&compact, 0, sizeof(compact));
-                memset(&seen, 0, sizeof(seen));
-                {
-                    long metadata_start_ms = obmm_now_ms();
-
-                    if (!token_slot->region.addr ||
-                        !mem_service_model_refresh_remote_metadata(
-                            rt,
-                            token_slot) ||
-                        !mem_service_try_read_stable_compact_summary_region(
-                            token_slot,
-                            &compact,
-                            &seen) ||
-                        !mem_service_slot_find_record_by_obmm_object_backing(
-                            token_slot,
-                            MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
-                            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
-                            terminal_desc.payload_offset,
-                            terminal_desc.payload_len,
-                            terminal_desc.cookie,
-                            &token_record)) {
-                        mem_service_cpu_relax_wait(&relax_attempt);
-                        continue;
-                    }
-                    metadata_ms +=
-                        (uint64_t)(obmm_now_ms() - metadata_start_ms);
-                }
-                if (token_record.kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
-                    token_record.object_payload_kind !=
-                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
-                    token_record.object_backing_len !=
-                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
-                    token_record.object_backing_offset !=
-                        terminal_desc.payload_offset ||
-                    token_record.object_backing_len != terminal_desc.payload_len ||
-                    terminal_desc.cookie !=
-                        (uint32_t)(token_record.object_payload_checksum ^
-                                   (token_record.object_payload_checksum >> 32)) ||
-                    token_record.object_backing_offset > token_slot->region.len ||
-                    token_record.object_backing_len >
-                        token_slot->region.len -
-                            token_record.object_backing_offset) {
-                    mem_service_cpu_relax_wait(&relax_attempt);
-                    continue;
-                }
-                if (!mem_service_model_refresh_remote_payload(
+                metadata_start_ms = obmm_now_ms();
+                if (!token_slot->region.addr ||
+                    !mem_service_model_read_terminal_token_reference(
                         rt,
                         token_slot,
-                        token_record.object_backing_offset,
-                        token_record.object_backing_len)) {
+                        terminal_source_node,
+                        token_result_key,
+                        &terminal_desc,
+                        decode_step,
+                        &token_reference,
+                        &payload_view,
+                        payload_words,
+                        &token_checksum)) {
+                    terminal_desc_found = false;
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
                 }
-                payload_view =
-                    (const uint8_t *)token_slot->region.addr +
-                    token_record.object_backing_offset;
-                memcpy(payload_words,
-                       payload_view,
-                       MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-                if (payload_words[0] != decode_step) {
-                    mem_service_cpu_relax_wait(&relax_attempt);
-                    continue;
-                }
-                token_checksum = mem_service_model_payload_checksum(
-                    payload_view,
-                    MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-                if (token_checksum != token_record.object_payload_checksum) {
-                    mem_service_cpu_relax_wait(&relax_attempt);
-                    continue;
-                }
+                metadata_ms +=
+                    (uint64_t)(obmm_now_ms() - metadata_start_ms);
                 found_local_ms = obmm_now_ms();
                 found_ms = mem_service_wallclock_ms();
-                producer_publish_ms = (long)token_record.last_result_segment;
-                producer_publish_monotonic_ms =
-                    (long)token_record.object_publish_monotonic_ms;
-                producer_clock_offset_ms =
-                    (long)token_record.object_publish_supernode_offset_ms;
+                producer_publish_ms = 0;
+                producer_publish_monotonic_ms = 0;
+                producer_clock_offset_ms = 0;
                 if (producer_publish_ms > 0 && found_ms > 0) {
                     producer_to_found_ms = found_ms - producer_publish_ms;
                 }
@@ -935,15 +880,12 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 view_out->len = MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES;
                 view_out->checksum = token_checksum;
                 view_out->owner_node = terminal_source_node;
-                view_out->payload_kind = token_record.object_payload_kind;
-                view_out->backing_offset = token_record.object_backing_offset;
+                view_out->payload_kind = token_reference.object_kind;
+                view_out->backing_offset = token_reference.payload_offset;
                 memcpy(view_out->token_result_words,
                        payload_words,
                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-                if (mem_service_record_to_lingqu_object_ref(&token_record,
-                                                            &view_out->object_ref) != 0) {
-                    return -1;
-                }
+                view_out->object_ref = token_reference;
                 view_out->wait_enter_monotonic_ms =
                     wait_enter_ms > 0 ? (uint64_t)wait_enter_ms : 0;
                 view_out->found_monotonic_ms =
@@ -974,21 +916,20 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                        terminal_source_node + 1U,
                        decode_step,
                        payload_words[1],
-                       token_record.key,
+                       token_result_key,
                        token_checksum);
                 return 0;
             }
             for (int owner_idx = 0;
-                 probe_terminal_record && owner_idx < rt->node_count;
+                 probe_terminal_reference && owner_idx < rt->node_count;
                  ++owner_idx) {
                 struct mem_service_cluster_slot *token_slot;
-                struct mem_service_record token_record;
-                struct mem_service_cluster_payload_compact_summary compact;
-                struct mem_service_cluster_payload_header seen;
+                struct lingqu_object_ref_wire token_reference;
                 uint64_t payload_words[8];
                 uint64_t token_checksum;
+                long metadata_start_ms;
 
-                if ((uint32_t)owner_idx != terminal_record_recovery_owner) {
+                if ((uint32_t)owner_idx != terminal_reference_probe_owner) {
                     continue;
                 }
 
@@ -997,55 +938,28 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     continue;
                 }
                 token_slot = &rt->slots[owner_idx];
-                memset(&token_record, 0, sizeof(token_record));
-                memset(&compact, 0, sizeof(compact));
-                memset(&seen, 0, sizeof(seen));
+                metadata_start_ms = obmm_now_ms();
                 if (!token_slot->region.addr ||
-                    !mem_service_model_refresh_remote_metadata(rt,
-                                                               token_slot) ||
-                    !mem_service_try_read_stable_compact_summary_region(token_slot,
-                                                                  &compact,
-                                                                  &seen) ||
-                    !mem_service_slot_find_record(token_slot,
-                                            token_result_key,
-                                            &token_record) ||
-                    token_record.kind != MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT ||
-                    token_record.object_payload_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
-                    token_record.object_backing_len != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
-                    token_record.object_backing_offset > token_slot->region.len ||
-                    token_record.object_backing_len >
-                        token_slot->region.len - token_record.object_backing_offset) {
-                    continue;
-                }
-                if (!mem_service_model_refresh_remote_payload(
+                    !mem_service_model_read_terminal_token_reference(
                         rt,
                         token_slot,
-                        token_record.object_backing_offset,
-                        token_record.object_backing_len)) {
+                        (uint32_t)owner_idx,
+                        token_result_key,
+                        NULL,
+                        decode_step,
+                        &token_reference,
+                        &payload_view,
+                        payload_words,
+                        &token_checksum)) {
                     continue;
                 }
-                payload_view =
-                    (const uint8_t *)token_slot->region.addr +
-                    token_record.object_backing_offset;
-                memcpy(payload_words,
-                       payload_view,
-                       MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-                if (payload_words[0] != decode_step) {
-                    continue;
-                }
-                token_checksum = mem_service_model_payload_checksum(
-                    payload_view,
-                    MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-                if (token_checksum != token_record.object_payload_checksum) {
-                    continue;
-                }
+                metadata_ms +=
+                    (uint64_t)(obmm_now_ms() - metadata_start_ms);
                 found_local_ms = obmm_now_ms();
                 found_ms = mem_service_wallclock_ms();
-                producer_publish_ms = (long)token_record.last_result_segment;
-                producer_publish_monotonic_ms =
-                    (long)token_record.object_publish_monotonic_ms;
-                producer_clock_offset_ms =
-                    (long)token_record.object_publish_supernode_offset_ms;
+                producer_publish_ms = 0;
+                producer_publish_monotonic_ms = 0;
+                producer_clock_offset_ms = 0;
                 if (producer_publish_ms > 0 && found_ms > 0) {
                     producer_to_found_ms = found_ms - producer_publish_ms;
                 }
@@ -1058,15 +972,12 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 view_out->len = MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES;
                 view_out->checksum = token_checksum;
                 view_out->owner_node = (uint32_t)owner_idx;
-                view_out->payload_kind = token_record.object_payload_kind;
-                view_out->backing_offset = token_record.object_backing_offset;
+                view_out->payload_kind = token_reference.object_kind;
+                view_out->backing_offset = token_reference.payload_offset;
                 memcpy(view_out->token_result_words,
                        payload_words,
                        MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES);
-                if (mem_service_record_to_lingqu_object_ref(&token_record,
-                                                            &view_out->object_ref) != 0) {
-                    return -1;
-                }
+                view_out->object_ref = token_reference;
                 view_out->wait_enter_monotonic_ms =
                     wait_enter_ms > 0 ? (uint64_t)wait_enter_ms : 0;
                 view_out->found_monotonic_ms =
@@ -1100,9 +1011,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                        token_checksum);
                 return 0;
             }
-            if (probe_terminal_record) {
-                terminal_record_recovery_owner =
-                    (terminal_record_recovery_owner + 1U) %
+            if (probe_terminal_reference) {
+                terminal_reference_probe_owner =
+                    (terminal_reference_probe_owner + 1U) %
                     (uint32_t)rt->node_count;
             }
         }

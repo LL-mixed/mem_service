@@ -95,6 +95,8 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     struct mem_service_cluster_slot *local_slot;
     struct mem_service_record local_token_result;
     struct mem_service_layer_range_placement local_placement;
+    struct lingqu_object_ref_wire token_reference;
+    struct obmm_desc token_desc;
     char token_result_key[256];
     uint64_t payload_words[8];
     uint64_t token_result_offset;
@@ -213,33 +215,37 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
     if (object_epoch == 0) {
         object_epoch = 1;
     }
+    if (mem_service_record_to_lingqu_object_ref(&local_token_result,
+                                                &token_reference) != 0 ||
+        !mem_service_model_publish_terminal_token_reference(
+            rt, local_slot, &token_reference)) {
+        return -1;
+    }
+    memset(&token_desc, 0, sizeof(token_desc));
+    token_desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
+    token_desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
+    token_desc.seq = ((uint64_t)object_epoch << 48) |
+                     ((uint64_t)(rt->local_idx + 1) << 32) |
+                     (local_token_result.object_backing_offset & 0xffffffffULL);
+    token_desc.region_id = token_record_locator;
+    token_desc.payload_len =
+        (uint32_t)local_token_result.object_backing_len;
+    token_desc.payload_offset = local_token_result.object_backing_offset;
+    token_desc.cookie =
+        (uint32_t)(local_token_result.object_payload_checksum ^
+                   (local_token_result.object_payload_checksum >> 32));
     if (!require_terminal_node) {
         uint32_t node_idx;
 
         for (node_idx = 0; node_idx < cluster_node_count; ++node_idx) {
             if (node_idx == (uint32_t)rt->local_idx) {
-                struct obmm_desc desc;
-
                 if (rt->pending_desc_count[rt->local_idx] >=
                     MEM_SERVICE_CLUSTER_PENDING_DESC_DEPTH) {
                     return -1;
                 }
-                memset(&desc, 0, sizeof(desc));
-                desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
-                desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
-                desc.seq = ((uint64_t)object_epoch << 48) |
-                           ((uint64_t)(rt->local_idx + 1) << 32) |
-                           (local_token_result.object_backing_offset &
-                            0xffffffffULL);
-                desc.region_id = token_record_locator;
-                desc.payload_len =
-                    (uint32_t)local_token_result.object_backing_len;
-                desc.payload_offset = local_token_result.object_backing_offset;
-                desc.cookie =
-                    (uint32_t)(local_token_result.object_payload_checksum ^
-                               (local_token_result.object_payload_checksum >>
-                                32));
-                mem_service_stash_pending_desc(rt, rt->local_idx, &desc);
+                mem_service_stash_pending_desc(rt,
+                                               rt->local_idx,
+                                               &token_desc);
             } else {
                 int notify_status = mem_service_try_push_obmm_record_desc_to(
                     rt,
@@ -260,25 +266,11 @@ static int mem_service_obmm_service_v0_publish_terminal_token_result_from_node(
             }
         }
     } else if (target_node == (uint32_t)rt->local_idx) {
-        struct obmm_desc desc;
-
         if (rt->pending_desc_count[rt->local_idx] >=
             MEM_SERVICE_CLUSTER_PENDING_DESC_DEPTH) {
             return -1;
         }
-        memset(&desc, 0, sizeof(desc));
-        desc.type = OBMM_DESC_MEM_SERVICE_OBJECT_PUT;
-        desc.flags = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
-        desc.seq = ((uint64_t)object_epoch << 48) |
-                   ((uint64_t)(rt->local_idx + 1) << 32) |
-                   (local_token_result.object_backing_offset & 0xffffffffULL);
-        desc.region_id = token_record_locator;
-        desc.payload_len = (uint32_t)local_token_result.object_backing_len;
-        desc.payload_offset = local_token_result.object_backing_offset;
-        desc.cookie =
-            (uint32_t)(local_token_result.object_payload_checksum ^
-                       (local_token_result.object_payload_checksum >> 32));
-        mem_service_stash_pending_desc(rt, rt->local_idx, &desc);
+        mem_service_stash_pending_desc(rt, rt->local_idx, &token_desc);
     } else {
         int notify_status = mem_service_try_push_obmm_record_desc_to(
             rt,

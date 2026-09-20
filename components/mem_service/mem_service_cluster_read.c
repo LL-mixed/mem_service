@@ -3,12 +3,26 @@
 #include "mem_service_cluster_runtime.h"
 #include "mem_service_cluster_utils.h"
 #include "mem_service_compiler.h"
+#include "mem_service_object_contract.h"
 
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
+
+_Static_assert(sizeof(struct lingqu_object_ref_wire) ==
+                   MEM_SERVICE_OBMM_TOKEN_REFERENCE_COPY_BYTES,
+               "terminal token reference copy must remain 64 bytes");
+_Static_assert(MEM_SERVICE_OBMM_TOKEN_REFERENCE_OFFSET +
+                       MEM_SERVICE_OBMM_TOKEN_REFERENCE_REGION_BYTES <=
+                   MEM_SERVICE_OBMM_KV_STATE_OFFSET,
+               "terminal token references must not overlap KV state");
+
+static void mem_service_copy_from_mapped_volatile(void *dst,
+                                                   const volatile uint8_t *src,
+                                                   size_t len);
 
 bool mem_service_model_refresh_remote_payload(
     const struct mem_service_cluster_runtime *rt,
@@ -28,6 +42,115 @@ bool mem_service_model_refresh_remote_payload(
                slot,
                rt->payload_offset + payload_offset,
                payload_len) == 0;
+}
+
+static uint64_t mem_service_model_terminal_token_reference_offset(
+    uint64_t key_hash)
+{
+    uint64_t slot_index =
+        key_hash % MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOTS;
+
+    return MEM_SERVICE_OBMM_TOKEN_REFERENCE_OFFSET +
+           slot_index * MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES;
+}
+
+bool mem_service_model_publish_terminal_token_reference(
+    const struct mem_service_cluster_runtime *rt,
+    struct mem_service_cluster_slot *slot,
+    const struct lingqu_object_ref_wire *reference)
+{
+    uint64_t offset;
+    uint8_t *base;
+
+    if (!rt || !slot || !slot->is_local || !slot->region.addr || !reference ||
+        reference->magic != LINGQU_OBJECT_REF_MAGIC ||
+        reference->layout_version != LINGQU_OBJECT_REF_LAYOUT_VERSION ||
+        reference->object_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
+        reference->state != LINGQU_OBJECT_STATE_COMMITTED_WIRE ||
+        reference->flags != 0 || reference->payload_bytes !=
+                                      MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES) {
+        return false;
+    }
+    offset = mem_service_model_terminal_token_reference_offset(
+        reference->key_hash);
+    if (offset > slot->region.len ||
+        MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES >
+            slot->region.len - offset) {
+        return false;
+    }
+    base = (uint8_t *)slot->region.addr + offset;
+    memcpy(base, reference, sizeof(*reference));
+    memcpy(base + sizeof(*reference), reference, sizeof(*reference));
+    if (mem_service_update_region_range_at(
+            slot,
+            offset,
+            MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES,
+            true) != 0) {
+        return false;
+    }
+    (void)msync(base, MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES, MS_SYNC);
+    return true;
+}
+
+bool mem_service_model_refresh_terminal_token_reference(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    uint32_t expected_owner_node,
+    const char *expected_key,
+    struct lingqu_object_ref_wire *reference_out)
+{
+    struct lingqu_object_ref_wire first;
+    struct lingqu_object_ref_wire second;
+    const volatile uint8_t *mapped_bytes;
+    uint64_t expected_key_hash;
+    uint64_t offset;
+    size_t key_len;
+
+    if (!rt || !slot || !slot->region.addr || !expected_key ||
+        !reference_out) {
+        return false;
+    }
+    key_len = strnlen(expected_key,
+                      sizeof(((struct mem_service_record *)0)->key));
+    if (key_len == 0 ||
+        key_len == sizeof(((struct mem_service_record *)0)->key)) {
+        return false;
+    }
+    expected_key_hash = lingqu_object_ref_key_hash(expected_key, key_len);
+    offset = mem_service_model_terminal_token_reference_offset(
+        expected_key_hash);
+    if (offset > slot->region.len ||
+        MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES >
+            slot->region.len - offset ||
+        !mem_service_model_refresh_remote_payload(
+            rt,
+            slot,
+            offset,
+            MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES)) {
+        return false;
+    }
+    mapped_bytes = (const volatile uint8_t *)slot->region.addr + offset;
+    mem_service_copy_from_mapped_volatile(&first,
+                                          mapped_bytes,
+                                          sizeof(first));
+    mem_service_copy_from_mapped_volatile(&second,
+                                          mapped_bytes + sizeof(first),
+                                          sizeof(second));
+    if (memcmp(&first, &second, sizeof(first)) != 0 ||
+        first.magic != LINGQU_OBJECT_REF_MAGIC ||
+        first.layout_version != LINGQU_OBJECT_REF_LAYOUT_VERSION ||
+        first.object_kind != MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT ||
+        first.state != LINGQU_OBJECT_STATE_COMMITTED_WIRE || first.flags != 0 ||
+        first.owner_entity != expected_owner_node ||
+        first.producer_entity != expected_owner_node ||
+        first.object_version == 0 || first.key_hash != expected_key_hash ||
+        first.payload_bytes != MEM_SERVICE_OBMM_MODEL_TOKEN_RESULT_BYTES ||
+        first.payload_offset > slot->region.len ||
+        first.payload_bytes > slot->region.len - first.payload_offset) {
+        return false;
+    }
+    *reference_out = first;
+    return true;
 }
 
 bool mem_service_model_refresh_remote_metadata(

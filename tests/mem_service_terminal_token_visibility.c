@@ -90,6 +90,43 @@ static void publish(uint64_t step, uint64_t token)
     memcpy(exported + sizeof(*payload), words, sizeof(words));
 }
 
+static void publish_reference(uint64_t step, uint32_t owner_node)
+{
+    struct mem_service_cluster_payload *payload = (void *)exported;
+    struct mem_service_record *record = &payload->records[0];
+    struct lingqu_object_ref_wire reference = {0};
+    char key[sizeof(record->key)];
+    uint64_t offset;
+    size_t key_len;
+
+    snprintf(key,
+             sizeof(key),
+             "tokens/fixture/decode-step%" PRIu64,
+             step);
+    key_len = strlen(key);
+    reference.magic = LINGQU_OBJECT_REF_MAGIC;
+    reference.layout_version = LINGQU_OBJECT_REF_LAYOUT_VERSION;
+    reference.object_kind = MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT;
+    reference.state = LINGQU_OBJECT_STATE_COMMITTED_WIRE;
+    reference.owner_entity = owner_node;
+    reference.producer_entity = owner_node;
+    reference.object_version = record->version ? record->version : 1;
+    reference.key_hash = lingqu_object_ref_key_hash(key, key_len);
+    reference.payload_offset = record->object_backing_offset;
+    reference.payload_bytes = record->object_backing_len;
+    reference.payload_checksum = record->object_payload_checksum;
+    offset = MEM_SERVICE_OBMM_TOKEN_REFERENCE_OFFSET +
+             (reference.key_hash % MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOTS) *
+                 MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES;
+    assert(offset <= region_bytes);
+    assert(MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES <=
+           region_bytes - offset);
+    memcpy(exported + offset, &reference, sizeof(reference));
+    memcpy(exported + offset + sizeof(reference),
+           &reference,
+           sizeof(reference));
+}
+
 static int read_token(uint64_t step, uint64_t *token)
 {
     struct mem_service_obmm_range_flow_request request = {
@@ -124,7 +161,44 @@ int main(int argc, char **argv)
     publish(1, 22);
     sync_calls = 0;
 
-    if (strcmp(argv[1], "record_by_key") == 0) {
+    if (strcmp(argv[1], "reference_remote") == 0 ||
+        strcmp(argv[1], "reference_duplicate_mismatch") == 0 ||
+        strcmp(argv[1], "reference_wrong_key") == 0) {
+        struct lingqu_object_ref_wire reference;
+        const char *key = strcmp(argv[1], "reference_wrong_key") == 0 ?
+                              "tokens/fixture/decode-step0" :
+                              "tokens/fixture/decode-step1";
+
+        publish_reference(1, 1);
+        if (strcmp(argv[1], "reference_duplicate_mismatch") == 0) {
+            uint64_t key_hash = lingqu_object_ref_key_hash(
+                "tokens/fixture/decode-step1",
+                strlen("tokens/fixture/decode-step1"));
+            uint64_t offset = MEM_SERVICE_OBMM_TOKEN_REFERENCE_OFFSET +
+                              (key_hash %
+                               MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOTS) *
+                                  MEM_SERVICE_OBMM_TOKEN_REFERENCE_SLOT_BYTES;
+
+            exported[offset + sizeof(reference) +
+                     offsetof(struct lingqu_object_ref_wire, payload_checksum)] ^=
+                1;
+        }
+        memset(&reference, 0, sizeof(reference));
+        success = mem_service_model_refresh_terminal_token_reference(
+            &runtime, &runtime.slots[1], 1, key, &reference);
+        assert(success == (strcmp(argv[1], "reference_remote") == 0));
+        if (success) {
+            assert(reference.payload_checksum ==
+                   ((struct mem_service_cluster_payload *)exported)
+                       ->records[0]
+                       .object_payload_checksum);
+        }
+        assert(sync_calls == 1U);
+        printf("case=%s status=ok sync_calls=%u\n", argv[1], sync_calls);
+        free(imported);
+        free(exported);
+        return 0;
+    } else if (strcmp(argv[1], "record_by_key") == 0) {
         struct mem_service_record record;
 
         memset(&record, 0, sizeof(record));

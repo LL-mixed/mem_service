@@ -3259,7 +3259,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "bool mem_service_model_refresh_remote_record_by_key(",
             cluster_read,
         )
-        self.assertIn(
+        self.assertNotIn(
             "mem_service_model_refresh_remote_record_by_key(",
             range_wait_flow,
         )
@@ -3283,7 +3283,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "bool mem_service_model_refresh_remote_record_at_obmm_object_backing(",
             cluster_read,
         )
-        self.assertIn(
+        self.assertNotIn(
             "mem_service_model_refresh_remote_record_at_obmm_object_backing(",
             range_wait_flow,
         )
@@ -3314,7 +3314,7 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn(
-            "MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS 5000L",
+            "MEM_SERVICE_MODEL_TOKEN_REFERENCE_POLL_MS 250L",
             range_wait_flow,
         )
         self.assertIn(
@@ -3330,19 +3330,30 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             range_wait_flow,
         )
         self.assertIn(
-            "token_record_recovery_owner = cluster_node_count - 1U",
+            "token_reference_probe_owner = cluster_node_count - 1U",
             range_wait_flow,
         )
-        self.assertIn("if (!token_record_resolved)", range_wait_flow)
+        self.assertIn(
+            "mem_service_model_refresh_terminal_token_reference(",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "mem_service_model_publish_terminal_token_reference(",
+            terminal_flow,
+        )
+        self.assertIn("validation=durable_object_ref", range_wait_flow)
+        self.assertNotIn("if (!token_record_resolved)", range_wait_flow)
         self.assertNotIn("runtime_token_recovery_candidate", range_wait_flow)
         self.assertNotIn("runtime_token_record_unresolved", range_wait_flow)
         self.assertLess(
             range_wait_flow.index("mem_service_pop_ingress_desc(rt, owner_idx"),
-            range_wait_flow.index("if (mem_service_model_recover_token_desc("),
+            range_wait_flow.index(
+                "if (mem_service_model_refresh_terminal_token_reference("
+            ),
         )
-        self.assertIn("next_token_record_recovery_ms = 0", range_wait_flow)
+        self.assertIn("next_token_reference_probe_ms = 0", range_wait_flow)
         self.assertIn(
-            "(uint32_t)owner_idx != terminal_record_recovery_owner",
+            "(uint32_t)owner_idx != terminal_reference_probe_owner",
             range_wait_flow,
         )
         self.assertIn("mem_service_ack_obmm_object_desc_to", range_wait_flow)
