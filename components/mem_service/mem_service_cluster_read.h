@@ -58,6 +58,17 @@ bool mem_service_model_refresh_remote_record_by_obmm_object_backing(
     uint32_t checksum_cookie,
     struct mem_service_record *resolved_out);
 
+bool mem_service_model_refresh_remote_record_at_obmm_object_backing(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    uint32_t record_locator,
+    enum mem_service_record_kind record_kind,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint32_t checksum_cookie,
+    struct mem_service_record *resolved_out);
+
 bool mem_service_slot_find_record_by_obmm_object_backing(
     const struct mem_service_cluster_slot *slot,
     enum mem_service_record_kind record_kind,

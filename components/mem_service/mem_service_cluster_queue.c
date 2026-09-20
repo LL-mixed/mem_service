@@ -466,10 +466,11 @@ int mem_service_push_obmm_object_descs(struct mem_service_cluster_runtime *rt,
     return 0;
 }
 
-int mem_service_try_push_obmm_object_desc_to(
+static int mem_service_try_push_obmm_object_desc_to_with_region_id(
     struct mem_service_cluster_runtime *rt,
     uint32_t target_node,
     uint32_t payload_kind,
+    uint32_t region_id,
     uint64_t payload_offset,
     uint64_t payload_len,
     uint64_t checksum,
@@ -499,7 +500,7 @@ int mem_service_try_push_obmm_object_desc_to(
     desc.seq = ((uint64_t)epoch << 48) |
                ((uint64_t)(rt->local_idx + 1) << 32) |
                (payload_offset & 0xffffffffULL);
-    desc.region_id = payload_kind;
+    desc.region_id = region_id;
     desc.payload_len = (uint32_t)payload_len;
     desc.payload_offset = payload_offset;
     desc.cookie = (uint32_t)(checksum ^ (checksum >> 32));
@@ -517,6 +518,39 @@ int mem_service_try_push_obmm_object_desc_to(
         return 1;
     }
     return rc == 0 ? 0 : -1;
+}
+
+int mem_service_try_push_obmm_object_desc_to(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t target_node,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint64_t checksum,
+    uint16_t epoch)
+{
+    return mem_service_try_push_obmm_object_desc_to_with_region_id(
+        rt, target_node, payload_kind, payload_kind, payload_offset,
+        payload_len, checksum, epoch);
+}
+
+int mem_service_try_push_obmm_record_desc_to(
+    struct mem_service_cluster_runtime *rt,
+    uint32_t target_node,
+    uint32_t payload_kind,
+    uint32_t record_locator,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint64_t checksum,
+    uint16_t epoch)
+{
+    if (record_locator == 0 ||
+        record_locator > MEM_SERVICE_CLUSTER_MAX_RECORDS) {
+        return -1;
+    }
+    return mem_service_try_push_obmm_object_desc_to_with_region_id(
+        rt, target_node, payload_kind, record_locator, payload_offset,
+        payload_len, checksum, epoch);
 }
 
 static bool mem_service_object_ack_matches(const struct obmm_desc *ack,

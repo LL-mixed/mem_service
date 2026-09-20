@@ -171,6 +171,41 @@ int main(int argc, char **argv)
         free(imported);
         free(exported);
         return 0;
+    } else if (strcmp(argv[1], "record_at_backing") == 0 ||
+               strcmp(argv[1], "record_at_backing_changed_publication") == 0 ||
+               strcmp(argv[1], "record_at_backing_wrong_locator") == 0) {
+        struct mem_service_record record;
+        const struct mem_service_record *published =
+            &((struct mem_service_cluster_payload *)exported)->records[0];
+        uint32_t cookie =
+            (uint32_t)(published->object_payload_checksum ^
+                       (published->object_payload_checksum >> 32));
+        uint32_t locator =
+            strcmp(argv[1], "record_at_backing_wrong_locator") == 0 ? 2U : 1U;
+
+        memset(&record, 0, sizeof(record));
+        change_publication =
+            strcmp(argv[1], "record_at_backing_changed_publication") == 0;
+        success = mem_service_model_refresh_remote_record_at_obmm_object_backing(
+            &runtime,
+            &runtime.slots[1],
+            locator,
+            MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
+            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+            published->object_backing_offset,
+            published->object_backing_len,
+            cookie,
+            &record);
+        assert(success == (locator == 1U && !change_publication));
+        if (success) {
+            assert(record.kind == MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT);
+            assert(record.object_backing_len == sizeof(uint64_t) * 8U);
+        }
+        assert(sync_calls == (locator == 1U ? 3U : 1U));
+        printf("case=%s status=ok sync_calls=%u\n", argv[1], sync_calls);
+        free(imported);
+        free(exported);
+        return 0;
     } else if (strcmp(argv[1], "stale_import") == 0) {
         success = true;
     } else if (strcmp(argv[1], "local") == 0) {

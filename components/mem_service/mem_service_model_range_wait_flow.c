@@ -544,9 +544,10 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
 
                 memset(&token_record, 0, sizeof(token_record));
                 record_ready =
-                    mem_service_model_refresh_remote_record_by_obmm_object_backing(
+                    mem_service_model_refresh_remote_record_at_obmm_object_backing(
                         rt,
                         owner_slot,
+                        token_desc.region_id,
                         MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
                         MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
                         token_desc.payload_offset,
@@ -558,16 +559,19 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                         printf("[mem_service] gap model_range_forward="
                                "runtime_token_descriptor_resolution_failed"
                                " local=node%u source=node%u"
+                               " record_locator=%u"
                                " desc_offset=0x%016" PRIx64
                                " desc_bytes=%u desc_cookie=0x%08" PRIx32
                                "\n",
                                local_node + 1U,
                                source_node + 1U,
+                               token_desc.region_id,
                                token_desc.payload_offset,
                                token_desc.payload_len,
                                token_desc.cookie);
                         token_resolution_reported = true;
                     }
+                    token_desc_found = false;
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
                 }
