@@ -441,8 +441,7 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
             expected_epoch = 1;
         }
         token_record_recovery_owner = cluster_node_count - 1U;
-        next_token_record_recovery_ms =
-            obmm_now_ms() - MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS;
+        next_token_record_recovery_ms = 0;
         deadline = wait_enter_ms + mem_service_qwen3_runtime_range_wait_ms();
         while (obmm_now_ms() < deadline) {
             bool probe_token_record =
@@ -473,22 +472,6 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                     mem_service_activate_remote_slot(rt, owner_idx) != 0) {
                     continue;
                 }
-                if (!token_desc_found && probe_token_record &&
-                    (uint32_t)owner_idx == token_record_recovery_owner) {
-                    if (mem_service_model_recover_token_desc(
-                            rt,
-                            (uint32_t)owner_idx,
-                            token_result_key,
-                            expected_epoch,
-                            &token_record,
-                            &token_desc)) {
-                        source_node = (uint32_t)owner_idx;
-                        token_desc_found = true;
-                        token_record_resolved = true;
-                        token_resolution = "object_record";
-                        break;
-                    }
-                }
                 if (owner_idx != rt->local_idx &&
                     rt->ingress_queues[owner_idx]) {
                     uint32_t ingress_drained = 0;
@@ -516,6 +499,22 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                                local_node + 1U,
                                owner_idx + 1U,
                                ingress_drained);
+                    }
+                }
+                if (!token_desc_found && probe_token_record &&
+                    (uint32_t)owner_idx == token_record_recovery_owner) {
+                    if (mem_service_model_recover_token_desc(
+                            rt,
+                            (uint32_t)owner_idx,
+                            token_result_key,
+                            expected_epoch,
+                            &token_record,
+                            &token_desc)) {
+                        source_node = (uint32_t)owner_idx;
+                        token_desc_found = true;
+                        token_record_resolved = true;
+                        token_resolution = "object_record";
+                        break;
                     }
                 }
             }
