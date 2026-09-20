@@ -561,6 +561,7 @@ bool mem_service_model_refresh_remote_record_by_key(
     uint64_t records_offset =
         offsetof(struct mem_service_cluster_payload, records);
     uint64_t records_len;
+    size_t key_len;
     uint16_t i;
 
     if (!rt || !slot || !slot->region.addr || !key || !resolved_out) {
@@ -568,6 +569,10 @@ bool mem_service_model_refresh_remote_record_by_key(
     }
     if (slot->is_local) {
         return mem_service_slot_find_record(slot, key, resolved_out);
+    }
+    key_len = strnlen(key, sizeof(((struct mem_service_record *)0)->key));
+    if (key_len == sizeof(((struct mem_service_record *)0)->key)) {
+        return false;
     }
     if (!mem_service_model_refresh_remote_payload(rt, slot, 0,
                                                   records_offset)) {
@@ -602,8 +607,8 @@ bool mem_service_model_refresh_remote_record_by_key(
         mem_service_copy_from_mapped_volatile(&record,
                                               mapped_bytes + record_offset,
                                               sizeof(record));
-        if (!record.in_use ||
-            strncmp(record.key, key, sizeof(record.key)) != 0) {
+        if (!record.in_use || record.key[key_len] != '\0' ||
+            memcmp(record.key, key, key_len) != 0) {
             continue;
         }
         if (!mem_service_model_refresh_remote_payload(rt, slot, 0,

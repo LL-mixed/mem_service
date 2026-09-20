@@ -416,7 +416,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         uint64_t checksum;
         bool token_input_found = false;
         bool token_desc_found = false;
-        bool token_resolution_diagnosed = false;
+        bool token_record_resolved = false;
+        bool token_resolution_reported = false;
         const char *token_resolution = "descriptor";
 
         if (mem_service_cluster_runtime_require(rt) != 0) {
@@ -443,13 +444,6 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
         next_token_record_recovery_ms =
             obmm_now_ms() - MEM_SERVICE_MODEL_TOKEN_RECORD_RECOVERY_POLL_MS;
         deadline = wait_enter_ms + mem_service_qwen3_runtime_range_wait_ms();
-        printf("[mem_service] stage model_range_forward="
-               "runtime_token_input_wait_begin local=node%u step=%" PRIu64
-               " epoch=%u expected_key=%s\n",
-               local_node + 1U,
-               decode_step - 1U,
-               expected_epoch,
-               token_result_key);
         while (obmm_now_ms() < deadline) {
             bool probe_token_record =
                 mem_service_model_record_recovery_due(
@@ -490,43 +484,9 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                             &token_desc)) {
                         source_node = (uint32_t)owner_idx;
                         token_desc_found = true;
+                        token_record_resolved = true;
                         token_resolution = "object_record";
                         break;
-                    }
-                    if (!token_resolution_diagnosed &&
-                        rt->slots[owner_idx].region.addr) {
-                        const struct mem_service_cluster_payload *payload =
-                            (const struct mem_service_cluster_payload *)
-                                rt->slots[owner_idx].region.addr;
-                        uint16_t record_idx;
-
-                        printf("[mem_service] gap model_range_forward="
-                               "runtime_token_record_recovery_miss"
-                               " local=node%u source=node%u expected_key=%s"
-                               " metadata_seq=%u metadata_done=%u"
-                               " metadata_records=%u\n",
-                               local_node + 1U,
-                               owner_idx + 1U,
-                               token_result_key,
-                               payload->publish_seq,
-                               payload->publish_done_seq,
-                               payload->record_count);
-                        for (record_idx = 0;
-                             record_idx < payload->record_count &&
-                             record_idx < MEM_SERVICE_CLUSTER_MAX_RECORDS;
-                             ++record_idx) {
-                            const struct mem_service_record *record =
-                                &payload->records[record_idx];
-
-                            printf("[mem_service] gap model_range_forward="
-                                   "runtime_token_recovery_candidate"
-                                   " source=node%u record=%u kind=%u key=%s\n",
-                                   owner_idx + 1U,
-                                   record_idx,
-                                   (unsigned int)record->kind,
-                                   record->key);
-                        }
-                        token_resolution_diagnosed = true;
                     }
                 }
                 if (owner_idx != rt->local_idx &&
@@ -578,77 +538,56 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                 activate_ms += (uint64_t)(obmm_now_ms() - activate_start_ms);
             }
             owner_slot = &rt->slots[source_node];
-            memset(&token_record, 0, sizeof(token_record));
-            {
+            if (!token_record_resolved) {
                 long metadata_start_ms = obmm_now_ms();
                 struct mem_service_cluster_payload_compact_summary compact;
                 struct mem_service_cluster_payload_header seen;
+                bool metadata_ready;
+                bool summary_ready = false;
+                bool record_ready = false;
 
+                memset(&token_record, 0, sizeof(token_record));
                 memset(&compact, 0, sizeof(compact));
                 memset(&seen, 0, sizeof(seen));
-                if (!owner_slot->region.addr ||
-                    !mem_service_model_refresh_remote_metadata(rt,
-                                                               owner_slot) ||
-                    !mem_service_try_read_stable_compact_summary_region(owner_slot,
-                                                                  &compact,
-                                                                  &seen) ||
-                    !mem_service_slot_find_record_by_obmm_object_backing(
-                        owner_slot,
-                        MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
-                        MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
-                        token_desc.payload_offset,
-                        token_desc.payload_len,
-                        token_desc.cookie,
-                        &token_record)) {
-                    if (!token_resolution_diagnosed && owner_slot->region.addr) {
-                        const struct mem_service_cluster_payload *payload =
-                            (const struct mem_service_cluster_payload *)
-                                owner_slot->region.addr;
-                        uint16_t record_idx;
-
+                metadata_ready = owner_slot->region.addr &&
+                    mem_service_model_refresh_remote_metadata(rt, owner_slot);
+                if (metadata_ready) {
+                    summary_ready =
+                        mem_service_try_read_stable_compact_summary_region(
+                            owner_slot, &compact, &seen);
+                }
+                if (summary_ready) {
+                    record_ready =
+                        mem_service_slot_find_record_by_obmm_object_backing(
+                            owner_slot,
+                            MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT,
+                            MEM_SERVICE_OBMM_KIND_MODEL_TOKEN_RESULT,
+                            token_desc.payload_offset,
+                            token_desc.payload_len,
+                            token_desc.cookie,
+                            &token_record);
+                }
+                if (!record_ready) {
+                    if (!token_resolution_reported) {
                         printf("[mem_service] gap model_range_forward="
-                               "runtime_token_record_unresolved local=node%u"
-                               " source=node%u desc_kind=%u"
-                               " desc_offset=0x%016" PRIx64
+                               "runtime_token_descriptor_resolution_failed"
+                               " local=node%u source=node%u"
+                               " metadata_ready=%u summary_ready=%u"
+                               " publish_seq=%u publish_done_seq=%u"
+                               " record_count=%u desc_offset=0x%016" PRIx64
                                " desc_bytes=%u desc_cookie=0x%08" PRIx32
-                               " metadata_seq=%u metadata_done=%u"
-                               " metadata_records=%u\n",
+                               "\n",
                                local_node + 1U,
                                source_node + 1U,
-                               token_desc.flags,
+                               metadata_ready ? 1U : 0U,
+                               summary_ready ? 1U : 0U,
+                               seen.publish_seq,
+                               seen.publish_done_seq,
+                               seen.record_count,
                                token_desc.payload_offset,
                                token_desc.payload_len,
-                               token_desc.cookie,
-                               payload->publish_seq,
-                               payload->publish_done_seq,
-                               payload->record_count);
-                        for (record_idx = 0;
-                             record_idx < payload->record_count &&
-                             record_idx < MEM_SERVICE_CLUSTER_MAX_RECORDS;
-                             ++record_idx) {
-                            const struct mem_service_record *record =
-                                &payload->records[record_idx];
-                            uint32_t record_cookie =
-                                (uint32_t)(record->object_payload_checksum ^
-                                           (record->object_payload_checksum >> 32));
-
-                            printf("[mem_service] gap model_range_forward="
-                                   "runtime_token_record_candidate"
-                                   " source=node%u record=%u in_use=%u kind=%u"
-                                   " payload_kind=%u offset=0x%016" PRIx64
-                                   " bytes=%" PRIu64 " cookie=0x%08" PRIx32
-                                   " key=%s\n",
-                                   source_node + 1U,
-                                   record_idx,
-                                   record->in_use ? 1U : 0U,
-                                   (unsigned int)record->kind,
-                                   record->object_payload_kind,
-                                   record->object_backing_offset,
-                                   record->object_backing_len,
-                                   record_cookie,
-                                   record->key);
-                        }
-                        token_resolution_diagnosed = true;
+                               token_desc.cookie);
+                        token_resolution_reported = true;
                     }
                     mem_service_cpu_relax_wait(&relax_attempt);
                     continue;
@@ -1541,24 +1480,12 @@ int mem_service_obmm_service_v0_wait_runtime_range_input_view(
 {
     struct mem_service_obmm_range_flow_request request;
 
-    printf("[mem_service] stage model_range_forward="
-           "runtime_input_wrapper_begin local=node%u step=%" PRIu64 "\n",
-           local_node + 1U,
-           decode_step);
     if (mem_service_qwen3_init_obmm_range_flow_request(&request,
                                                        local_node,
                                                        cluster_node_count) != 0) {
         return -1;
     }
     request.hidden_range_bytes = mem_service_qwen3_handoff_hidden_bytes(decode_step);
-    printf("[mem_service] stage model_range_forward="
-           "runtime_input_wrapper_ready local=node%u step=%" PRIu64
-           " layers=[%u,%u) bytes=%" PRIu64 "\n",
-           local_node + 1U,
-           decode_step,
-           request.local_placement.layer_start,
-           request.local_placement.layer_end,
-           request.hidden_range_bytes);
     return mem_service_range_flow_wait_runtime_input_view(&request,
                                                           local_node,
                                                           cluster_node_count,

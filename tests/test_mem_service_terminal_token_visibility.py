@@ -14,6 +14,7 @@ COMPONENT = ROOT / "components" / "mem_service"
 
 
 @unittest.skipUnless(shutil.which("cc"), "host cc is required")
+@unittest.skipIf(sys.platform == "darwin", "Linux UAPI headers are required")
 class TerminalTokenVisibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

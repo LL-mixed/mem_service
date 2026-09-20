@@ -3297,6 +3297,9 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "token_record_recovery_owner = cluster_node_count - 1U",
             range_wait_flow,
         )
+        self.assertIn("if (!token_record_resolved)", range_wait_flow)
+        self.assertNotIn("runtime_token_recovery_candidate", range_wait_flow)
+        self.assertNotIn("runtime_token_record_unresolved", range_wait_flow)
         self.assertLess(
             range_wait_flow.index("if (mem_service_model_recover_token_desc("),
             range_wait_flow.index("mem_service_pop_ingress_desc(rt, owner_idx"),
