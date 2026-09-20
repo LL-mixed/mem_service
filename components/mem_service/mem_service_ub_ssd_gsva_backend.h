@@ -23,4 +23,12 @@ int mem_service_record_attach_ub_ssd_gsva_backend_ref(
     const struct mem_service_ub_ssd_gsva_block_ref *block_ref,
     bool make_primary_payload);
 
+bool mem_service_record_uses_ub_ssd_gsva_primary_payload(
+    const struct mem_service_record *record);
+
+bool mem_service_ub_ssd_gsva_block_ref_matches_payload(
+    const struct mem_service_ub_ssd_gsva_block_ref *block_ref,
+    uint64_t payload_bytes,
+    uint64_t payload_checksum);
+
 #endif

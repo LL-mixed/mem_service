@@ -1237,8 +1237,8 @@ static int mem_service_obmm_service_v0_wait_runtime_range_input_view_internal(
                ingress_key);
         return -1;
     }
-    if (remote_hidden_output.object_backend_kind ==
-        MEM_SERVICE_OBJECT_BACKEND_UB_SSD_GSVA) {
+    if (mem_service_record_uses_ub_ssd_gsva_primary_payload(
+            &remote_hidden_output)) {
         if (mem_service_model_read_runtime_input_from_ub_ssd_gsva_backend(
                 rt,
                 &remote_hidden_output,

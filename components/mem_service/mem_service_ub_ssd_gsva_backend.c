@@ -31,3 +31,23 @@ int mem_service_record_attach_ub_ssd_gsva_backend_ref(
     }
     return 0;
 }
+
+bool mem_service_record_uses_ub_ssd_gsva_primary_payload(
+    const struct mem_service_record *record)
+{
+    return record &&
+           record->object_backend_kind ==
+               MEM_SERVICE_OBJECT_BACKEND_UB_SSD_GSVA &&
+           record->object_payload_kind ==
+               MEM_SERVICE_PAYLOAD_KIND_UB_SSD_GSVA_BLOCK;
+}
+
+bool mem_service_ub_ssd_gsva_block_ref_matches_payload(
+    const struct mem_service_ub_ssd_gsva_block_ref *block_ref,
+    uint64_t payload_bytes,
+    uint64_t payload_checksum)
+{
+    return block_ref && payload_bytes != 0 &&
+           block_ref->bytes == payload_bytes &&
+           block_ref->checksum64 == payload_checksum;
+}

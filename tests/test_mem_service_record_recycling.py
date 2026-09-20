@@ -3224,6 +3224,10 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "model_range_forward_runtime_input_ub_ssd_gsva_read",
             range_wait_flow,
         )
+        self.assertIn(
+            "mem_service_record_uses_ub_ssd_gsva_primary_payload",
+            range_wait_flow,
+        )
         self.assertIn('resolved_backing = "ub_ssd_gsva"', range_wait_flow)
         self.assertIn(
             'resolved_target = "local_backend_read_buffer"',
@@ -3406,6 +3410,11 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
         self.assertIn(
             "primary_backing=obmm_shmem backend=ub_ssd_gsva status=ok",
+            range_publish_flow,
+        )
+        self.assertIn("commit_integrity_mismatch", range_publish_flow)
+        self.assertIn(
+            "mem_service_ub_ssd_gsva_block_ref_matches_payload",
             range_publish_flow,
         )
         self.assertIn("&completion.committed_ref,\n                                                          false",
@@ -3636,6 +3645,11 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         )
         self.assertIn("model_range_kv_state_ub_ssd_gsva_backend_attach", source)
         self.assertIn("model_range_kv_state_ub_ssd_gsva_read", source)
+        self.assertIn("commit_integrity_mismatch", source)
+        self.assertIn(
+            "mem_service_record_uses_ub_ssd_gsva_primary_payload",
+            source,
+        )
         self.assertIn('resolved_backing = "ub_ssd_gsva"', source)
         self.assertIn(
             'resolved_target = "local_backend_read_buffer"',

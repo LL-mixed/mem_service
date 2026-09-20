@@ -185,6 +185,26 @@ static int mem_service_model_publish_record_to_ub_ssd_gsva_backend(
                decode_step);
         return -1;
     }
+    if (!mem_service_ub_ssd_gsva_block_ref_matches_payload(
+            &completion.committed_ref,
+            record->object_backing_len,
+            record->object_payload_checksum)) {
+        printf("[mem_service] stage %s_ub_ssd_gsva_backend_attach"
+               " key=%s key_hash=0x%016" PRIx64 " step=%" PRIu64
+               " status=not_attached reason=commit_integrity_mismatch"
+               " expected_bytes=%" PRIu64 " committed_bytes=%" PRIu64
+               " expected_checksum=0x%016" PRIx64
+               " committed_checksum=0x%016" PRIx64 "\n",
+               stage_name,
+               record->key,
+               key_hash,
+               decode_step,
+               record->object_backing_len,
+               completion.committed_ref.bytes,
+               record->object_payload_checksum,
+               completion.committed_ref.checksum64);
+        return 0;
+    }
     if (mem_service_record_attach_ub_ssd_gsva_backend_ref(record,
                                                           record->object_owner_node,
                                                           request.target_ssd_cna,
