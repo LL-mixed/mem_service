@@ -1,4 +1,5 @@
 #include "mem_service_internal.h"
+#include "mem_service_cluster_read.h"
 #include "mem_service_cluster_runtime.h"
 #include "mem_service_model_runtime.h"
 
@@ -123,7 +124,23 @@ int main(int argc, char **argv)
     publish(1, 22);
     sync_calls = 0;
 
-    if (strcmp(argv[1], "stale_import") == 0) {
+    if (strcmp(argv[1], "record_by_key") == 0) {
+        struct mem_service_record record;
+
+        memset(&record, 0, sizeof(record));
+        assert(mem_service_model_refresh_remote_record_by_key(
+            &runtime,
+            &runtime.slots[1],
+            "tokens/fixture/decode-step1",
+            &record));
+        assert(record.kind == MEM_SERVICE_RECORD_MODEL_TOKEN_RESULT);
+        assert(record.object_backing_len == sizeof(uint64_t) * 8U);
+        assert(sync_calls == 3U);
+        printf("case=%s status=ok sync_calls=%u\n", argv[1], sync_calls);
+        free(imported);
+        free(exported);
+        return 0;
+    } else if (strcmp(argv[1], "stale_import") == 0) {
         success = true;
     } else if (strcmp(argv[1], "local") == 0) {
         runtime.node_count = 1;

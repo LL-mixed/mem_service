@@ -3247,6 +3247,18 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             self.assertIn(helper, terminal_flow)
             self.assertNotIn(f"static bool {helper}(", range_wait_flow)
             self.assertNotIn(f"static bool {helper}(", terminal_flow)
+        self.assertIn(
+            "mem_service_model_refresh_remote_record_by_key",
+            cluster_read_header,
+        )
+        self.assertIn(
+            "bool mem_service_model_refresh_remote_record_by_key(",
+            cluster_read,
+        )
+        self.assertIn(
+            "mem_service_model_refresh_remote_record_by_key(",
+            range_wait_flow,
+        )
         self.assertIn("mem_service_sync_remote_range(", cluster_read)
         self.assertIn(
             "offsetof(struct mem_service_cluster_payload, records)",
@@ -3272,6 +3284,22 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
         self.assertIn(
             "mem_service_model_record_recovery_due",
             range_wait_flow,
+        )
+        self.assertIn(
+            "ingress_drained < MEM_SERVICE_CLUSTER_QUEUE_DEPTH",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "runtime_token_ingress_drain_bounded",
+            range_wait_flow,
+        )
+        self.assertIn(
+            "token_record_recovery_owner = cluster_node_count - 1U",
+            range_wait_flow,
+        )
+        self.assertLess(
+            range_wait_flow.index("if (mem_service_model_recover_token_desc("),
+            range_wait_flow.index("mem_service_pop_ingress_desc(rt, owner_idx"),
         )
         self.assertIn(
             "(uint32_t)owner_idx != terminal_record_recovery_owner",

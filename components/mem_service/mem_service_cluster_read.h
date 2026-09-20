@@ -42,6 +42,12 @@ bool mem_service_slot_find_record(
     const char *key,
     struct mem_service_record *resolved_out);
 
+bool mem_service_model_refresh_remote_record_by_key(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    const char *key,
+    struct mem_service_record *resolved_out);
+
 bool mem_service_slot_find_record_by_obmm_object_backing(
     const struct mem_service_cluster_slot *slot,
     enum mem_service_record_kind record_kind,
