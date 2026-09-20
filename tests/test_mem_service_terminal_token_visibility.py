@@ -45,7 +45,8 @@ class TerminalTokenVisibilityTests(unittest.TestCase):
             if not key.startswith(("SIM_", "MEM_SERVICE_"))
         }
         for case in (
-            "record_by_key", "stale_import", "local", "checksum",
+            "record_by_key", "record_by_backing",
+            "record_by_backing_changed_publication", "stale_import", "local", "checksum",
             "metadata_sync_failure",
             "payload_sync_failure", "torn_publication", "changed_publication",
             "record_bounds", "metadata_bounds", "address_overflow",

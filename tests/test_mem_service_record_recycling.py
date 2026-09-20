@@ -3259,6 +3259,24 @@ class MemServiceRecordRecyclingTests(unittest.TestCase):
             "mem_service_model_refresh_remote_record_by_key(",
             range_wait_flow,
         )
+        self.assertIn(
+            "mem_service_model_refresh_remote_record_by_obmm_object_backing",
+            cluster_read_header,
+        )
+        self.assertIn(
+            "bool mem_service_model_refresh_remote_record_by_obmm_object_backing(",
+            cluster_read,
+        )
+        self.assertIn(
+            "mem_service_model_refresh_remote_record_by_obmm_object_backing(",
+            range_wait_flow,
+        )
+        self.assertNotIn(
+            "runtime_token_descriptor_resolution_failed\"\n"
+            "                               \" local=node%u source=node%u\"\n"
+            "                               \" metadata_ready=",
+            range_wait_flow,
+        )
         self.assertIn("mem_service_sync_remote_range(", cluster_read)
         self.assertIn(
             "offsetof(struct mem_service_cluster_payload, records)",

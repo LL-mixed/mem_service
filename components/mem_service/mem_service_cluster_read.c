@@ -664,6 +664,102 @@ static bool mem_service_record_matches_obmm_object_backing(
     return record_cookie == checksum_cookie;
 }
 
+bool mem_service_model_refresh_remote_record_by_obmm_object_backing(
+    const struct mem_service_cluster_runtime *rt,
+    const struct mem_service_cluster_slot *slot,
+    enum mem_service_record_kind record_kind,
+    uint32_t payload_kind,
+    uint64_t payload_offset,
+    uint64_t payload_len,
+    uint32_t checksum_cookie,
+    struct mem_service_record *resolved_out)
+{
+    struct mem_service_cluster_payload_header header;
+    struct mem_service_cluster_payload_header confirm;
+    const volatile uint8_t *mapped_bytes;
+    uint64_t records_offset =
+        offsetof(struct mem_service_cluster_payload, records);
+    uint64_t records_len;
+    uint16_t i;
+
+    if (!rt || !slot || !slot->region.addr || !resolved_out) {
+        return false;
+    }
+    if (slot->is_local) {
+        return mem_service_slot_find_record_by_obmm_object_backing(
+            slot, record_kind, payload_kind, payload_offset, payload_len,
+            checksum_cookie, resolved_out);
+    }
+    if (!mem_service_model_refresh_remote_payload(rt, slot, 0,
+                                                  records_offset)) {
+        return false;
+    }
+    mapped_bytes = (const volatile uint8_t *)slot->region.addr;
+    mem_service_copy_from_mapped_volatile(&header, mapped_bytes,
+                                          sizeof(header));
+    if (header.publish_seq == 0 ||
+        header.publish_seq != header.publish_done_seq ||
+        header.magic != MEM_SERVICE_CLUSTER_PAYLOAD_MAGIC ||
+        header.version != MEM_SERVICE_CLUSTER_PAYLOAD_VERSION ||
+        header.record_count == 0 ||
+        header.record_count > MEM_SERVICE_CLUSTER_MAX_RECORDS) {
+        return false;
+    }
+    records_len = (uint64_t)header.record_count *
+                  sizeof(struct mem_service_record);
+    if (records_offset > slot->region.len ||
+        records_len > slot->region.len - records_offset) {
+        return false;
+    }
+    for (i = 0; i < header.record_count; ++i) {
+        struct mem_service_record record;
+        uint64_t record_offset = records_offset +
+                                 (uint64_t)i * sizeof(record);
+
+        if (!mem_service_model_refresh_remote_payload(rt, slot, record_offset,
+                                                      sizeof(record))) {
+            return false;
+        }
+        mem_service_copy_from_mapped_volatile(&record,
+                                              mapped_bytes + record_offset,
+                                              sizeof(record));
+        if (!mem_service_record_matches_obmm_object_backing(
+                &record, record_kind, payload_kind, payload_offset,
+                payload_len, checksum_cookie)) {
+            continue;
+        }
+        if (!mem_service_model_refresh_remote_payload(rt, slot, 0,
+                                                      sizeof(confirm))) {
+            return false;
+        }
+        mem_service_copy_from_mapped_volatile(&confirm, mapped_bytes,
+                                              sizeof(confirm));
+        if (confirm.publish_seq != header.publish_seq ||
+            confirm.publish_done_seq != header.publish_done_seq ||
+            confirm.magic != header.magic ||
+            confirm.version != header.version ||
+            confirm.record_count != header.record_count) {
+            return false;
+        }
+        *resolved_out = record;
+        return true;
+    }
+    if (!mem_service_model_refresh_remote_payload(rt, slot, 0,
+                                                  sizeof(confirm))) {
+        return false;
+    }
+    mem_service_copy_from_mapped_volatile(&confirm, mapped_bytes,
+                                          sizeof(confirm));
+    if (confirm.publish_seq != header.publish_seq ||
+        confirm.publish_done_seq != header.publish_done_seq ||
+        confirm.magic != header.magic ||
+        confirm.version != header.version ||
+        confirm.record_count != header.record_count) {
+        return false;
+    }
+    return false;
+}
+
 bool mem_service_slot_find_record_by_obmm_object_backing(
     const struct mem_service_cluster_slot *slot,
     enum mem_service_record_kind record_kind,
