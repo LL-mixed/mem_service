@@ -28,6 +28,7 @@ OP_RELEASE_OBJECT = 0x72
 OP_RETIRE_OBJECT = 0x73
 OP_INSPECT_ALLOCATION = 0x74
 OP_ALLOCATION_STATS = 0x75
+OP_UNKNOWN = 0xFF
 
 STATUS_OK = 0
 STATUS_NOT_FOUND = 1
@@ -456,7 +457,9 @@ class MemServiceAllocationOpsTests(unittest.TestCase):
     def test_unknown_op_and_bad_checksum_over_unix(self):
         proc = self._start_unix_daemon()
         try:
-            status, _, _ = _wire_exchange_unix(self.socket, 0x7F, b"", request_id=7)
+            status, _, _ = _wire_exchange_unix(
+                self.socket, OP_UNKNOWN, b"", request_id=7
+            )
             self.assertEqual(status, STATUS_UNSUPPORTED)
 
             payload = b"key=obj-a\nidempotency_key=alloc-cs\nsize_bytes=4096\ncapabilities=1\n"
