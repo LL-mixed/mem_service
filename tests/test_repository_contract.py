@@ -26,7 +26,7 @@ class RepositoryContractTests(unittest.TestCase):
             "common/obmm_common.h":
                 "1bcb8627b9712c274256e63b0abe20f51ebad8db2bbbeea089b602f7fd62dc2c",
             "kernel_ub/include/uapi/ub/gsva.h":
-                "65a58c319f284e920ce5fdaab5b7d695a1dfec037ececaeb85b69f896f6e42ab",
+                "32ab84e0ffb68c3fa9eb78912fdda1892eb014cc6a8ae696a047aa45d2097a4b",
             "kernel_ub/include/uapi/ub/obmm.h":
                 "a39b3cf927c7a2c3a385dd44a39b2cb880075aa53090bb0b85ee01108be801b9",
         }

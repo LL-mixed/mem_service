@@ -25,7 +25,7 @@ and run the full standalone and downstream contract tests.
 ## kernel_ub UAPI sources
 
 - Source repository: `ub_sim` submodule `guest-linux/kernel_ub`
-- Source revision: `d9492ed29eb84bc47f6016323118b18c6ea6cd8c`
+- Source revision: `dd07fe43c50de0432a9d363bcb6205ff29abab7e`
 - Checked GSVA export v1 adds a fixed-width 120-byte request and a separate
   ioctl. The copied headers match this tested kernel revision. Kernels that
   lack the new ioctl cannot provide managed-worker allocation receipts.
@@ -34,7 +34,7 @@ and run the full standalone and downstream contract tests.
   ledger v2 requires this interface before creating its first persistent frame.
 - `kernel_ub/include/uapi/ub/gsva.h`
   - SHA-256:
-    `65a58c319f284e920ce5fdaab5b7d695a1dfec037ececaeb85b69f896f6e42ab`
+    `32ab84e0ffb68c3fa9eb78912fdda1892eb014cc6a8ae696a047aa45d2097a4b`
 - `kernel_ub/include/uapi/ub/obmm.h`
   - SHA-256:
     `a39b3cf927c7a2c3a385dd44a39b2cb880075aa53090bb0b85ee01108be801b9`
